@@ -359,6 +359,16 @@ if start or (auto_scan and should_auto_run):
                     if "↑" in r["Сигнал"]:   st.session_state.stats["up"] += 1
                     elif "↓" in r["Сигнал"]: st.session_state.stats["down"] += 1
                     table_box.dataframe(pd.DataFrame(hits), use_container_width=True, hide_index=True)
+                    # ── Мгновенное оповещение в Telegram ──
+                    icon = "🟢" if "↑" in r["Сигнал"] else ("🔴" if "↓" in r["Сигнал"] else "🔥")
+                    tg_msg = (
+                        f"📈 <b>СИГНАЛ НАЙДЕН!</b>\n"
+                        f"{icon} <b>{r['Тикер']}</b>  ${r['Цена $']}\n"
+                        f"Сигнал: {r['Сигнал']}  {r['Пробой %']}\n"
+                        f"Объём ×{r['Объём ×']}  | Канал: {r['Ширина канала']}\n"
+                        f"⏰ {datetime.now().strftime('%H:%M ET')}"
+                    )
+                    send_telegram(tg_msg)
             except Exception:
                 pass
             st.session_state.stats["checked"] = op
@@ -371,14 +381,10 @@ if start or (auto_scan and should_auto_run):
 
     if hits:
         if auto_scan and notify_sound: play_sound()
-        lines = ["📈 <b>BREAKOUT SCREENER — найдены сигналы!</b>", ""]
-        for h in hits:
-            icon = "🟢" if "↑" in h["Сигнал"] else ("🔴" if "↓" in h["Сигнал"] else "🔥")
-            opt  = " | опционы ✅" if h.get("Опционы") == "✅" else ""
-            lines.append(f"{icon} <b>{h['Тикер']}</b>  ${h['Цена $']}  {h['Пробой %']}  | Объём ×{h['Объём ×']}  | {h['Ширина канала']}{opt}")
-        lines += ["", f"⏰ {datetime.now().strftime('%H:%M ET')}", f"📊 Проверено: {len(scan_list)}"]
-        ok = send_telegram("\n".join(lines))
-        st.toast("📱 Отправлено в Telegram!", icon="✅") if ok else st.toast("⚠️ Telegram недоступен", icon="⚠️")
+        # Итоговое сообщение в Telegram
+        summary = f"✅ Сканирование завершено · Найдено: {len(hits)} · Проверено: {len(scan_list)} · {datetime.now().strftime('%H:%M ET')}"
+        send_telegram(summary)
+        st.toast("📱 Итог отправлен в Telegram!", icon="✅")
         st.success(f"🚨 НАЙДЕНО {len(hits)} СИГНАЛОВ!")
     else:
         if auto_scan: st.toast(f"Сигналов нет ({datetime.now().strftime('%H:%M')})")
