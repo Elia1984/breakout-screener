@@ -10,8 +10,8 @@ import subprocess
 import platform
 
 # ── TELEGRAM CONFIG ─────────────────────────────────────────────
-TELEGRAM_TOKEN   = "8916080259:AAEc_ibNzkl9ndcWGMxFSEFQ9CmmlJaFUsl"
-TELEGRAM_CHAT_ID = "716517029"
+TELEGRAM_TOKEN   = st.secrets["TELEGRAM_TOKEN"]
+TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
 
 def send_telegram(message):
     """Отправляет сообщение в Telegram."""
