@@ -225,12 +225,13 @@ def analyze(ticker_info, cfg, session="regular"):
     else:
         sig_type, change_pct = None, 0.0
 
-    # ── Объём: среднее за 14 свечей канала ──────────────────────
+    # ── Объём: сравниваем с МАКСИМАЛЬНЫМ из 14 свечей канала ────
     canal_vols = volumes.iloc[start: end + 1]
     canal_vols = canal_vols[canal_vols > 0]
     if len(canal_vols) < 10: return None
-    avg_vol = float(canal_vols.mean())
-    vol_mult = last_vol / avg_vol if avg_vol > 0 else 0
+    max_vol_14 = float(canal_vols.max())
+    avg_vol    = float(canal_vols.mean())
+    vol_mult   = last_vol / max_vol_14 if max_vol_14 > 0 else 0
     if vol_mult < cfg["min_vol"]: return None
 
     # Нет пробоя но объём вырос — ранний сигнал
