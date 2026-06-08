@@ -4,19 +4,21 @@ import pandas as pd
 import requests
 import time
 from datetime import datetime
-import threading
 import subprocess
 import platform
 
 # ── TELEGRAM CONFIG ─────────────────────────────────────────────
-TELEGRAM_TOKEN   = st.secrets["TELEGRAM_TOKEN"]
-TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
+try:
+    TELEGRAM_TOKEN   = st.secrets["TELEGRAM_TOKEN"]
+    TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
+except Exception:
+    TELEGRAM_TOKEN   = ""
+    TELEGRAM_CHAT_ID = ""
 
 def send_telegram(message):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
-        resp = requests.post(url, json=payload, timeout=10)
+        resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
         return resp.status_code == 200
     except Exception:
         return False
@@ -31,15 +33,16 @@ with st.sidebar:
     st.subheader("⚙️ Параметры")
     if "СТРОГИЙ" in mode:
         default_vol, default_channel, default_breakout = 5.0, 8.0, 15.0
-        st.info("Канал 15 свечей · ширина ≤8% · объём ×5+ · пробой ≥15%")
+        st.info("Канал 14 свечей · ширина ≤8% · объём ×5+ · пробой ≥15%")
     else:
         default_vol, default_channel, default_breakout = 2.0, 15.0, 5.0
-        st.info("Канал 15 свечей · ширина ≤15% · объём ×2+ · пробой ≥5%")
+        st.info("Канал 14 свечей · ширина ≤15% · объём ×2+ · пробой ≥5%")
     st.divider()
     st.subheader("💲 Цена акции")
-    max_price_up = st.number_input("Макс. цена BREAKOUT ↑ ($)", 0.001, 500.0, 10.0, 1.0)
-    max_price_dn = st.number_input("Макс. цена BREAKDOWN ↓ ($)", 0.001, 500.0, 100.0, 5.0)
-    min_days = 15
+    max_price_up = st.number_input("Макс. цена BREAKOUT ↑ ($)", 0.001, 500.0, 20.0, 1.0)
+    max_price_dn = st.number_input("Макс. цена BREAKDOWN ↓ ($)", 0.001, 500.0, 20.0, 1.0)
+    # Канал: строго 14 свечей до сегодня
+    CANAL_DAYS = 14
     min_vol = st.select_slider("Мин. рост объёма", options=[2.0, 3.0, 5.0, 7.0, 10.0], value=default_vol, format_func=lambda x: f"× {x}")
     channel_pct = st.slider("Ширина канала (%)", 2, 25, int(default_channel))
     min_breakout = st.slider("Мин. пробой (%)", 2, 50, int(default_breakout))
@@ -55,10 +58,16 @@ with st.sidebar:
     signal_type = st.selectbox("Тип сигнала", ["ALL", "BREAKOUT ↑", "BREAKDOWN ↓", "ОБЪЁМ 🔥"], index=0)
     st.divider()
     st.subheader("🎯 Опционы")
-    options_filter = st.checkbox("Только акции с опционами (для BREAKDOWN ↓)", value=False)
+    options_filter = st.checkbox(
+        "Только акции с опционами",
+        value=False,
+        help="Галочка = только с опционами. Для BREAKDOWN - покупка PUT")
     if options_filter:
-        st.info("⚠️ Замедляет сканирование ~0.5 сек на акцию")
-    max_tickers = st.slider("Акций за прогон", 50, 5000, 500, 50)
+        st.info("Замедляет ~0.5 сек/акция")
+    max_tickers = st.slider("Акций за прогон", 50, 10000, 500, 50)
+    st.caption("Всего акций на рынке ~8000-10000. Используй страницы чтобы охватить все.")
+    page_num = st.number_input("Страница (порция акций)", min_value=1, max_value=20, value=1, step=1,
+                               help="Страница 1 = первые 500, Страница 2 = следующие 500, и т.д.")
     st.divider()
     st.subheader("⏰ Авто-сканирование")
     auto_scan = st.toggle("Включить авто-поиск", value=False)
@@ -66,13 +75,13 @@ with st.sidebar:
     notify_sound = st.checkbox("🔔 Звук на компьютере", value=True, disabled=not auto_scan)
     st.success("📱 Telegram @breakout_mak_bot подключён!")
     st.divider()
-    st.caption("Данные: Yahoo Finance · 30 торговых свечей · канал 15 дней")
+    st.caption("Данные: Yahoo Finance · 14 свечей канал · без гэпов")
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_tickers(exchange="ALL", max_price_up=10.0, max_price_dn=100.0):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json", "Referer": "https://www.nasdaq.com/",
     }
     exchanges = ["nasdaq", "nyse", "amex"] if exchange == "ALL" else [exchange.lower()]
@@ -85,8 +94,14 @@ def get_tickers(exchange="ALL", max_price_up=10.0, max_price_dn=100.0):
             rows = r.json().get("data", {}).get("table", {}).get("rows", []) or []
             for row in rows:
                 sym = (row.get("symbol") or "").strip()
-                if not sym or not sym.isalpha() or len(sym) > 5 or sym in seen:
+                if not sym or not sym.isalpha() or sym in seen:
                     continue
+                # Убираем фонды:
+                # - 5 букв = взаимные фонды на NASDAQ
+                # - оканчивается на X = точно фонд (VFINX, FXAIX)
+                # - оканчивается на IX, EX, AX = фонды
+                if len(sym) >= 5: continue
+                if sym.endswith(("X", "IX", "EX")): continue
                 try:
                     price = float((row.get("lastsale") or "").replace("$", "").strip())
                     if price <= 0 or price > max_price_global:
@@ -102,17 +117,23 @@ def get_tickers(exchange="ALL", max_price_up=10.0, max_price_dn=100.0):
             'ATER','BBIG','IMPP','SHIP','AMMO','ZFOX','MULN','DPRO','GOVX','CIDM',
             'BIVI','AULT','NOVN','PBTS','ATNF','MIST','QNRX','MOXC','HYMC','CLNN',
             'SPHL','NAKD','PROG','BOXL','FFIE','MARK','WISA','VBIV','GLYC','ZKIN',
-            'BNGO','NKLA','BLNK','GOEV','RIDE','WKHS','SOLO','CLOV','WISH','MVIS',
-            'AMC','BB','NOK','SIRI','LCID','RIVN','XPEV','LI','NIO','TLRY']
+            'BNGO','NKLA','BLNK','GOEV','RIDE','WKHS','SOLO','CLOV','WISH','MVIS']
         tickers = [{"ticker": t, "exchange": "US", "name": "", "price_api": 0} for t in fallback]
     return tickers
+
+
+def has_options(ticker):
+    try:
+        return len(yf.Ticker(ticker).options) > 0
+    except Exception:
+        return False
 
 
 def fetch_history(ticker, session="regular"):
     try:
         if session == "regular":
             df = yf.download(ticker, period="45d", interval="1d", auto_adjust=True, progress=False, timeout=10)
-            if df is None or len(df) < 15: return None
+            if df is None or len(df) < 16: return None
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
             return df.dropna(subset=["Close", "Volume"])
         else:
@@ -131,44 +152,71 @@ def fetch_history(ticker, session="regular"):
         return None
 
 
-def has_options(ticker):
-    try:
-        return len(yf.Ticker(ticker).options) > 0
-    except Exception:
-        return False
 
-
-def find_flat_base(closes, min_days, channel_pct):
+def check_no_gaps(closes, opens, canal_days, channel_pct):
+    """
+    Проверяет что в канале нет гэпов.
+    Гэп = открытие свечи отличается от закрытия предыдущей более чем на channel_pct%.
+    """
     n = len(closes)
-    if n < min_days + 1: return None
-    end = n - 2
-    start = end - min_days + 1
-    if start < 0: return None
-    window = closes[start: end + 1]
-    if len(window) < min_days: return None
-    mn = float(window.min())
-    mx = float(window.max())
-    if mn <= 0: return None
-    if (mx - mn) / mn * 100 > channel_pct: return None
-    return (start, end, mn, mx)
+    # Проверяем последние canal_days+1 свечей (включая сегодняшнюю)
+    start = n - canal_days - 1
+    if start < 1: return False
+    for i in range(start + 1, n):
+        prev_close = float(closes.iloc[i-1])
+        curr_open  = float(opens.iloc[i])
+        if prev_close <= 0: return False
+        gap_pct = abs(curr_open - prev_close) / prev_close * 100
+        if gap_pct > channel_pct:
+            return False  # есть гэп — пропускаем акцию
+    return True
 
 
 def analyze(ticker_info, cfg, session="regular"):
     df = fetch_history(ticker_info["ticker"], session)
     if df is None: return None
+
     closes  = df["Close"].squeeze()
     volumes = df["Volume"].squeeze()
+    opens   = df["Open"].squeeze()
+
+    n = len(closes)
+    if n < cfg["canal_days"] + 2: return None
+
     last_price = float(closes.iloc[-1])
     last_vol   = float(volumes.iloc[-1])
     if last_price <= 0: return None
 
-    channel = find_flat_base(closes, cfg["min_days"], cfg["channel_pct"])
-    if channel is None: return None
-    start_idx, end_idx, ch_min, ch_max = channel
-    accum_days = end_idx - start_idx + 1
+    # ── Строго: последние canal_days свечей ДО сегодня ──────────
+    canal_days = cfg["canal_days"]  # = 14
+    end   = n - 2          # вчера (индекс)
+    start = end - canal_days + 1   # 14 дней назад
 
-    breakout_pct  = (last_price - ch_max) / ch_max * 100
-    breakdown_pct = (ch_min - last_price) / ch_min * 100
+    if start < 0: return None
+
+    canal_closes = closes.iloc[start: end + 1]
+    if len(canal_closes) < canal_days: return None
+
+    ch_min = float(canal_closes.min())
+    ch_max = float(canal_closes.max())
+    if ch_min <= 0: return None
+
+    # Ширина канала
+    canal_width = (ch_max - ch_min) / ch_min * 100
+    if canal_width > cfg["channel_pct"]: return None
+
+    # ── Проверка гэпов ───────────────────────────────────────────
+    if not check_no_gaps(closes, opens, canal_days, cfg["channel_pct"]):
+        return None
+
+    # ── Сегодняшняя свеча ────────────────────────────────────────
+    today_close = float(closes.iloc[-1])
+    today_open  = float(opens.iloc[-1])
+    today_body  = abs(today_close - today_open) / today_open * 100 if today_open > 0 else 0
+
+    # Пробой вверх/вниз
+    breakout_pct  = (today_close - ch_max) / ch_max * 100
+    breakdown_pct = (ch_min - today_close) / ch_min * 100
 
     if breakout_pct >= cfg["min_breakout"]:
         sig_type, change_pct = "BREAKOUT ↑", round(breakout_pct, 1)
@@ -177,12 +225,12 @@ def analyze(ticker_info, cfg, session="regular"):
     else:
         sig_type, change_pct = None, 0.0
 
-    # Объём за последние 15 торговых свечей
-    prev_vols = volumes.iloc[-16:-1]
-    prev_vols = prev_vols[prev_vols > 0]
-    if len(prev_vols) < 10: return None
-    avg_vol_15 = float(prev_vols.mean())
-    vol_mult = last_vol / avg_vol_15 if avg_vol_15 > 0 else 0
+    # ── Объём: среднее за 14 свечей канала ──────────────────────
+    canal_vols = volumes.iloc[start: end + 1]
+    canal_vols = canal_vols[canal_vols > 0]
+    if len(canal_vols) < 10: return None
+    avg_vol = float(canal_vols.mean())
+    vol_mult = last_vol / avg_vol if avg_vol > 0 else 0
     if vol_mult < cfg["min_vol"]: return None
 
     # Нет пробоя но объём вырос — ранний сигнал
@@ -190,26 +238,32 @@ def analyze(ticker_info, cfg, session="regular"):
         sig_type = "ОБЪЁМ 🔥"
         change_pct = 0.0
 
+    # Фильтры
     if cfg["signal_type"] != "ALL" and cfg["signal_type"] != sig_type: return None
-    if "↑" in sig_type and last_price > cfg["max_price_up"]: return None
-    if "↓" in sig_type and last_price > cfg["max_price_dn"]: return None
-    if cfg.get("options_only") and "↓" in sig_type:
+    if sig_type == "BREAKOUT ↑" and last_price > cfg["max_price_up"]: return None
+    if sig_type == "BREAKDOWN ↓" and last_price > cfg["max_price_dn"]: return None
+    if cfg.get("options_only") and sig_type == "BREAKDOWN ↓":
         if not has_options(ticker_info["ticker"]): return None
 
-    today_open = float(df["Open"].iloc[-1])
-    today_body = abs(last_price - today_open) / today_open * 100
+    # Строгий режим: тело свечи должно быть заметным
     if cfg["strict"] and today_body < 3: return None
 
+    pct_display = f"+{change_pct}%" if sig_type == "BREAKOUT ↑" else (f"-{change_pct}%" if sig_type == "BREAKDOWN ↓" else "—")
+
     return {
-        "Тикер": ticker_info["ticker"], "Название": ticker_info.get("name","")[:30],
-        "Биржа": ticker_info.get("exchange",""), "Цена $": round(last_price, 4),
-        "Сигнал": sig_type,
-        "Пробой %": f"+{change_pct}%" if sig_type == "BREAKOUT ↑" else (f"-{change_pct}%" if sig_type == "BREAKDOWN ↓" else "—"),
-        "Объём ×": round(vol_mult, 1), "Дней в канале": accum_days,
-        "Канал": f"${round(ch_min,4)} – ${round(ch_max,4)}",
-        "Тело свечи %": round(today_body, 1),
-        "Опционы": "✅" if cfg.get("options_only") else "—",
-        "Сессия": session.upper(), "Время": datetime.now().strftime("%H:%M:%S"),
+        "Тикер":         ticker_info["ticker"],
+        "Название":      ticker_info.get("name","")[:25],
+        "Биржа":         ticker_info.get("exchange",""),
+        "Цена $":        round(last_price, 4),
+        "Сигнал":        sig_type,
+        "Пробой %":      pct_display,
+        "Объём ×":       round(vol_mult, 1),
+        "Ширина канала": f"{round(canal_width,1)}%",
+        "Канал":         f"${round(ch_min,4)}–${round(ch_max,4)}",
+        "Тело свечи %":  round(today_body, 1),
+        "Опционы":       "✅" if cfg.get("options_only") else "—",
+        "Сессия":        session.upper(),
+        "Время":         datetime.now().strftime("%H:%M:%S"),
     }
 
 
@@ -221,17 +275,18 @@ def play_sound():
         pass
 
 
+# ── MAIN UI ─────────────────────────────────────────────────────
 if "auto_last_run" not in st.session_state: st.session_state.auto_last_run = None
-if "auto_count" not in st.session_state: st.session_state.auto_count = 0
-if "stats" not in st.session_state:
-    st.session_state.stats = {"checked": 0, "up": 0, "down": 0}
+if "auto_count"    not in st.session_state: st.session_state.auto_count = 0
+if "stats"         not in st.session_state:
+    st.session_state.stats   = {"checked": 0, "up": 0, "down": 0}
     st.session_state.results = []
 
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Проверено", st.session_state.stats["checked"])
+m1.metric("Проверено",       st.session_state.stats["checked"])
 m2.metric("↑ Пробоев вверх", st.session_state.stats["up"])
-m3.metric("↓ Пробоев вниз", st.session_state.stats["down"])
-m4.metric("Всего найдено", len(st.session_state.results))
+m3.metric("↓ Пробоев вниз",  st.session_state.stats["down"])
+m4.metric("Всего найдено",   len(st.session_state.results))
 st.divider()
 
 if auto_scan:
@@ -244,8 +299,8 @@ if auto_scan:
     else:
         t2.info("🕐 Ещё не запускался")
     t3.info(f"🔄 Прогонов: **{st.session_state.auto_count}**")
-    should_auto_run = st.session_state.auto_last_run is None or \
-        (now_ts - st.session_state.auto_last_run).total_seconds() >= auto_interval * 60
+    should_auto_run = (st.session_state.auto_last_run is None or
+        (now_ts - st.session_state.auto_last_run).total_seconds() >= auto_interval * 60)
     st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
 else:
     should_auto_run = False
@@ -256,32 +311,40 @@ with btn_col:
     start = st.button("🔍 Сканировать", type="primary", use_container_width=True)
 with info_col:
     minute = datetime.now().hour * 60 + datetime.now().minute
-    if 4*60 <= minute < 9*60+30: st.info("🌅 Pre-Market активен (4:00–9:30 ET)")
+    if   4*60 <= minute < 9*60+30:  st.info("🌅 Pre-Market активен (4:00–9:30 ET)")
     elif 9*60+30 <= minute <= 16*60: st.success("🟢 Основная сессия открыта (9:30–16:00 ET)")
-    elif 16*60 < minute <= 20*60: st.info("🌙 Post-Market активен (16:00–20:00 ET)")
-    else: st.warning("💤 Рынок закрыт — данные по последнему закрытию")
+    elif 16*60 < minute <= 20*60:   st.info("🌙 Post-Market активен (16:00–20:00 ET)")
+    else:                            st.warning("💤 Рынок закрыт")
 
 if start or (auto_scan and should_auto_run):
     cfg = {
         "max_price_up": max_price_up, "max_price_dn": max_price_dn,
-        "min_days": min_days, "min_vol": min_vol, "channel_pct": channel_pct,
+        "canal_days":   CANAL_DAYS,
+        "min_vol":      min_vol, "channel_pct": channel_pct,
         "min_breakout": min_breakout, "signal_type": signal_type,
-        "strict": "СТРОГИЙ" in mode, "options_only": options_filter,
-        "sessions": [s for s, a in [("premarket", sess_premarket), ("regular", sess_regular), ("postmarket", sess_postmarket)] if a],
+        "strict":       "СТРОГИЙ" in mode,
+        "options_only":  options_filter,         "sessions":     [s for s, a in [("premarket", sess_premarket), ("regular", sess_regular), ("postmarket", sess_postmarket)] if a],
     }
     st.session_state.results = []
-    st.session_state.stats = {"checked": 0, "up": 0, "down": 0}
+    st.session_state.stats   = {"checked": 0, "up": 0, "down": 0}
+
     with st.spinner("Загружаем список тикеров..."):
         all_tickers = get_tickers(exchange, max_price_up, max_price_dn)
-    scan_list = all_tickers[:max_tickers]
-    st.info(f"Тикеров: **{len(all_tickers)}** | Проверяем: **{len(scan_list)}**")
-    progress = st.progress(0)
-    status = st.empty()
+    # Постраничный выбор акций
+    page_start = (page_num - 1) * max_tickers
+    page_end   = page_start + max_tickers
+    scan_list  = all_tickers[page_start:page_end]
+    total_pages = (len(all_tickers) + max_tickers - 1) // max_tickers
+    st.info(f"Всего тикеров: **{len(all_tickers)}** | Страница **{page_num}/{total_pages}** | Проверяем: **{len(scan_list)}** (#{page_start+1}–{min(page_end,len(all_tickers))})")
+
+    progress  = st.progress(0)
+    status    = st.empty()
     table_box = st.empty()
     hits = []
-    sessions = cfg.get("sessions", ["regular"])
-    total_ops = len(scan_list) * len(sessions)
+    sessions   = cfg.get("sessions", ["regular"])
+    total_ops  = len(scan_list) * len(sessions)
     op = 0
+
     for session in sessions:
         sess_label = {"premarket":"🌅 Pre-Market","regular":"📈 Дневная","postmarket":"🌙 Post-Market"}[session]
         for i, t in enumerate(scan_list):
@@ -292,7 +355,7 @@ if start or (auto_scan and should_auto_run):
                 r = analyze(t, cfg, session)
                 if r:
                     hits.append(r)
-                    if "↑" in r["Сигнал"]: st.session_state.stats["up"] += 1
+                    if "↑" in r["Сигнал"]:   st.session_state.stats["up"] += 1
                     elif "↓" in r["Сигнал"]: st.session_state.stats["down"] += 1
                     table_box.dataframe(pd.DataFrame(hits), use_container_width=True, hide_index=True)
             except Exception:
@@ -300,7 +363,7 @@ if start or (auto_scan and should_auto_run):
             st.session_state.stats["checked"] = op
             time.sleep(0.15)
 
-    st.session_state.results = hits
+    st.session_state.results    = hits
     st.session_state.auto_last_run = datetime.now()
     st.session_state.auto_count += 1
     progress.progress(1.0)
@@ -310,7 +373,8 @@ if start or (auto_scan and should_auto_run):
         lines = ["📈 <b>BREAKOUT SCREENER — найдены сигналы!</b>", ""]
         for h in hits:
             icon = "🟢" if "↑" in h["Сигнал"] else ("🔴" if "↓" in h["Сигнал"] else "🔥")
-            lines.append(f"{icon} <b>{h['Тикер']}</b>  ${h['Цена $']}  {h['Пробой %']}  | Объём ×{h['Объём ×']}  | {h['Дней в канале']} дн.")
+            opt  = " | опционы ✅" if h.get("Опционы") == "✅" else ""
+            lines.append(f"{icon} <b>{h['Тикер']}</b>  ${h['Цена $']}  {h['Пробой %']}  | Объём ×{h['Объём ×']}  | {h['Ширина канала']}{opt}")
         lines += ["", f"⏰ {datetime.now().strftime('%H:%M ET')}", f"📊 Проверено: {len(scan_list)}"]
         ok = send_telegram("\n".join(lines))
         st.toast("📱 Отправлено в Telegram!", icon="✅") if ok else st.toast("⚠️ Telegram недоступен", icon="⚠️")
