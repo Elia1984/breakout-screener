@@ -6,6 +6,7 @@ import time
 from datetime import datetime
 import subprocess
 import platform
+from datetime import datetime, timedelta
 
 # ── TELEGRAM CONFIG ─────────────────────────────────────────────
 try:
@@ -13,7 +14,43 @@ try:
     TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
 except Exception:
     TELEGRAM_TOKEN   = ""
-    TELEGRAM_CHAT_ID = ""
+    TELEGRAM_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "")
+
+# ── ALPACA CONFIG ───────────────────────────────────────────────
+try:
+    ALPACA_KEY    = st.secrets["ALPACA_KEY"]
+    ALPACA_SECRET = st.secrets["ALPACA_SECRET"]
+except Exception:
+    ALPACA_KEY    = ""
+    ALPACA_SECRET = ""
+ALPACA_BASE   = "https://data.alpaca.markets"
+ALPACA_HEADERS = {
+    "APCA-API-KEY-ID":     ALPACA_KEY,
+    "APCA-API-SECRET-KEY": ALPACA_SECRET,
+}
+
+def fetch_alpaca_bars(ticker, days=45):
+    """Загружает дневные свечи через Alpaca — без задержки."""
+    try:
+        end   = datetime.now().strftime("%Y-%m-%d")
+        start = (datetime.now() - timedelta(days=days+10)).strftime("%Y-%m-%d")
+        url = (f"{ALPACA_BASE}/v2/stocks/{ticker}/bars"
+               f"?timeframe=1Day&start={start}&end={end}&limit=60&feed=iex")
+        resp = requests.get(url, headers=ALPACA_HEADERS, timeout=10)
+        if resp.status_code != 200:
+            return None
+        bars = resp.json().get("bars", [])
+        if not bars or len(bars) < 16:
+            return None
+        import pandas as pd
+        df = pd.DataFrame(bars)
+        df.rename(columns={"o":"Open","h":"High","l":"Low","c":"Close","v":"Volume","t":"Date"}, inplace=True)
+        df["Date"] = pd.to_datetime(df["Date"])
+        df.set_index("Date", inplace=True)
+        return df[["Open","High","Low","Close","Volume"]].dropna()
+    except Exception:
+        return None
+
 
 def send_telegram(message):
     try:
@@ -75,7 +112,7 @@ with st.sidebar:
     notify_sound = st.checkbox("🔔 Звук на компьютере", value=True, disabled=not auto_scan)
     st.success("📱 Telegram @breakout_mak_bot подключён!")
     st.divider()
-    st.caption("Данные: Yahoo Finance · 14 свечей канал · без гэпов")
+    st.caption("Данные: Alpaca (реальное время) + Yahoo Finance (резерв) · 14 свечей · без гэпов")
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -132,6 +169,11 @@ def has_options(ticker):
 def fetch_history(ticker, session="regular"):
     try:
         if session == "regular":
+            # Сначала пробуем Alpaca (реальное время, без задержки)
+            df = fetch_alpaca_bars(ticker, days=45)
+            if df is not None and len(df) >= 16:
+                return df
+            # Fallback: Yahoo Finance (15 мин задержка)
             df = yf.download(ticker, period="45d", interval="1d", auto_adjust=True, progress=False, timeout=10)
             if df is None or len(df) < 16: return None
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
@@ -229,10 +271,10 @@ def analyze(ticker_info, cfg, session="regular"):
     canal_vols = volumes.iloc[start: end + 1]
     canal_vols = canal_vols[canal_vols > 0]
     if len(canal_vols) < 10: return None
-    max_vol_14 = float(canal_vols.max())
-    avg_vol    = float(canal_vols.mean())
+    max_vol_14 = float(canal_vols.max())  # самый большой объём из 14 свечей
+    avg_vol    = float(canal_vols.mean())  # среднее (для отображения)
     vol_mult   = last_vol / max_vol_14 if max_vol_14 > 0 else 0
-    if vol_mult < cfg["min_vol"]: return None
+    if vol_mult < cfg["min_vol"]: return None  # сегодня > макс×2?
 
     # Нет пробоя но объём вырос — ранний сигнал
     if sig_type is None:
@@ -524,3 +566,4 @@ if st.session_state.results:
                     st.error(f"Ошибка API: {resp.status_code}")
             except Exception as e:
                 st.error(f"Ошибка: {e}")
+
