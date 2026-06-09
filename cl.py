@@ -401,3 +401,126 @@ elif st.session_state.results:
     st.download_button("⬇️ Скачать CSV", data=csv, file_name=f"breakout_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
 else:
     st.info("👆 Нажми «Сканировать» для начала поиска")
+
+# ── AI АНАЛИЗ НАЙДЕННЫХ АКЦИЙ ────────────────────────────────────
+if st.session_state.results:
+    st.divider()
+    st.subheader("🤖 AI Анализ найденных акций")
+    st.caption("Claude AI анализирует новости, соцсети и технику — и выдаёт рекомендации")
+
+    if st.button("🔍 Запустить AI анализ", type="secondary", use_container_width=True):
+        hits = st.session_state.results[:10]  # берём до 10 акций
+        tickers_list = [h["Тикер"] for h in hits]
+        tickers_str = ", ".join(tickers_list)
+
+        prompt = f"""Ты опытный трейдер и финансовый аналитик. 
+Скринер нашёл следующие акции с паттерном пробоя канала: {tickers_str}
+
+Данные по каждой акции:
+{chr(10).join([f"- {h['Тикер']}: цена ${h['Цена $']}, сигнал {h['Сигнал']}, объём ×{h['Объём ×']}, ширина канала {h['Ширина канала']}" for h in hits])}
+
+Сделай глубокий анализ каждой акции:
+1. Найди и изучи последние новости по каждой компании
+2. Оцени настроения в соцсетях (Reddit, Twitter/X, StockTwits)
+3. Сделай технический анализ
+4. Оцени фундаментальные показатели
+5. Учти объём и силу пробоя
+
+На основе ПОЛНОГО анализа выбери и представь ровно 4 акции:
+
+🟢 ЗЕЛЁНАЯ — самая сильная, лучший потенциал роста, низкий риск
+🟡 ЖЁЛТАЯ — хорошая акция, умеренный риск  
+🔴 КРАСНАЯ — интересная но рискованная
+⚪ БЕЛАЯ — самый сильный новостной фон (важная новость, контракт, испытание, одобрение FDA и т.д.)
+
+Для каждой акции дай:
+- Краткое описание компании
+- Ключевые новости и катализаторы
+- Технический анализ (поддержка, сопротивление, тренд)
+- Настроения в соцсетях
+- Конкретную рекомендацию и целевую цену
+- Риски
+
+Отвечай на русском языке. Будь конкретным и детальным."""
+
+        with st.spinner("🤖 Claude AI анализирует акции... Это займёт 30-60 секунд"):
+            try:
+                resp = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"Content-Type": "application/json"},
+                    json={
+                        "model": "claude-sonnet-4-20250514",
+                        "max_tokens": 3000,
+                        "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+                        "messages": [{"role": "user", "content": prompt}]
+                    },
+                    timeout=120
+                )
+
+                if resp.status_code == 200:
+                    data = resp.json()
+                    # Extract text from response
+                    analysis_text = ""
+                    for block in data.get("content", []):
+                        if block.get("type") == "text":
+                            analysis_text += block.get("text", "")
+
+                    if analysis_text:
+                        # Parse and display recommendations
+                        st.divider()
+                        st.markdown("### 📊 Рекомендации AI")
+
+                        # Display color-coded sections
+                        col1, col2 = st.columns(2)
+
+                        with col1:
+                            if "🟢" in analysis_text or "ЗЕЛЁНАЯ" in analysis_text:
+                                with st.container():
+                                    st.markdown("#### 🟢 Лучшая акция")
+                                    green_start = max(analysis_text.find("🟢"), analysis_text.find("ЗЕЛЁНАЯ"))
+                                    yellow_start = max(analysis_text.find("🟡"), analysis_text.find("ЖЁЛТАЯ"))
+                                    if yellow_start > green_start:
+                                        green_text = analysis_text[green_start:yellow_start]
+                                    else:
+                                        green_text = analysis_text[green_start:green_start+800]
+                                    st.success(green_text[:600])
+
+                            if "🔴" in analysis_text or "КРАСНАЯ" in analysis_text:
+                                with st.container():
+                                    st.markdown("#### 🔴 Рискованная")
+                                    red_start = max(analysis_text.find("🔴"), analysis_text.find("КРАСНАЯ"))
+                                    white_start = max(analysis_text.find("⚪"), analysis_text.find("БЕЛАЯ"))
+                                    if white_start > red_start:
+                                        red_text = analysis_text[red_start:white_start]
+                                    else:
+                                        red_text = analysis_text[red_start:red_start+800]
+                                    st.error(red_text[:600])
+
+                        with col2:
+                            if "🟡" in analysis_text or "ЖЁЛТАЯ" in analysis_text:
+                                with st.container():
+                                    st.markdown("#### 🟡 Умеренный риск")
+                                    yellow_start = max(analysis_text.find("🟡"), analysis_text.find("ЖЁЛТАЯ"))
+                                    red_start = max(analysis_text.find("🔴"), analysis_text.find("КРАСНАЯ"))
+                                    if red_start > yellow_start:
+                                        yellow_text = analysis_text[yellow_start:red_start]
+                                    else:
+                                        yellow_text = analysis_text[yellow_start:yellow_start+800]
+                                    st.warning(yellow_text[:600])
+
+                            if "⚪" in analysis_text or "БЕЛАЯ" in analysis_text:
+                                with st.container():
+                                    st.markdown("#### ⚪ Сильный новостной фон")
+                                    white_start = max(analysis_text.find("⚪"), analysis_text.find("БЕЛАЯ"))
+                                    white_text = analysis_text[white_start:white_start+800]
+                                    st.info(white_text[:600])
+
+                        # Full analysis expandable
+                        with st.expander("📄 Полный анализ"):
+                            st.markdown(analysis_text)
+                    else:
+                        st.warning("AI не вернул текст. Попробуй ещё раз.")
+                else:
+                    st.error(f"Ошибка API: {resp.status_code}")
+            except Exception as e:
+                st.error(f"Ошибка: {e}")
