@@ -47,15 +47,15 @@ def secret_or_default(name: str, default: str = "") -> str:
 
 
 # ── TELEGRAM CONFIG ────────────────────────────────────────────────
-# Kept as local fallbacks by user request. Prefer st.secrets when configured.
-TELEGRAM_TOKEN = secret_or_default("TELEGRAM_TOKEN", "8561990969:AAGrJ4Mc6hH1mmpVT_pNqfNt7sIz1mONgv4")
-TELEGRAM_CHAT_ID = secret_or_default("TELEGRAM_CHAT_ID", "716517029")
+# Public-safe: keep real values only in Streamlit secrets, never in source code.
+TELEGRAM_TOKEN = secret_or_default("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = secret_or_default("TELEGRAM_CHAT_ID")
 
 
 # ── ALPACA CONFIG ─────────────────────────────────────────────────
-# Kept as local fallbacks by user request. Prefer st.secrets when configured.
-ALPACA_KEY = secret_or_default("ALPACA_KEY", "PKJU45FE3EI27THY3Z6MSNXEVP")
-ALPACA_SECRET = secret_or_default("ALPACA_SECRET", "GF4UUuyVq1tRuXsn2S4WL66Vh3BrjfeDighy1gVfuhkP")
+# Public-safe: keep real values only in Streamlit secrets, never in source code.
+ALPACA_KEY = secret_or_default("ALPACA_KEY")
+ALPACA_SECRET = secret_or_default("ALPACA_SECRET")
 ALPACA_BASE = "https://data.alpaca.markets"
 ALPACA_HEADERS = {
     "APCA-API-KEY-ID": ALPACA_KEY,
@@ -1117,4 +1117,3 @@ if st.session_state.results:
 
             with tab_full:
                 st.markdown(analysis_text)
-
