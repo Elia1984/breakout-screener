@@ -4,12 +4,11 @@ import html
 import logging
 import os
 import re
-import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -245,9 +244,41 @@ LOGGER = logging.getLogger("accumulation_breakout")
 
 MARKET_TZ = ZoneInfo("America/New_York")
 ALPACA_BASE = "https://data.alpaca.markets"
-REQUEST_DELAY_SEC = 0.04
-DATA_TIMEOUT_SEC = 12
+DATA_TIMEOUT_SEC = 15
 NASDAQ_TIMEOUT_SEC = 20
+BATCH_SIZE = 120
+MAX_BARS_PAGES = 25
+YAHOO_FALLBACK_CAP = 60
+
+SIG_UP = "BREAKOUT_UP"
+SIG_DOWN = "BREAKDOWN"
+SIG_SURGE = "VOLUME_SURGE"
+
+SIGNAL_LABELS = {
+    SIG_UP: "ПРОБОЙ ВВЕРХ",
+    SIG_DOWN: "ПРОБОЙ ВНИЗ",
+    SIG_SURGE: "РАННИЙ ОБЪЁМ В КАНАЛЕ",
+}
+SIGNAL_ICONS = {SIG_UP: "🟢", SIG_DOWN: "🔴", SIG_SURGE: "🔥"}
+
+DISPLAY_COLS = [
+    "Тикер",
+    "Название",
+    "Биржа",
+    "Сигнал",
+    "Цена",
+    "Выход %",
+    "Объём ×",
+    "Объём",
+    "Ср. объём канала",
+    "Ширина канала",
+    "Канал",
+    "Тело свечи %",
+    "Долларовый объём",
+    "Балл",
+    "Источник",
+    "Время",
+]
 
 
 LOCAL_SECRETS_CACHE: dict[str, Any] | None = None
@@ -319,8 +350,10 @@ class ScanConfig:
     min_dollar_volume: int = 250_000
 
     max_gap_pct: float = 8.0
+    max_stale_days: int = 5
     min_price: float = 0.5
     max_price: float = 20.0
+    feed: str = "iex"
 
 
 def now_et() -> datetime:
@@ -331,17 +364,26 @@ def now_et_str(fmt: str = "%H:%M:%S ET") -> str:
     return now_et().strftime(fmt)
 
 
-def parse_price(value: Any) -> float | None:
+def parse_number(value: Any, default: float | None = None) -> float | None:
     if value is None:
-        return None
-    text = str(value).replace("$", "").replace(",", "").strip()
-    if not text or text.upper() in {"N/A", "NA", "NONE", "-"}:
-        return None
+        return default
+    text = str(value).replace("$", "").replace(",", "").replace("%", "").strip()
+    if not text or text.upper() in {"N/A", "NA", "NONE", "-", "—"}:
+        return default
     try:
-        price = float(text)
+        return float(text)
     except ValueError:
-        return None
-    return price if price > 0 else None
+        return default
+
+
+def parse_price(value: Any) -> float | None:
+    price = parse_number(value)
+    return price if price and price > 0 else None
+
+
+def chunks(items: list[Any], size: int) -> Iterator[list[Any]]:
+    for i in range(0, len(items), size):
+        yield items[i : i + size]
 
 
 def normalize_symbol(symbol: str, name: str = "") -> str | None:
@@ -391,7 +433,7 @@ def normalize_ohlcv(df: pd.DataFrame | None, source: str) -> pd.DataFrame | None
     data.rename(columns={col: rename_map.get(str(col), col) for col in data.columns}, inplace=True)
 
     if "Date" in data.columns:
-        data["Date"] = pd.to_datetime(data["Date"], errors="coerce")
+        data["Date"] = pd.to_datetime(data["Date"], errors="coerce", utc=True)
         data.set_index("Date", inplace=True)
 
     required = ["Open", "High", "Low", "Close", "Volume"]
@@ -490,38 +532,58 @@ def get_nasdaq_tickers(exchange: str, max_price: float) -> list[dict[str, Any]]:
 
 # ── DATA SOURCES ──────────────────────────────────────────────────
 @st.cache_data(ttl=60, show_spinner=False)
-def fetch_alpaca_daily(ticker: str, days: int) -> pd.DataFrame | None:
-    if not ALPACA_KEY or not ALPACA_SECRET:
-        return None
+def fetch_alpaca_batch(symbols: tuple[str, ...], days: int, feed: str) -> dict[str, pd.DataFrame]:
+    if not (ALPACA_KEY and ALPACA_SECRET) or not symbols:
+        return {}
 
     end = now_et().date()
-    start = end - timedelta(days=max(40, days * 4))
-    try:
-        resp = requests.get(
-            f"{ALPACA_BASE}/v2/stocks/{ticker}/bars",
-            headers=ALPACA_HEADERS,
-            params={
-                "timeframe": "1Day",
-                "start": start.isoformat(),
-                "end": end.isoformat(),
-                "limit": 120,
-                "feed": "iex",
-                "adjustment": "raw",
-            },
-            timeout=DATA_TIMEOUT_SEC,
-        )
-        if resp.status_code in {401, 403}:
-            LOGGER.warning("Alpaca auth failed for %s: %s", ticker, resp.status_code)
-            return None
-        resp.raise_for_status()
-        bars = resp.json().get("bars", [])
-    except Exception as exc:
-        LOGGER.info("Alpaca failed for %s: %s", ticker, exc)
-        return None
+    start = end - timedelta(days=max(60, days * 4))
+    raw: dict[str, list[dict[str, Any]]] = {}
+    page_token: str | None = None
 
-    if len(bars) < days + 2:
-        return None
-    return normalize_ohlcv(pd.DataFrame(bars), "Alpaca IEX")
+    for _ in range(MAX_BARS_PAGES):
+        params: dict[str, Any] = {
+            "symbols": ",".join(symbols),
+            "timeframe": "1Day",
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "limit": 10000,
+            "feed": feed,
+            "adjustment": "split",
+            "sort": "asc",
+        }
+        if page_token:
+            params["page_token"] = page_token
+
+        try:
+            resp = requests.get(
+                f"{ALPACA_BASE}/v2/stocks/bars",
+                headers=ALPACA_HEADERS,
+                params=params,
+                timeout=DATA_TIMEOUT_SEC,
+            )
+            if resp.status_code in {401, 403}:
+                LOGGER.warning("Alpaca auth failed: %s", resp.status_code)
+                return {}
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as exc:
+            LOGGER.info("Alpaca batch failed: %s", exc)
+            break
+
+        for symbol, bars in (payload.get("bars") or {}).items():
+            raw.setdefault(str(symbol).upper(), []).extend(bars or [])
+
+        page_token = payload.get("next_page_token")
+        if not page_token:
+            break
+
+    out: dict[str, pd.DataFrame] = {}
+    for symbol, bars in raw.items():
+        df = normalize_ohlcv(pd.DataFrame(bars), f"Alpaca {feed.upper()}")
+        if df is not None and len(df) >= days + 2:
+            out[symbol] = df
+    return out
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -546,88 +608,135 @@ def fetch_yahoo_daily(ticker: str, days: int) -> pd.DataFrame | None:
     return normalize_ohlcv(df, "Yahoo Finance")
 
 
-def fetch_history(ticker: str, days: int, source_mode: str) -> pd.DataFrame | None:
-    if source_mode in {"Alpaca first", "Alpaca only"}:
-        df = fetch_alpaca_daily(ticker, days)
-        if df is not None:
-            return df
-        if source_mode == "Alpaca only":
-            return None
+def load_bars(
+    ticker_infos: list[dict[str, Any]],
+    cfg: ScanConfig,
+    source_mode: str,
+    progress_box: Any,
+    status_box: Any,
+) -> dict[str, pd.DataFrame]:
+    symbols = [str(item["ticker"]).upper() for item in ticker_infos]
+    bars: dict[str, pd.DataFrame] = {}
 
-    if source_mode in {"Alpaca first", "Yahoo only"}:
-        return fetch_yahoo_daily(ticker, days)
-    return None
+    use_alpaca = source_mode in {"Alpaca first", "Alpaca only"}
+    use_yahoo = source_mode in {"Alpaca first", "Yahoo only"}
+
+    if use_alpaca:
+        batches = list(chunks(symbols, BATCH_SIZE))
+        for idx, batch in enumerate(batches, start=1):
+            status_box.caption(f"Загружаю Alpaca · пачка {idx}/{len(batches)} · готово: {len(bars)}")
+            bars.update(fetch_alpaca_batch(tuple(batch), cfg.channel_days, cfg.feed))
+            if not use_yahoo:
+                progress_box.progress(idx / max(len(batches), 1))
+            else:
+                progress_box.progress(0.65 * idx / max(len(batches), 1))
+
+    if use_yahoo:
+        missing = symbols if source_mode == "Yahoo only" else [symbol for symbol in symbols if symbol not in bars]
+        if source_mode != "Yahoo only":
+            missing = missing[:YAHOO_FALLBACK_CAP]
+
+        for idx, symbol in enumerate(missing, start=1):
+            status_box.caption(f"Yahoo резерв · {symbol} ({idx}/{len(missing)})")
+            df = fetch_yahoo_daily(symbol, cfg.channel_days)
+            if df is not None:
+                bars[symbol] = df
+            base = 0.65 if use_alpaca else 0.0
+            progress_box.progress(min(1.0, base + (1.0 - base) * idx / max(len(missing), 1)))
+
+    progress_box.progress(0.7)
+    return bars
 
 
 # ── SIGNAL LOGIC ──────────────────────────────────────────────────
-def build_channel(df: pd.DataFrame, cfg: ScanConfig) -> dict[str, float] | None:
+@dataclass(frozen=True)
+class Channel:
+    low: float
+    high: float
+    width_pct: float
+    vol_max: float
+    vol_avg: float
+    avg_dollar_volume: float
+    max_gap_pct: float
+
+
+def build_channel(df: pd.DataFrame, cfg: ScanConfig) -> Channel | None:
     if len(df) < cfg.channel_days + 2:
         return None
 
-    channel = df.iloc[-(cfg.channel_days + 1) : -1].copy()
-    if len(channel) < cfg.channel_days:
+    window = df.iloc[-(cfg.channel_days + 1) : -1].copy()
+    if len(window) < cfg.channel_days:
         return None
 
     if cfg.price_basis == "HIGH_LOW":
-        channel_low = float(channel["Low"].min())
-        channel_high = float(channel["High"].max())
+        channel_low = float(window["Low"].min())
+        channel_high = float(window["High"].max())
     else:
-        channel_low = float(channel["Close"].min())
-        channel_high = float(channel["Close"].max())
+        channel_low = float(window["Close"].min())
+        channel_high = float(window["Close"].max())
 
     if channel_low <= 0 or channel_high <= channel_low:
         return None
 
-    volumes = channel["Volume"][channel["Volume"] > 0]
+    volumes = window["Volume"][window["Volume"] > 0]
     if volumes.empty:
         return None
 
-    width_pct = (channel_high - channel_low) / channel_low * 100
-    return {
-        "low": channel_low,
-        "high": channel_high,
-        "width_pct": width_pct,
-        "vol_max": float(volumes.max()),
-        "vol_avg": float(volumes.mean()),
-        "avg_price": float(channel["Close"].mean()),
-        "avg_dollar_volume": float((channel["Close"] * channel["Volume"]).mean()),
-    }
-
-
-def check_gaps(df: pd.DataFrame, cfg: ScanConfig) -> bool:
-    window = df.iloc[-(cfg.channel_days + 1) :].copy()
     prev_close = window["Close"].shift(1)
-    gaps = (window["Open"] - prev_close).abs() / prev_close * 100
-    gaps = gaps.dropna()
-    if gaps.empty:
-        return False
-    return float(gaps.max()) <= cfg.max_gap_pct
+    gaps = ((window["Open"] - prev_close).abs() / prev_close * 100).dropna()
+    max_gap = float(gaps.max()) if not gaps.empty else 0.0
+
+    return Channel(
+        low=channel_low,
+        high=channel_high,
+        width_pct=(channel_high - channel_low) / channel_low * 100,
+        vol_max=float(volumes.max()),
+        vol_avg=float(volumes.mean()),
+        avg_dollar_volume=float((window["Close"] * window["Volume"]).mean()),
+        max_gap_pct=max_gap,
+    )
 
 
 def score_signal(
-    signal: str,
+    signal_code: str,
     channel_width: float,
     volume_mult: float,
     breakout_pct: float,
-    body_pct: float,
+    max_gap_pct: float,
     cfg: ScanConfig,
 ) -> int:
-    channel_score = max(0.0, min(30.0, (cfg.max_channel_width_pct - channel_width) / cfg.max_channel_width_pct * 30.0))
-    volume_score = max(0.0, min(30.0, (volume_mult / max(cfg.min_volume_mult, 0.1)) * 15.0))
-    breakout_score = max(0.0, min(20.0, abs(breakout_pct) * 2.0))
-    if "VOLUME" in signal or "ОБЪЁМ" in signal:
-        breakout_score = min(breakout_score, 8.0)
-    body_score = max(0.0, min(10.0, body_pct))
-    gap_quality_score = 10.0
-    return int(round(channel_score + volume_score + breakout_score + body_score + gap_quality_score))
+    volume_score = min(45.0, volume_mult / max(cfg.min_volume_mult, 0.1) * 22.5)
+    channel_score = max(
+        0.0,
+        min(25.0, (cfg.max_channel_width_pct - channel_width) / max(cfg.max_channel_width_pct, 0.1) * 25.0),
+    )
+    breakout_score = min(20.0, abs(breakout_pct) * 2.5)
+    if signal_code == SIG_SURGE:
+        breakout_score = min(breakout_score, 6.0)
+    gap_score = max(0.0, min(10.0, (1 - max_gap_pct / max(cfg.max_gap_pct, 0.1)) * 10.0))
+    return int(round(volume_score + channel_score + breakout_score + gap_score))
 
 
-def detect_signal(ticker_info: dict[str, Any], df: pd.DataFrame, cfg: ScanConfig) -> dict[str, Any] | None:
+def detect_signal(
+    ticker_info: dict[str, Any],
+    df: pd.DataFrame,
+    cfg: ScanConfig,
+    today: Any | None = None,
+) -> dict[str, Any] | None:
     if df is None or len(df) < cfg.channel_days + 2:
         return None
 
     df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
     if len(df) < cfg.channel_days + 2:
+        return None
+
+    if today is None:
+        today = now_et().date()
+    try:
+        age_days = (today - df.index[-1].date()).days
+    except Exception:
+        age_days = 0
+    if age_days > cfg.max_stale_days:
         return None
 
     latest = df.iloc[-1]
@@ -642,23 +751,23 @@ def detect_signal(ticker_info: dict[str, Any], df: pd.DataFrame, cfg: ScanConfig
     channel = build_channel(df, cfg)
     if channel is None:
         return None
-    if channel["width_pct"] > cfg.max_channel_width_pct:
+    if channel.width_pct > cfg.max_channel_width_pct:
         return None
-    if channel["vol_avg"] < cfg.min_channel_avg_volume:
+    if channel.vol_avg < cfg.min_channel_avg_volume:
         return None
     if price * latest_volume < cfg.min_dollar_volume:
         return None
-    if not check_gaps(df, cfg):
+    if channel.max_gap_pct > cfg.max_gap_pct:
         return None
 
-    upper = channel["high"] * (1 + cfg.breakout_buffer_pct / 100)
-    lower = channel["low"] * (1 - cfg.breakout_buffer_pct / 100)
+    upper = channel.high * (1 + cfg.breakout_buffer_pct / 100)
+    lower = channel.low * (1 - cfg.breakout_buffer_pct / 100)
 
-    breakout_up_pct = (price - channel["high"]) / channel["high"] * 100
-    breakdown_down_pct = (channel["low"] - price) / channel["low"] * 100
+    breakout_up_pct = (price - channel.high) / channel.high * 100
+    breakdown_down_pct = (channel.low - price) / channel.low * 100
     body_pct = abs(price - latest_open) / latest_open * 100
 
-    volume_ref = channel["vol_max"] if cfg.volume_baseline == "MAX" else channel["vol_avg"]
+    volume_ref = channel.vol_max if cfg.volume_baseline == "MAX" else channel.vol_avg
     if volume_ref <= 0:
         return None
     volume_mult = latest_volume / volume_ref
@@ -666,27 +775,32 @@ def detect_signal(ticker_info: dict[str, Any], df: pd.DataFrame, cfg: ScanConfig
     if not volume_ok:
         return None
 
-    signal = None
+    signal_code = None
     move_pct = 0.0
     if price > upper:
-        signal = "ПРОБОЙ ВВЕРХ"
+        signal_code = SIG_UP
         move_pct = breakout_up_pct
     elif price < lower:
-        signal = "ПРОБОЙ ВНИЗ"
+        signal_code = SIG_DOWN
         move_pct = -breakdown_down_pct
     elif cfg.allow_volume_alert_inside_channel and not cfg.require_price_break:
-        signal = "РАННИЙ ОБЪЁМ В КАНАЛЕ"
+        signal_code = SIG_SURGE
         move_pct = 0.0
 
-    if signal is None:
+    if signal_code is None:
         return None
-    if cfg.directions == "UP" and signal != "ПРОБОЙ ВВЕРХ":
+    if cfg.directions == "UP" and signal_code != SIG_UP:
         return None
-    if cfg.directions == "DOWN" and signal != "ПРОБОЙ ВНИЗ":
+    if cfg.directions == "DOWN" and signal_code != SIG_DOWN:
         return None
 
-    score = score_signal(signal, channel["width_pct"], volume_mult, move_pct, body_pct, cfg)
+    score = score_signal(signal_code, channel.width_pct, volume_mult, move_pct, channel.max_gap_pct, cfg)
+    signal = SIGNAL_LABELS[signal_code]
     return {
+        "_sig": signal_code,
+        "_rvol": volume_mult,
+        "_score": score,
+        "_width": channel.width_pct,
         "Тикер": ticker_info["ticker"],
         "Название": (ticker_info.get("name") or "")[:34],
         "Биржа": ticker_info.get("exchange", ""),
@@ -695,9 +809,9 @@ def detect_signal(ticker_info: dict[str, Any], df: pd.DataFrame, cfg: ScanConfig
         "Выход %": f"{move_pct:+.1f}%" if move_pct else "—",
         "Объём ×": round(volume_mult, 2),
         "Объём": int(latest_volume),
-        "Ср. объём канала": int(channel["vol_avg"]),
-        "Ширина канала": f"{channel['width_pct']:.1f}%",
-        "Канал": f"${channel['low']:.4f}-${channel['high']:.4f}",
+        "Ср. объём канала": int(channel.vol_avg),
+        "Ширина канала": f"{channel.width_pct:.1f}%",
+        "Канал": f"${channel.low:.4f}-${channel.high:.4f}",
         "Тело свечи %": round(body_pct, 1),
         "Долларовый объём": int(price * latest_volume),
         "Балл": score,
@@ -720,17 +834,21 @@ def scan_market(
     st.session_state.stats = {"checked": 0, "signals": 0}
     st.session_state.scan_errors = []
 
+    bars = load_bars(ticker_infos, cfg, source_mode, progress_box, status_box)
+    today = now_et().date()
+
     for idx, ticker_info in enumerate(ticker_infos, start=1):
         ticker = ticker_info["ticker"]
-        progress_box.progress(idx / max(total, 1))
-        status_box.caption(f"Сканирую {ticker} ({idx}/{total}) · найдено: {len(hits)}")
+        progress_box.progress(min(1.0, 0.7 + 0.3 * idx / max(total, 1)))
+        if idx % 50 == 1 or idx == total:
+            status_box.caption(f"Анализирую {idx}/{total} · найдено: {len(hits)}")
 
         try:
-            history = fetch_history(ticker, cfg.channel_days, source_mode)
+            history = bars.get(str(ticker).upper())
             if history is None:
                 st.session_state.stats["checked"] = idx
                 continue
-            row = detect_signal(ticker_info, history, cfg)
+            row = detect_signal(ticker_info, history, cfg, today)
         except Exception as exc:
             LOGGER.exception("Scan failed for %s", ticker)
             remember_error(f"{ticker}: {exc}")
@@ -739,12 +857,11 @@ def scan_market(
         if row:
             hits.append(row)
             st.session_state.stats["signals"] = len(hits)
-            table_box.dataframe(pd.DataFrame(hits), use_container_width=True, hide_index=True)
+            table_box.dataframe(display_frame(hits), use_container_width=True, hide_index=True)
             if send_alerts and should_notify(row):
                 send_telegram(telegram_signal_message(row))
 
         st.session_state.stats["checked"] = idx
-        time.sleep(REQUEST_DELAY_SEC)
 
     return sorted(
         hits,
@@ -776,7 +893,7 @@ def send_telegram(message: str) -> bool:
 
 def should_notify(row: dict[str, Any]) -> bool:
     notified = st.session_state.setdefault("notified_signals", set())
-    key = f"{now_et().date().isoformat()}:{row['Тикер']}:{row['Сигнал']}"
+    key = f"{now_et().date().isoformat()}:{row['Тикер']}:{row.get('_sig', row['Сигнал'])}"
     if key in notified:
         return False
     notified.add(key)
@@ -787,7 +904,10 @@ def telegram_signal_message(row: dict[str, Any]) -> str:
     ticker = html.escape(str(row["Тикер"]))
     signal_text = str(row["Сигнал"])
     signal = html.escape(signal_text)
-    icon = "🟢" if ("ВВЕРХ" in signal_text or "UP" in signal_text) else ("🔴" if ("ВНИЗ" in signal_text or "DOWN" in signal_text) else "🔥")
+    icon = SIGNAL_ICONS.get(
+        str(row.get("_sig", "")),
+        "🟢" if ("ВВЕРХ" in signal_text or "UP" in signal_text) else ("🔴" if ("ВНИЗ" in signal_text or "DOWN" in signal_text) else "🔥"),
+    )
     return (
         f"{icon} <b>ACCUMULATION BREAKOUT</b>\n"
         f"<b>{ticker}</b> · {signal} · ${row['Цена']}\n"
@@ -809,6 +929,14 @@ def merge_results(new_rows: list[dict[str, Any]], old_rows: list[dict[str, Any]]
     for row in new_rows:
         merged[result_key(row)] = row
     return sorted(merged.values(), key=lambda row: int(row.get("Балл", 0)), reverse=True)
+
+
+def display_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame(columns=DISPLAY_COLS)
+    frame = pd.DataFrame(rows)
+    columns = [col for col in DISPLAY_COLS if col in frame.columns]
+    return frame[columns]
 
 
 # ── MARKET ROUTE ────────────────────────────────────────────────────
@@ -930,6 +1058,45 @@ def normalize_news_item(raw: dict[str, Any], source: str) -> dict[str, str]:
         "url": str(raw.get("url") or raw.get("link") or ""),
         "time": clean_text(raw.get("created_at") or raw.get("pubDate") or raw.get("published") or ""),
     }
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_alpaca_news_batch(symbols: tuple[str, ...], limit: int, days: int) -> dict[str, list[dict[str, str]]]:
+    if not ALPACA_KEY or not ALPACA_SECRET or not symbols:
+        return {}
+
+    end = now_et()
+    start = end - timedelta(days=days)
+    try:
+        resp = requests.get(
+            f"{ALPACA_BASE}/v1beta1/news",
+            headers=ALPACA_HEADERS,
+            params={
+                "symbols": ",".join(symbols),
+                "limit": limit,
+                "sort": "desc",
+                "include_content": "false",
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+            },
+            timeout=DATA_TIMEOUT_SEC,
+        )
+        if resp.status_code in {401, 403, 404}:
+            return {}
+        resp.raise_for_status()
+        rows = resp.json().get("news", []) or []
+    except Exception as exc:
+        LOGGER.info("Alpaca news batch failed: %s", exc)
+        return {}
+
+    out: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        item = normalize_news_item(row, "Alpaca News")
+        if not item["title"]:
+            continue
+        for symbol in row.get("symbols", []) or []:
+            out.setdefault(str(symbol).upper(), []).append(item)
+    return out
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -1055,11 +1222,18 @@ def build_leader_analysis(rows: list[dict[str, Any]], news_candidates: int) -> d
 
     ranked_rows = sorted(clean_rows, key=technical_rank, reverse=True)
     technical = ranked_rows[0]
+    top_rows = ranked_rows[: max(2, int(news_candidates))]
+    symbols = tuple({str(row.get("Тикер", "")).upper() for row in top_rows if row.get("Тикер")})
+    alpaca_news = fetch_alpaca_news_batch(symbols, 50, 7)
 
     news_scores: list[dict[str, Any]] = []
-    for row in ranked_rows[: max(2, int(news_candidates))]:
+    for row in top_rows:
         ticker = str(row.get("Тикер", ""))
-        items, source = fetch_news_for_ticker(ticker)
+        items = alpaca_news.get(ticker.upper(), [])
+        source = "Alpaca News"
+        if not items:
+            items = fetch_yahoo_news(ticker, 6)
+            source = "Yahoo RSS" if items else "нет свежих новостей"
         news_score = score_news_items(items)
         news_scores.append(
             {
@@ -1223,10 +1397,18 @@ with st.sidebar:
         ["Alpaca first", "Alpaca only", "Yahoo only"],
         index=0,
         format_func=lambda value: source_labels[value],
-        help="Alpaca сначала: основной источник Alpaca IEX, Yahoo используется только если Alpaca не дала свечи.",
+        help="Alpaca теперь грузится пачками. Yahoo используется как резерв для пропусков.",
+    )
+    feed_label = st.selectbox(
+        "Фид Alpaca",
+        ["iex", "sip"],
+        index=0,
+        format_func=lambda value: f"{value.upper()} {'(бесплатный)' if value == 'iex' else '(платный полный)'}",
     )
     if source_mode != "Alpaca only" and yf is None:
         st.warning("yfinance не установлен: резервный Yahoo недоступен.")
+    if feed_label == "iex":
+        st.caption("IEX даёт частичный объём рынка; RVOL считается внутри одного фида, поэтому сравнение остаётся полезным.")
 
     st.markdown('<div class="desk-section-title">Рынок</div>', unsafe_allow_html=True)
     exchange = st.selectbox("Биржа", ["ALL", "NASDAQ", "NYSE", "AMEX"], index=0)
@@ -1286,6 +1468,13 @@ with st.sidebar:
     )
     price_basis = "HIGH_LOW" if price_basis_label.startswith("High/Low") else "CLOSE"
     max_gap_pct = st.slider("Максимальный гэп внутри канала (%)", 1.0, 30.0, 8.0, 0.5)
+    max_stale_days = st.slider(
+        "Свежесть последней свечи, дней",
+        1,
+        10,
+        5,
+        help="Отбрасывает тикеры, у которых последний дневной бар слишком старый.",
+    )
 
     st.markdown('<div class="desk-section-title">Выход и объём</div>', unsafe_allow_html=True)
     breakout_buffer_pct = st.slider("Буфер выхода за канал (%)", 0.0, 10.0, 0.5, 0.1)
@@ -1300,7 +1489,7 @@ with st.sidebar:
     signal_style = st.radio(
         "Тип сигнала",
         ["Только выход из канала", "Выход или ранний объём в канале"],
-        index=0,
+        index=1,
     )
     require_price_break = signal_style == "Только выход из канала"
     allow_volume_alert_inside_channel = signal_style == "Выход или ранний объём в канале"
@@ -1309,7 +1498,7 @@ with st.sidebar:
     volume_label = st.radio(
         "Сравнивать объём с",
         ["MAX — максимум канала", "AVG — средний объём канала"],
-        index=0,
+        index=1,
         horizontal=True,
         help="MAX строже: сегодняшний объём должен быть выше максимального объёма внутри канала. AVG мягче: сравнение со средним объёмом канала.",
     )
@@ -1389,8 +1578,10 @@ cfg = ScanConfig(
     min_channel_avg_volume=int(min_channel_avg_volume),
     min_dollar_volume=int(min_dollar_volume),
     max_gap_pct=max_gap_pct,
+    max_stale_days=max_stale_days,
     min_price=min_price,
     max_price=max_price,
+    feed=feed_label,
 )
 
 telegram_ready = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
@@ -1422,9 +1613,11 @@ setup_chips = "".join(
         chip("Канал", f"{cfg.channel_days} дней / {cfg.max_channel_width_pct:g}%"),
         chip("Расчёт", "High/Low: вся свеча" if cfg.price_basis == "HIGH_LOW" else "Close: закрытия"),
         chip("Гэп", f"{cfg.max_gap_pct:g}%"),
+        chip("Свежесть", f"{cfg.max_stale_days}д"),
         chip("Сигнал", "Пробой + объём" if cfg.require_price_break else "Пробой или ранний объём"),
         chip("Буфер", f"{cfg.breakout_buffer_pct:g}%"),
         chip("Объём", f"{cfg.volume_baseline} ({'макс.' if cfg.volume_baseline == 'MAX' else 'средн.'}) x{cfg.min_volume_mult:g}"),
+        chip("Фид", cfg.feed.upper(), "amber" if cfg.feed == "iex" else "green"),
         chip("Долларовый объём", f"${cfg.min_dollar_volume:,}"),
         chip("Страница", page_num),
         chip("Маршрут", "авто-дальше" if advance_page_after_scan else "ручной"),
@@ -1579,9 +1772,14 @@ if start_scan or (auto_scan and should_auto_run):
 
 if st.session_state.results:
     df_results = pd.DataFrame(st.session_state.results)
-    up_mask = df_results["Сигнал"].isin(["ПРОБОЙ ВВЕРХ", "BREAKOUT UP"])
-    down_mask = df_results["Сигнал"].isin(["ПРОБОЙ ВНИЗ", "BREAKDOWN DOWN"])
-    early_mask = df_results["Сигнал"].isin(["РАННИЙ ОБЪЁМ В КАНАЛЕ", "VOLUME IN CHANNEL"])
+    if "_sig" in df_results.columns:
+        up_mask = df_results["_sig"].eq(SIG_UP)
+        down_mask = df_results["_sig"].eq(SIG_DOWN)
+        early_mask = df_results["_sig"].eq(SIG_SURGE)
+    else:
+        up_mask = df_results["Сигнал"].isin(["ПРОБОЙ ВВЕРХ", "BREAKOUT UP"])
+        down_mask = df_results["Сигнал"].isin(["ПРОБОЙ ВНИЗ", "BREAKDOWN DOWN"])
+        early_mask = df_results["Сигнал"].isin(["РАННИЙ ОБЪЁМ В КАНАЛЕ", "VOLUME IN CHANNEL"])
     up_count = int(up_mask.sum())
     down_count = int(down_mask.sum())
     early_count = int(early_mask.sum())
@@ -1605,15 +1803,15 @@ if st.session_state.results:
     st.markdown('<div class="desk-section-title">Лента сигналов</div>', unsafe_allow_html=True)
     tab_all, tab_up, tab_down, tab_early = st.tabs(["Все", "Вверх", "Вниз", "Ранний объём"])
     with tab_all:
-        st.dataframe(df_results, use_container_width=True, hide_index=True)
+        st.dataframe(display_frame(st.session_state.results), use_container_width=True, hide_index=True)
     with tab_up:
-        st.dataframe(df_results[up_mask], use_container_width=True, hide_index=True)
+        st.dataframe(display_frame(df_results[up_mask].to_dict("records")), use_container_width=True, hide_index=True)
     with tab_down:
-        st.dataframe(df_results[down_mask], use_container_width=True, hide_index=True)
+        st.dataframe(display_frame(df_results[down_mask].to_dict("records")), use_container_width=True, hide_index=True)
     with tab_early:
-        st.dataframe(df_results[early_mask], use_container_width=True, hide_index=True)
+        st.dataframe(display_frame(df_results[early_mask].to_dict("records")), use_container_width=True, hide_index=True)
 
-    csv = df_results.to_csv(index=False).encode("utf-8")
+    csv = display_frame(st.session_state.results).to_csv(index=False).encode("utf-8")
     st.download_button(
         "Скачать CSV",
         data=csv,
@@ -1630,4 +1828,3 @@ else:
         """,
         unsafe_allow_html=True,
     )
-
