@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
+import altair as alt
 import pandas as pd
 import requests
 import streamlit as st
@@ -247,8 +248,6 @@ ALPACA_BASE = "https://data.alpaca.markets"
 DATA_TIMEOUT_SEC = 15
 NASDAQ_TIMEOUT_SEC = 20
 BATCH_SIZE = 120
-MAX_BARS_PAGES = 25
-YAHOO_FALLBACK_CAP = 60
 
 SIG_UP = "BREAKOUT_UP"
 SIG_DOWN = "BREAKDOWN"
@@ -354,7 +353,6 @@ class ScanConfig:
     max_stale_days: int = 5
     min_price: float = 0.5
     max_price: float = 20.0
-    feed: str = "iex"
 
 
 def now_et() -> datetime:
@@ -533,61 +531,6 @@ def get_nasdaq_tickers(exchange: str, max_price: float) -> list[dict[str, Any]]:
 
 # ── DATA SOURCES ──────────────────────────────────────────────────
 @st.cache_data(ttl=60, show_spinner=False)
-def fetch_alpaca_batch(symbols: tuple[str, ...], days: int, feed: str) -> dict[str, pd.DataFrame]:
-    if not (ALPACA_KEY and ALPACA_SECRET) or not symbols:
-        return {}
-
-    end = now_et().date()
-    start = end - timedelta(days=max(60, days * 4))
-    raw: dict[str, list[dict[str, Any]]] = {}
-    page_token: str | None = None
-
-    for _ in range(MAX_BARS_PAGES):
-        params: dict[str, Any] = {
-            "symbols": ",".join(symbols),
-            "timeframe": "1Day",
-            "start": start.isoformat(),
-            "end": end.isoformat(),
-            "limit": 10000,
-            "feed": feed,
-            "adjustment": "split",
-            "sort": "asc",
-        }
-        if page_token:
-            params["page_token"] = page_token
-
-        try:
-            resp = requests.get(
-                f"{ALPACA_BASE}/v2/stocks/bars",
-                headers=ALPACA_HEADERS,
-                params=params,
-                timeout=DATA_TIMEOUT_SEC,
-            )
-            if resp.status_code in {401, 403}:
-                LOGGER.warning("Alpaca auth failed: %s", resp.status_code)
-                return {}
-            resp.raise_for_status()
-            payload = resp.json()
-        except Exception as exc:
-            LOGGER.info("Alpaca batch failed: %s", exc)
-            break
-
-        for symbol, bars in (payload.get("bars") or {}).items():
-            raw.setdefault(str(symbol).upper(), []).extend(bars or [])
-
-        page_token = payload.get("next_page_token")
-        if not page_token:
-            break
-
-    out: dict[str, pd.DataFrame] = {}
-    for symbol, bars in raw.items():
-        df = normalize_ohlcv(pd.DataFrame(bars), f"Alpaca {feed.upper()}")
-        if df is not None and len(df) >= days + 2:
-            out[symbol] = df
-    return out
-
-
-@st.cache_data(ttl=60, show_spinner=False)
 def fetch_yahoo_daily(ticker: str, days: int) -> pd.DataFrame | None:
     if yf is None:
         return None
@@ -609,41 +552,71 @@ def fetch_yahoo_daily(ticker: str, days: int) -> pd.DataFrame | None:
     return normalize_ohlcv(df, "Yahoo Finance")
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_yahoo_batch(symbols: tuple[str, ...], days: int) -> dict[str, pd.DataFrame]:
+    if yf is None or not symbols:
+        return {}
+
+    period = "90d" if days <= 20 else "6mo"
+    try:
+        df = yf.download(
+            tickers=list(symbols),
+            period=period,
+            interval="1d",
+            group_by="ticker",
+            auto_adjust=True,
+            progress=False,
+            threads=True,
+            timeout=DATA_TIMEOUT_SEC,
+        )
+    except Exception as exc:
+        LOGGER.info("Yahoo batch failed: %s", exc)
+        return {}
+
+    if df is None or df.empty:
+        return {}
+
+    out: dict[str, pd.DataFrame] = {}
+    symbols_upper = [symbol.upper() for symbol in symbols]
+    if isinstance(df.columns, pd.MultiIndex):
+        level0 = {str(value).upper() for value in df.columns.get_level_values(0)}
+        level1 = {str(value).upper() for value in df.columns.get_level_values(1)}
+        for symbol in symbols_upper:
+            candidate = None
+            if symbol in level0:
+                candidate = df[symbol]
+            elif symbol in level1:
+                candidate = df.xs(symbol, axis=1, level=1)
+            normalized = normalize_ohlcv(candidate, "Yahoo Finance")
+            if normalized is not None and len(normalized) >= days + 2:
+                out[symbol] = normalized
+        return out
+
+    if len(symbols_upper) == 1:
+        normalized = normalize_ohlcv(df, "Yahoo Finance")
+        if normalized is not None and len(normalized) >= days + 2:
+            out[symbols_upper[0]] = normalized
+    return out
+
+
 def load_bars(
     ticker_infos: list[dict[str, Any]],
     cfg: ScanConfig,
-    source_mode: str,
     progress_box: Any,
     status_box: Any,
 ) -> dict[str, pd.DataFrame]:
     symbols = [str(item["ticker"]).upper() for item in ticker_infos]
     bars: dict[str, pd.DataFrame] = {}
 
-    use_alpaca = source_mode in {"Alpaca first", "Alpaca only"}
-    use_yahoo = source_mode in {"Alpaca first", "Yahoo only"}
+    if yf is None:
+        status_box.caption("Yahoo Finance недоступен: пакет yfinance не установлен.")
+        return bars
 
-    if use_alpaca:
-        batches = list(chunks(symbols, BATCH_SIZE))
-        for idx, batch in enumerate(batches, start=1):
-            status_box.caption(f"Загружаю Alpaca · пачка {idx}/{len(batches)} · готово: {len(bars)}")
-            bars.update(fetch_alpaca_batch(tuple(batch), cfg.channel_days, cfg.feed))
-            if not use_yahoo:
-                progress_box.progress(idx / max(len(batches), 1))
-            else:
-                progress_box.progress(0.65 * idx / max(len(batches), 1))
-
-    if use_yahoo:
-        missing = symbols if source_mode == "Yahoo only" else [symbol for symbol in symbols if symbol not in bars]
-        if source_mode != "Yahoo only":
-            missing = missing[:YAHOO_FALLBACK_CAP]
-
-        for idx, symbol in enumerate(missing, start=1):
-            status_box.caption(f"Yahoo резерв · {symbol} ({idx}/{len(missing)})")
-            df = fetch_yahoo_daily(symbol, cfg.channel_days)
-            if df is not None:
-                bars[symbol] = df
-            base = 0.65 if use_alpaca else 0.0
-            progress_box.progress(min(1.0, base + (1.0 - base) * idx / max(len(missing), 1)))
+    batches = list(chunks(symbols, BATCH_SIZE))
+    for idx, batch in enumerate(batches, start=1):
+        status_box.caption(f"Загружаю Yahoo Finance · пачка {idx}/{len(batches)} · готово: {len(bars)}")
+        bars.update(fetch_yahoo_batch(tuple(batch), cfg.channel_days))
+        progress_box.progress(0.7 * idx / max(len(batches), 1))
 
     progress_box.progress(0.7)
     return bars
@@ -833,7 +806,6 @@ def detect_signal(
 def scan_market(
     ticker_infos: list[dict[str, Any]],
     cfg: ScanConfig,
-    source_mode: str,
     progress_box: Any,
     status_box: Any,
     table_box: Any,
@@ -844,7 +816,7 @@ def scan_market(
     st.session_state.stats = {"checked": 0, "signals": 0}
     st.session_state.scan_errors = []
 
-    bars = load_bars(ticker_infos, cfg, source_mode, progress_box, status_box)
+    bars = load_bars(ticker_infos, cfg, progress_box, status_box)
     today = now_et().date()
 
     for idx, ticker_info in enumerate(ticker_infos, start=1):
@@ -947,6 +919,148 @@ def display_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
     frame = pd.DataFrame(rows)
     columns = [col for col in DISPLAY_COLS if col in frame.columns]
     return frame[columns]
+
+
+def format_chart_option(row: dict[str, Any]) -> str:
+    return (
+        f"{row.get('Тикер', '')} · {row.get('Сигнал', '')} · "
+        f"балл {row.get('Балл', '')} · выход {row.get('Выход %', '—')} · объём ×{row.get('Объём ×', '—')}"
+    )
+
+
+def build_signal_chart(df: pd.DataFrame, cfg: ScanConfig) -> alt.Chart | None:
+    channel = build_channel(df, cfg)
+    if channel is None:
+        return None
+
+    chart_df = df.tail(cfg.channel_days + 8).reset_index()
+    chart_df.rename(columns={chart_df.columns[0]: "Date"}, inplace=True)
+    chart_df["Date"] = pd.to_datetime(chart_df["Date"], errors="coerce")
+    if getattr(chart_df["Date"].dt, "tz", None) is not None:
+        chart_df["Date"] = chart_df["Date"].dt.tz_convert(None)
+    chart_df = chart_df.dropna(subset=["Date", "Open", "High", "Low", "Close", "Volume"]).copy()
+    if chart_df.empty:
+        return None
+
+    chart_df["Направление"] = chart_df.apply(lambda row: "Вверх" if row["Close"] >= row["Open"] else "Вниз", axis=1)
+    channel_df = pd.DataFrame(
+        {
+            "Уровень": [channel.high, channel.low],
+            "Линия": ["Верх канала", "Низ канала"],
+        }
+    )
+    volume_df = pd.DataFrame({"Уровень": [channel.vol_avg], "Линия": ["Средний объём канала"]})
+    latest_df = chart_df.tail(1).copy()
+
+    price_scale_min = min(float(chart_df["Low"].min()), channel.low) * 0.985
+    price_scale_max = max(float(chart_df["High"].max()), channel.high) * 1.015
+
+    color_scale = alt.Scale(domain=["Вверх", "Вниз"], range=["#047857", "#b42318"])
+    wick = (
+        alt.Chart(chart_df)
+        .mark_rule()
+        .encode(
+            x=alt.X("Date:T", title=None),
+            y=alt.Y("Low:Q", title="Цена", scale=alt.Scale(domain=[price_scale_min, price_scale_max])),
+            y2="High:Q",
+            color=alt.Color("Направление:N", scale=color_scale, legend=None),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Дата"),
+                alt.Tooltip("Open:Q", title="Open", format=".4f"),
+                alt.Tooltip("High:Q", title="High", format=".4f"),
+                alt.Tooltip("Low:Q", title="Low", format=".4f"),
+                alt.Tooltip("Close:Q", title="Close", format=".4f"),
+                alt.Tooltip("Volume:Q", title="Volume", format=",.0f"),
+            ],
+        )
+    )
+    body = (
+        alt.Chart(chart_df)
+        .mark_bar(size=9)
+        .encode(
+            x=alt.X("Date:T", title=None),
+            y=alt.Y("Open:Q", title="Цена", scale=alt.Scale(domain=[price_scale_min, price_scale_max])),
+            y2="Close:Q",
+            color=alt.Color("Направление:N", scale=color_scale, legend=None),
+        )
+    )
+    channel_lines = (
+        alt.Chart(channel_df)
+        .mark_rule(strokeDash=[6, 4], size=2)
+        .encode(
+            y=alt.Y("Уровень:Q", title="Цена", scale=alt.Scale(domain=[price_scale_min, price_scale_max])),
+            color=alt.Color("Линия:N", scale=alt.Scale(range=["#175cd3", "#b54708"]), legend=alt.Legend(orient="top")),
+        )
+    )
+    open_marker = (
+        alt.Chart(latest_df)
+        .mark_point(filled=True, shape="diamond", size=95, color="#175cd3")
+        .encode(
+            x=alt.X("Date:T", title=None),
+            y=alt.Y("Open:Q", title="Цена", scale=alt.Scale(domain=[price_scale_min, price_scale_max])),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Дата"),
+                alt.Tooltip("Open:Q", title="Открытие", format=".4f"),
+                alt.Tooltip("Close:Q", title="Закрытие", format=".4f"),
+            ],
+        )
+    )
+    price_chart = alt.layer(wick, body, channel_lines, open_marker).properties(height=330)
+
+    volume_bars = (
+        alt.Chart(chart_df)
+        .mark_bar(size=9, opacity=0.72)
+        .encode(
+            x=alt.X("Date:T", title=None),
+            y=alt.Y("Volume:Q", title="Объём"),
+            color=alt.Color("Направление:N", scale=color_scale, legend=None),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Дата"),
+                alt.Tooltip("Volume:Q", title="Volume", format=",.0f"),
+            ],
+        )
+    )
+    volume_avg = (
+        alt.Chart(volume_df)
+        .mark_rule(strokeDash=[5, 4], color="#667085")
+        .encode(y=alt.Y("Уровень:Q", title="Объём"))
+    )
+    volume_chart = alt.layer(volume_bars, volume_avg).properties(height=105)
+
+    return alt.vconcat(price_chart, volume_chart).resolve_scale(x="shared")
+
+
+def render_signal_chart(rows: list[dict[str, Any]], cfg: ScanConfig) -> None:
+    clean_rows = [row for row in rows if isinstance(row, dict) and row.get("Тикер")]
+    if not clean_rows:
+        return
+
+    st.markdown('<div class="desk-section-title">График канала</div>', unsafe_allow_html=True)
+    selected_idx = st.selectbox(
+        "Сигнал на графике",
+        list(range(len(clean_rows))),
+        format_func=lambda idx: format_chart_option(clean_rows[idx]),
+        key="signal_chart_selector",
+    )
+    selected = clean_rows[int(selected_idx)]
+    ticker = str(selected.get("Тикер", "")).upper()
+    history = fetch_yahoo_daily(ticker, cfg.channel_days)
+    if history is None:
+        st.warning(f"Не удалось загрузить Yahoo-график для {ticker}.")
+        return
+
+    chart = build_signal_chart(history, cfg)
+    if chart is None:
+        st.warning(f"Недостаточно свечей для графика {ticker}.")
+        return
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Тикер", ticker)
+    m2.metric("Сигнал", str(selected.get("Сигнал", "")))
+    m3.metric("Канал", str(selected.get("Канал", "—")))
+    m4.metric("Объём ×", str(selected.get("Объём ×", "—")))
+    m5.metric("Гэп сегодня", str(selected.get("Гэп сегодня", "—")))
+    st.altair_chart(chart, use_container_width=True)
 
 
 # ── MARKET ROUTE ────────────────────────────────────────────────────
@@ -1397,28 +1511,9 @@ with st.sidebar:
     st.markdown('<div class="desk-muted">Накопление · канал · выход объёмом</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="desk-section-title">Данные</div>', unsafe_allow_html=True)
-    source_labels = {
-        "Alpaca first": "Alpaca сначала, Yahoo резерв",
-        "Alpaca only": "Только Alpaca",
-        "Yahoo only": "Только Yahoo",
-    }
-    source_mode = st.selectbox(
-        "Источник свечей",
-        ["Alpaca first", "Alpaca only", "Yahoo only"],
-        index=0,
-        format_func=lambda value: source_labels[value],
-        help="Alpaca теперь грузится пачками. Yahoo используется как резерв для пропусков.",
-    )
-    feed_label = st.selectbox(
-        "Фид Alpaca",
-        ["iex", "sip"],
-        index=0,
-        format_func=lambda value: f"{value.upper()} {'(бесплатный)' if value == 'iex' else '(платный полный)'}",
-    )
-    if source_mode != "Alpaca only" and yf is None:
-        st.warning("yfinance не установлен: резервный Yahoo недоступен.")
-    if feed_label == "iex":
-        st.caption("IEX даёт частичный объём рынка; RVOL считается внутри одного фида, поэтому сравнение остаётся полезным.")
+    st.caption("Свечи, канал и дневной объём: Yahoo Finance.")
+    if yf is None:
+        st.warning("yfinance не установлен: Yahoo Finance недоступен.")
 
     st.markdown('<div class="desk-section-title">Рынок</div>', unsafe_allow_html=True)
     exchange = st.selectbox("Биржа", ["ALL", "NASDAQ", "NYSE", "AMEX"], index=0)
@@ -1591,7 +1686,6 @@ cfg = ScanConfig(
     max_stale_days=max_stale_days,
     min_price=min_price,
     max_price=max_price,
-    feed=feed_label,
 )
 
 telegram_ready = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
@@ -1627,7 +1721,7 @@ setup_chips = "".join(
         chip("Сигнал", "Пробой + объём" if cfg.require_price_break else "Пробой или ранний объём"),
         chip("Буфер", f"{cfg.breakout_buffer_pct:g}%"),
         chip("Объём", f"{cfg.volume_baseline} ({'макс.' if cfg.volume_baseline == 'MAX' else 'средн.'}) x{cfg.min_volume_mult:g}"),
-        chip("Фид", cfg.feed.upper(), "amber" if cfg.feed == "iex" else "green"),
+        chip("Свечи/объём", "Yahoo Finance", "green"),
         chip("Долларовый объём", f"${cfg.min_dollar_volume:,}"),
         chip("Страница", page_num),
         chip("Маршрут", "авто-дальше" if advance_page_after_scan else "ручной"),
@@ -1635,8 +1729,8 @@ setup_chips = "".join(
 )
 st.markdown(f'<div class="desk-chipbar">{setup_chips}</div>', unsafe_allow_html=True)
 
-if yf is None and source_mode != "Alpaca only":
-    st.warning('yfinance не установлен. Используй режим "Только Alpaca" или установи пакет: pip install yfinance')
+if yf is None:
+    st.warning("yfinance не установлен. Установи пакет: pip install yfinance")
 if send_alerts and not telegram_ready:
     st.warning(
         "Telegram включён, но TELEGRAM_TOKEN или TELEGRAM_CHAT_ID не найдены в Streamlit secrets. "
@@ -1732,7 +1826,6 @@ if start_scan or (auto_scan and should_auto_run):
         hits = scan_market(
             ticker_infos=ticker_infos,
             cfg=cfg,
-            source_mode=source_mode,
             progress_box=progress_box,
             status_box=status_box,
             table_box=table_box,
@@ -1809,6 +1902,8 @@ if st.session_state.results:
                 st.session_state.leader_analysis = leader_analysis
         if leader_analysis:
             render_leader_analysis(leader_analysis)
+
+    render_signal_chart(st.session_state.results, cfg)
 
     st.markdown('<div class="desk-section-title">Лента сигналов</div>', unsafe_allow_html=True)
     tab_all, tab_up, tab_down, tab_early = st.tabs(["Все", "Вверх", "Вниз", "Ранний объём"])
