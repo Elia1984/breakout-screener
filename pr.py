@@ -268,6 +268,7 @@ DISPLAY_COLS = [
     "Сигнал",
     "Цена",
     "Выход %",
+    "Гэп сегодня",
     "Объём ×",
     "Объём",
     "Ср. объём канала",
@@ -763,6 +764,12 @@ def detect_signal(
     upper = channel.high * (1 + cfg.breakout_buffer_pct / 100)
     lower = channel.low * (1 - cfg.breakout_buffer_pct / 100)
 
+    prev_close = float(df.iloc[-2]["Close"])
+    latest_gap_pct = (latest_open - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
+    opened_outside_channel = latest_open > upper or latest_open < lower
+    if opened_outside_channel:
+        return None
+
     breakout_up_pct = (price - channel.high) / channel.high * 100
     breakdown_down_pct = (channel.low - price) / channel.low * 100
     body_pct = abs(price - latest_open) / latest_open * 100
@@ -794,19 +801,22 @@ def detect_signal(
     if cfg.directions == "DOWN" and signal_code != SIG_DOWN:
         return None
 
-    score = score_signal(signal_code, channel.width_pct, volume_mult, move_pct, channel.max_gap_pct, cfg)
+    max_signal_gap_pct = max(channel.max_gap_pct, abs(latest_gap_pct))
+    score = score_signal(signal_code, channel.width_pct, volume_mult, move_pct, max_signal_gap_pct, cfg)
     signal = SIGNAL_LABELS[signal_code]
     return {
         "_sig": signal_code,
         "_rvol": volume_mult,
         "_score": score,
         "_width": channel.width_pct,
+        "_gap": latest_gap_pct,
         "Тикер": ticker_info["ticker"],
         "Название": (ticker_info.get("name") or "")[:34],
         "Биржа": ticker_info.get("exchange", ""),
         "Сигнал": signal,
         "Цена": round(price, 4),
         "Выход %": f"{move_pct:+.1f}%" if move_pct else "—",
+        "Гэп сегодня": f"{latest_gap_pct:+.1f}%",
         "Объём ×": round(volume_mult, 2),
         "Объём": int(latest_volume),
         "Ср. объём канала": int(channel.vol_avg),
@@ -911,7 +921,7 @@ def telegram_signal_message(row: dict[str, Any]) -> str:
     return (
         f"{icon} <b>ACCUMULATION BREAKOUT</b>\n"
         f"<b>{ticker}</b> · {signal} · ${row['Цена']}\n"
-        f"Выход: {row['Выход %']} | Объём ×{row['Объём ×']}\n"
+        f"Выход: {row['Выход %']} | Гэп: {row.get('Гэп сегодня', '—')} | Объём ×{row['Объём ×']}\n"
         f"Канал: {row['Канал']} | Ширина: {row['Ширина канала']}\n"
         f"Балл: {row['Балл']}/100 | Источник: {html.escape(str(row['Источник']))}\n"
         f"⏰ {now_et_str('%H:%M ET')}"
