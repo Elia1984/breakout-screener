@@ -3,7 +3,6 @@ from __future__ import annotations
 import html
 import base64
 import logging
-import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -18,11 +17,6 @@ import requests
 import streamlit as st
 
 try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib
-
-try:
     import yfinance as yf
 except ImportError:
     yf = None
@@ -31,6 +25,9 @@ try:
     from streamlit_autorefresh import st_autorefresh
 except Exception:
     st_autorefresh = None
+
+from pr_screener.secrets import read_secret
+from pr_screener.telegram import TelegramClient
 
 
 # ── APP CONFIG ─────────────────────────────────────────────────────
@@ -149,7 +146,15 @@ def apply_custom_theme() -> None:
                 gap: 0.5rem;
                 align-items: stretch;
                 justify-content: flex-end;
-                min-width: 320px;
+                min-width: 0;
+                max-width: 100%;
+            }
+
+            .desk-header > div,
+            .base-results-bar > div,
+            .desk-empty-panel > div,
+            .pattern-chart-head > div {
+                min-width: 0;
             }
 
             .desk-chipbar {
@@ -172,6 +177,7 @@ def apply_custom_theme() -> None:
                 color: var(--desk-muted);
                 min-height: 44px;
                 min-width: 92px;
+                max-width: 100%;
                 padding: 0.42rem 0.62rem;
                 font-size: 0.72rem;
                 line-height: 1.1;
@@ -192,10 +198,9 @@ def apply_custom_theme() -> None:
                 font-size: 0.82rem;
                 font-weight: 780;
                 line-height: 1.15;
-                max-width: 170px;
-                overflow: hidden;
-                text-overflow: ellipsis;
-                white-space: nowrap;
+                max-width: 220px;
+                overflow-wrap: anywhere;
+                white-space: normal;
             }
 
             .desk-chip.green { border-color: #a6f4c5; border-left-color: var(--desk-green); background: #ecfdf3; }
@@ -319,6 +324,7 @@ def apply_custom_theme() -> None:
 
             .pattern-chart-head {
                 display: flex;
+                flex-wrap: wrap;
                 justify-content: space-between;
                 gap: 0.75rem;
                 align-items: flex-start;
@@ -337,7 +343,7 @@ def apply_custom_theme() -> None:
                 font-size: 0.78rem;
                 line-height: 1.25;
                 text-align: right;
-                white-space: nowrap;
+                overflow-wrap: anywhere;
                 background: var(--desk-panel-soft);
                 border: 1px solid #e4e7ec;
                 border-radius: 8px;
@@ -366,7 +372,7 @@ def apply_custom_theme() -> None:
                 font-weight: 700;
                 letter-spacing: 0.04em;
                 text-transform: uppercase;
-                white-space: nowrap;
+                overflow-wrap: anywhere;
             }
 
             .pattern-chart-stat strong {
@@ -375,9 +381,7 @@ def apply_custom_theme() -> None:
                 font-size: 0.9rem;
                 font-weight: 760;
                 line-height: 1.15;
-                overflow: hidden;
-                text-overflow: ellipsis;
-                white-space: nowrap;
+                overflow-wrap: anywhere;
             }
 
             .pattern-chart-card img {
@@ -484,6 +488,41 @@ def apply_custom_theme() -> None:
                 }
             }
 
+            @media (max-width: 600px) {
+                .block-container {
+                    padding-left: 0.7rem;
+                    padding-right: 0.7rem;
+                }
+
+                .desk-title {
+                    font-size: 1.35rem;
+                }
+
+                .desk-statusbar,
+                .base-results-stats {
+                    width: 100%;
+                    justify-content: flex-start;
+                }
+
+                .desk-chip {
+                    flex: 1 1 130px;
+                    min-width: 0;
+                }
+
+                .desk-chip-value {
+                    max-width: 100%;
+                }
+
+                .pattern-chart-meta {
+                    width: 100%;
+                    text-align: left;
+                }
+
+                .pattern-chart-stats {
+                    grid-template-columns: 1fr;
+                }
+            }
+
             div.stButton > button[kind="primary"] {
                 background: var(--desk-blue);
                 border-color: var(--desk-blue);
@@ -577,49 +616,17 @@ DISPLAY_COLS = [
 BASE_PATTERN_DISPLAY_COLS = DISPLAY_COLS
 
 
-LOCAL_SECRETS_CACHE: dict[str, Any] | None = None
-
-
-def load_local_secrets() -> dict[str, Any]:
-    global LOCAL_SECRETS_CACHE
-    if LOCAL_SECRETS_CACHE is not None:
-        return LOCAL_SECRETS_CACHE
-
-    path = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
-    if not path.exists():
-        LOCAL_SECRETS_CACHE = {}
-        return LOCAL_SECRETS_CACHE
-
-    try:
-        with path.open("rb") as file:
-            data = tomllib.load(file)
-    except Exception as exc:
-        LOGGER.warning("Could not read local Streamlit secrets: %s", exc)
-        data = {}
-
-    LOCAL_SECRETS_CACHE = data
-    return LOCAL_SECRETS_CACHE
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 def secret_or_default(name: str, default: str = "") -> str:
-    try:
-        value = st.secrets.get(name)
-    except Exception:
-        value = None
-    if value not in {None, ""}:
-        return str(value)
-
-    value = os.environ.get(name)
-    if value:
-        return str(value)
-
-    value = load_local_secrets().get(name, default)
-    return str(value or default)
+    return read_secret(name, streamlit_secrets=st.secrets, project_root=PROJECT_ROOT, default=default)
 
 
 # Public-safe: keep real values only in Streamlit secrets, never in source code.
 TELEGRAM_TOKEN = secret_or_default("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = secret_or_default("TELEGRAM_CHAT_ID")
+TELEGRAM_CLIENT = TelegramClient(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, logger=LOGGER)
 
 ALPACA_KEY = secret_or_default("ALPACA_KEY")
 ALPACA_SECRET = secret_or_default("ALPACA_SECRET")
@@ -1568,23 +1575,7 @@ def scan_market(
 
 # ── TELEGRAM ──────────────────────────────────────────────────────
 def send_telegram(message: str) -> bool:
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        LOGGER.warning("Telegram is not configured.")
-        return False
-
-    try:
-        resp = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"},
-            timeout=10,
-        )
-        if resp.status_code != 200:
-            LOGGER.warning("Telegram failed: %s %s", resp.status_code, resp.text[:300])
-            return False
-        return True
-    except Exception as exc:
-        LOGGER.warning("Telegram request failed: %s", exc)
-        return False
+    return TELEGRAM_CLIENT.send(message)
 
 
 def notification_key(row: dict[str, Any]) -> str:
@@ -2921,7 +2912,13 @@ if start_scan or (auto_scan and should_auto_run):
             st.session_state.auto_scan_offset = next_offset
 
         if hits:
-            status_box.empty()
+            done_message = (
+                f"Готово: найдено {len(hits)} сигналов · "
+                f"проверено {len(ticker_infos)} · {scan_scope}"
+            )
+            status_box.success(done_message)
+            if hasattr(st, "toast"):
+                st.toast(done_message, icon="✅")
             if send_alerts:
                 send_telegram(
                     f"✅ Скан накопления завершён · найдено {len(hits)} · "
@@ -2930,7 +2927,10 @@ if start_scan or (auto_scan and should_auto_run):
                 if send_leader_summary and st.session_state.leader_analysis:
                     send_telegram(telegram_leader_message(st.session_state.leader_analysis))
         else:
-            status_box.empty()
+            done_message = f"Скан завершён: сигналов нет · проверено {len(ticker_infos)} · {scan_scope}"
+            status_box.info(done_message)
+            if hasattr(st, "toast") and not is_auto_batch:
+                st.toast(done_message, icon="ℹ️")
 
         if st.session_state.scan_errors:
             with st.expander("Диагностика"):
@@ -3003,4 +3003,3 @@ else:
         """,
         unsafe_allow_html=True,
     )
-
