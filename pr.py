@@ -1348,7 +1348,12 @@ def detect_signal(
     cfg: ScanConfig,
     today: Any | None = None,
 ) -> dict[str, Any] | None:
-    required_days = cfg.base_impulse_days if cfg.base_impulse_only else max(cfg.channel_days, cfg.base_impulse_days)
+    if cfg.base_impulse_only:
+        required_days = cfg.base_impulse_days
+    elif cfg.base_impulse_enabled:
+        required_days = max(cfg.channel_days, cfg.base_impulse_days)
+    else:
+        required_days = cfg.channel_days
     if df is None or len(df) < required_days + 2:
         return None
 
@@ -1638,6 +1643,29 @@ def merge_results(new_rows: list[dict[str, Any]], old_rows: list[dict[str, Any]]
     for row in new_rows:
         merged[result_key(row)] = row
     return sort_results(list(merged.values()), base_pattern)
+
+
+def result_matches_active_patterns(row: dict[str, Any], cfg: ScanConfig) -> bool:
+    signal_code = str(row.get("_sig", ""))
+    if cfg.base_impulse_only:
+        return signal_code == SIG_BASE
+    if not cfg.base_impulse_enabled and signal_code == SIG_BASE:
+        return False
+    return True
+
+
+def filter_results_for_config(rows: list[dict[str, Any]], cfg: ScanConfig) -> list[dict[str, Any]]:
+    return [row for row in rows if isinstance(row, dict) and result_matches_active_patterns(row, cfg)]
+
+
+def leader_analysis_matches_results(analysis: dict[str, Any] | None, rows: list[dict[str, Any]]) -> bool:
+    if not analysis:
+        return False
+    technical = analysis.get("technical")
+    if not isinstance(technical, dict):
+        return False
+    active_keys = {result_key(row) for row in rows if isinstance(row, dict)}
+    return result_key(technical) in active_keys
 
 
 def format_price_cell(value: Any) -> str:
@@ -2871,7 +2899,8 @@ if start_scan or (auto_scan and should_auto_run):
             send_alerts=send_alerts,
         )
 
-        st.session_state.results = merge_results(hits, st.session_state.results, cfg.base_impulse_only)
+        active_old_results = filter_results_for_config(st.session_state.results, cfg)
+        st.session_state.results = merge_results(hits, active_old_results, cfg.base_impulse_only)
         if analyze_leaders and st.session_state.results:
             status_box.caption("Разбираю лидеров: техника и новости...")
             st.session_state.leader_analysis = build_leader_analysis(st.session_state.results, news_candidate_count)
@@ -2907,9 +2936,11 @@ if start_scan or (auto_scan and should_auto_run):
             with st.expander("Диагностика"):
                 st.write("\n".join(st.session_state.scan_errors))
 
+st.session_state.results = sort_results(filter_results_for_config(st.session_state.results, cfg), cfg.base_impulse_only)
+if not leader_analysis_matches_results(st.session_state.leader_analysis, st.session_state.results):
+    st.session_state.leader_analysis = None
 
 if st.session_state.results:
-    st.session_state.results = sort_results(st.session_state.results, cfg.base_impulse_only)
     df_results = pd.DataFrame(st.session_state.results)
     if "_sig" in df_results.columns:
         up_mask = df_results["_sig"].eq(SIG_UP)
@@ -2972,3 +3003,4 @@ else:
         """,
         unsafe_allow_html=True,
     )
+
