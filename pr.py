@@ -532,6 +532,7 @@ NASDAQ_TIMEOUT_SEC = 20
 BATCH_SIZE = 120
 ALPACA_SIP_DELAY_MINUTES = 16
 MAX_BARS_PAGES = 25
+AUTO_SCAN_MARKET_LIMIT = 10_000
 
 DATA_SOURCE_AUTO = "AUTO_ALPACA_SIP_YAHOO"
 DATA_SOURCE_ALPACA_SIP = "ALPACA_SIP_DELAYED"
@@ -2023,29 +2024,6 @@ def render_signal_chart(rows: list[dict[str, Any]], cfg: ScanConfig, data_source
     st.altair_chart(chart, use_container_width=True)
 
 
-# ── MARKET ROUTE ────────────────────────────────────────────────────
-def total_pages_for(total_items: int, page_size: int) -> int:
-    return max(1, (max(0, int(total_items)) + max(1, int(page_size)) - 1) // max(1, int(page_size)))
-
-
-def effective_route_pages(total_pages: int, requested_pages: int) -> int:
-    requested = int(requested_pages or 0)
-    if requested <= 0:
-        return max(1, int(total_pages))
-    return max(1, min(int(requested), int(total_pages)))
-
-
-def clamp_page(page: int, route_pages: int) -> int:
-    return max(1, min(int(page), max(1, int(route_pages))))
-
-
-def next_route_page(current_page: int, route_pages: int) -> tuple[int, bool]:
-    current = clamp_page(current_page, route_pages)
-    if current >= route_pages:
-        return 1, True
-    return current + 1, False
-
-
 # ── LEADER ANALYSIS ─────────────────────────────────────────────────
 POSITIVE_NEWS_TERMS: tuple[tuple[str, int], ...] = (
     ("upgrade", 10),
@@ -2452,18 +2430,12 @@ if "auto_count" not in st.session_state:
     st.session_state.auto_count = 0
 if "leader_analysis" not in st.session_state:
     st.session_state.leader_analysis = None
-if "scan_page" not in st.session_state:
-    st.session_state.scan_page = 1
-if "market_cycles_done" not in st.session_state:
-    st.session_state.market_cycles_done = 0
-if "last_total_pages" not in st.session_state:
-    st.session_state.last_total_pages = None
-if "last_route_pages" not in st.session_state:
-    st.session_state.last_route_pages = None
-if "last_scan_page" not in st.session_state:
-    st.session_state.last_scan_page = None
-if st.session_state.pop("sync_page_widget", False) or "page_selector" not in st.session_state:
-    st.session_state.page_selector = int(st.session_state.scan_page)
+if "auto_scan_offset" not in st.session_state:
+    st.session_state.auto_scan_offset = 0
+if "auto_scan_signature" not in st.session_state:
+    st.session_state.auto_scan_signature = ""
+if "last_auto_total" not in st.session_state:
+    st.session_state.last_auto_total = None
 
 
 # ── SIDEBAR ───────────────────────────────────────────────────────
@@ -2522,40 +2494,17 @@ with st.sidebar:
         step=1.0,
         help="Фильтр цены применяется ещё на этапе списка рынка.",
     )
-    max_tickers = st.slider("Акций за прогон", 50, 10000, 1000, 50)
-    page_num = int(st.number_input("Страница списка", min_value=1, max_value=500, step=1, key="page_selector"))
-    st.session_state.scan_page = page_num
-    advance_page_after_scan = st.toggle(
-        "После скана переходить дальше",
-        value=True,
-        help="После каждого ручного или автоматического скана следующая проверка начнётся со следующего блока акций.",
+    max_tickers = st.slider(
+        "Акций за прогон",
+        50,
+        10000,
+        500,
+        50,
+        help=(
+            "Ручной запуск проверит только эту пачку и остановится. "
+            f"Авто-скан будет идти по всему списку до {AUTO_SCAN_MARKET_LIMIT:,} акций такими пачками."
+        ),
     )
-    route_page_limit = st.number_input(
-        "Страниц за проход",
-        min_value=0,
-        max_value=500,
-        value=0,
-        step=1,
-        help="0 = весь доступный рынок. Если указать больше, чем реально есть страниц, код сам ограничит по факту.",
-    )
-    stop_after_cycles = st.number_input(
-        "Остановиться после проходов",
-        min_value=0,
-        max_value=50,
-        value=0,
-        step=1,
-        help="0 = не останавливать авто-скан. 1 = пройти весь список один раз и ждать ручного сброса.",
-    )
-    if st.button("Сбросить страницу на 1", use_container_width=True):
-        st.session_state.scan_page = 1
-        st.session_state.market_cycles_done = 0
-        st.session_state.sync_page_widget = True
-        st.rerun()
-    if st.session_state.last_route_pages:
-        st.caption(
-            f"Последний проход: стр. {st.session_state.last_scan_page}/{st.session_state.last_route_pages} · "
-            f"проходов пройдено: {st.session_state.market_cycles_done}"
-        )
     st.caption("NASDAQ/NYSE/AMEX · обычные акции до 5 букв · без ETF, фондов, юнитов, варрантов, прав, привилегированных акций и долговых нот")
 
     if base_impulse_only:
@@ -2790,7 +2739,7 @@ if cfg.base_impulse_only:
         [
             chip("Режим", mode_label, "amber"),
             chip("Биржа", exchange),
-            chip("Лимит акций", max_tickers),
+            chip("За прогон", max_tickers),
             chip("Цена", f"${min_price:g}-${max_price:g}"),
             chip("Открытие", "внутри вчерашней свечи", "blue"),
             chip("RVOL", f">{cfg.base_volume_mult:g}x к макс. из {cfg.base_impulse_days}"),
@@ -2803,7 +2752,7 @@ else:
         [
             chip("Режим", mode_label, "blue"),
             chip("Биржа", exchange),
-            chip("Лимит акций", max_tickers),
+            chip("За прогон", max_tickers),
             chip("Цена", f"${min_price:g}-${max_price:g}"),
             chip("Канал", f"{cfg.channel_days} дней / {cfg.max_channel_width_pct:g}%"),
             chip("Расчёт", "High/Low: вся свеча" if cfg.price_basis == "HIGH_LOW" else "Close: закрытия"),
@@ -2815,8 +2764,6 @@ else:
             chip("Объём паттерна", f"сегодня > {cfg.base_volume_mult:g}x каждой из {cfg.base_impulse_days}" if cfg.base_impulse_enabled else "выкл"),
             chip("Свечи/объём", DATA_SOURCE_LABELS.get(data_source, data_source), "green"),
             chip("Долларовый объём", f"${cfg.min_dollar_volume:,}"),
-            chip("Страница", page_num),
-            chip("Маршрут", "авто-дальше" if advance_page_after_scan else "ручной"),
         ]
     )
 st.markdown(
@@ -2837,33 +2784,35 @@ if send_alerts and not telegram_ready:
         "В таком режиме уведомления в бот отправляться не будут."
     )
 
-route_stop_reached = bool(auto_scan and stop_after_cycles > 0 and st.session_state.market_cycles_done >= stop_after_cycles)
-route_hint = f"страница {page_num}"
-if st.session_state.last_route_pages:
-    route_hint = (
-        f"следующая страница {page_num}/{st.session_state.last_route_pages} · "
-        f"проходов пройдено {st.session_state.market_cycles_done}"
-    )
-
-if auto_scan and route_stop_reached:
-    should_auto_run = False
-    auto_text = f"Авто-скан остановлен после {st.session_state.market_cycles_done} проходов · {route_hint}"
-elif auto_scan:
+batch_size = int(max_tickers)
+if auto_scan:
     current = now_et()
     if st.session_state.auto_last_run:
         elapsed_sec = int((current - st.session_state.auto_last_run).total_seconds())
         remaining = max(0, auto_interval * 60 - elapsed_sec)
         should_auto_run = elapsed_sec >= auto_interval * 60
+        last_auto_total = int(st.session_state.last_auto_total or 0)
+        next_range_hint = ""
+        if last_auto_total > 0:
+            next_start = min(int(st.session_state.auto_scan_offset or 0), max(0, last_auto_total - 1))
+            next_end = min(next_start + batch_size, last_auto_total)
+            next_range_hint = f" · следующая пачка: {next_start + 1}-{next_end} из {last_auto_total}"
         auto_text = (
             f"Авто-скан: каждые {auto_interval} мин · последний {elapsed_sec // 60} мин назад · "
-            f"следующий через {remaining // 60} мин · {route_hint}"
+            f"следующий через {remaining // 60} мин · пачка {batch_size} акций · "
+            f"рынок до {AUTO_SCAN_MARKET_LIMIT:,}{next_range_hint}"
         )
     else:
         should_auto_run = True
-        auto_text = f"Авто-скан: каждые {auto_interval} мин · первый запуск ожидается · {route_hint}"
+        auto_text = (
+            f"Авто-скан: каждые {auto_interval} мин · первый запуск ожидается · "
+            f"пачка {batch_size} акций · рынок до {AUTO_SCAN_MARKET_LIMIT:,}"
+        )
 else:
     should_auto_run = False
-    auto_text = f"Авто-скан: выключен · {route_hint}"
+    auto_text = f"Ручной запуск: проверит первые {batch_size} акций и остановится."
+
+st.markdown(f'<div class="desk-muted" style="margin:-0.2rem 0 0.65rem;">{html.escape(auto_text)}</div>', unsafe_allow_html=True)
 
 button_col, clear_col = st.columns([1, 1])
 with button_col:
@@ -2873,20 +2822,37 @@ with clear_col:
         st.session_state.results = []
         st.session_state.stats = {"checked": 0, "signals": 0}
         st.session_state.leader_analysis = None
+        st.session_state.auto_scan_offset = 0
+        st.session_state.auto_scan_signature = ""
+        st.session_state.last_auto_total = None
         st.rerun()
 
 
 if start_scan or (auto_scan and should_auto_run):
-    all_tickers = get_nasdaq_tickers(exchange, max_scan_price)
-    total_pages = total_pages_for(len(all_tickers), int(max_tickers))
-    route_pages = effective_route_pages(total_pages, int(route_page_limit))
-    scan_page = clamp_page(int(page_num), route_pages)
-    page_start = (scan_page - 1) * int(max_tickers)
-    page_end = page_start + int(max_tickers)
-    ticker_infos = all_tickers[page_start:page_end]
-    st.session_state.last_total_pages = total_pages
-    st.session_state.last_route_pages = route_pages
-    st.session_state.last_scan_page = scan_page
+    is_auto_batch = bool(auto_scan and should_auto_run and not start_scan)
+    all_tickers_full = get_nasdaq_tickers(exchange, max_scan_price)
+    batch_size = max(1, int(max_tickers))
+
+    if is_auto_batch:
+        all_tickers = all_tickers_full[:AUTO_SCAN_MARKET_LIMIT]
+        auto_signature = f"{exchange}:{max_scan_price:g}:{AUTO_SCAN_MARKET_LIMIT}:{len(all_tickers)}"
+        if st.session_state.auto_scan_signature != auto_signature:
+            st.session_state.auto_scan_signature = auto_signature
+            st.session_state.auto_scan_offset = 0
+
+        scan_start = int(st.session_state.auto_scan_offset or 0)
+        if scan_start >= len(all_tickers):
+            scan_start = 0
+        scan_end = min(scan_start + batch_size, len(all_tickers))
+        ticker_infos = all_tickers[scan_start:scan_end]
+        scan_scope = f"авто {scan_start + 1}-{scan_end} из {len(all_tickers)}"
+        st.session_state.last_auto_total = len(all_tickers)
+    else:
+        all_tickers = all_tickers_full
+        scan_start = 0
+        scan_end = min(batch_size, len(all_tickers))
+        ticker_infos = all_tickers[:scan_end]
+        scan_scope = f"ручной первые {len(ticker_infos)} из {len(all_tickers)}"
 
     if not ticker_infos:
         st.error("Нет тикеров для сканирования.")
@@ -2919,19 +2885,18 @@ if start_scan or (auto_scan and should_auto_run):
         table_box.empty()
         status_box.empty()
 
-        if advance_page_after_scan:
-            next_page, wrapped = next_route_page(scan_page, route_pages)
-            st.session_state.scan_page = next_page
-            st.session_state.sync_page_widget = True
-            if wrapped:
-                st.session_state.market_cycles_done += 1
+        if is_auto_batch:
+            next_offset = scan_end
+            if next_offset >= len(all_tickers):
+                next_offset = 0
+            st.session_state.auto_scan_offset = next_offset
 
         if hits:
             status_box.empty()
             if send_alerts:
                 send_telegram(
                     f"✅ Скан накопления завершён · найдено {len(hits)} · "
-                    f"проверено {len(ticker_infos)} · страница {scan_page}/{route_pages} · {now_et_str('%H:%M ET')}"
+                    f"проверено {len(ticker_infos)} · {scan_scope} · {now_et_str('%H:%M ET')}"
                 )
                 if send_leader_summary and st.session_state.leader_analysis:
                     send_telegram(telegram_leader_message(st.session_state.leader_analysis))
@@ -3007,4 +2972,3 @@ else:
         """,
         unsafe_allow_html=True,
     )
-
