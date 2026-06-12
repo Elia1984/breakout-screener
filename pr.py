@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import html
-import base64
 import logging
 import os
 import re
@@ -11,7 +10,6 @@ from pathlib import Path
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
-import altair as alt
 import pandas as pd
 import requests
 import streamlit as st
@@ -63,14 +61,27 @@ def apply_custom_theme() -> None:
                 color: var(--desk-ink);
             }
 
-            header[data-testid="stHeader"],
-            div[data-testid="stToolbar"],
             #MainMenu,
             footer {
                 display: none !important;
                 visibility: hidden;
                 height: 0 !important;
                 min-height: 0 !important;
+            }
+
+            header[data-testid="stHeader"] {
+                display: block !important;
+                visibility: visible !important;
+                background: rgba(238, 242, 246, 0.96);
+                box-shadow: none;
+            }
+
+            div[data-testid="stAppDeployButton"],
+            span[data-testid="stMainMenu"] {
+                display: none !important;
+                visibility: hidden !important;
+                width: 0 !important;
+                min-width: 0 !important;
             }
 
             section[data-testid="stSidebar"] {
@@ -386,7 +397,8 @@ def apply_custom_theme() -> None:
                 overflow-wrap: anywhere;
             }
 
-            .pattern-chart-card img {
+            .pattern-chart-card img,
+            .pattern-chart-svg svg {
                 display: block;
                 width: 100%;
                 aspect-ratio: 1.35 / 1;
@@ -474,6 +486,15 @@ def apply_custom_theme() -> None:
             }
 
             @media (max-width: 900px) {
+                header[data-testid="stHeader"] {
+                    height: 3rem !important;
+                    min-height: 3rem !important;
+                }
+
+                section[data-testid="stSidebar"] {
+                    z-index: 999999;
+                }
+
                 .desk-header,
                 .base-results-bar,
                 .desk-empty-panel {
@@ -584,9 +605,6 @@ DATA_SOURCE_LABELS = {
     DATA_SOURCE_YAHOO: "Yahoo Finance",
 }
 
-SIG_UP = "BREAKOUT_UP"
-SIG_DOWN = "BREAKDOWN"
-SIG_SURGE = "VOLUME_SURGE"
 SIG_BASE = "BASE_VOLUME_EXPLOSION"
 SIG_VCP = "VCP_SQUEEZE"
 SIG_SPRING = "SPRING_REVERSAL"
@@ -621,18 +639,11 @@ SCANNER_SUBTITLES = {
 }
 
 SIGNAL_LABELS = {
-    SIG_UP: "ПРОБОЙ ВВЕРХ",
-    SIG_DOWN: "ПРОБОЙ ВНИЗ",
-    SIG_SURGE: "РАННИЙ ОБЪЁМ В КАНАЛЕ",
     SIG_BASE: "ВЗРЫВ ОБЪЁМА ИЗ БАЗЫ",
     SIG_VCP: "VCP-СЖАТИЕ",
     SIG_SPRING: "SPRING ОТ ДНА",
 }
-SIGNAL_ICONS = {SIG_UP: "🟢", SIG_DOWN: "🔴", SIG_SURGE: "🔥", SIG_BASE: "⚡", SIG_VCP: "🌀", SIG_SPRING: "🌱"}
 SIGNAL_SHORT_LABELS = {
-    SIG_UP: "Пробой вверх",
-    SIG_DOWN: "Пробой вниз",
-    SIG_SURGE: "Ранний объём",
     SIG_BASE: "Взрыв базы",
     SIG_VCP: "VCP-сжатие",
     SIG_SPRING: "Spring от дна",
@@ -708,18 +719,6 @@ ALPACA_HEADERS = {
 @dataclass(frozen=True)
 class ScanConfig:
     scanner_mode: str = SCANNER_BASE
-    channel_days: int = 14
-    max_channel_width_pct: float = 8.0
-    price_basis: str = "HIGH_LOW"  # HIGH_LOW / CLOSE
-
-    require_price_break: bool = True
-    allow_volume_alert_inside_channel: bool = False
-    breakout_buffer_pct: float = 0.5
-    directions: str = "ALL"  # ALL / UP / DOWN
-
-    volume_baseline: str = "MAX"  # MAX / AVG
-    min_volume_mult: float = 2.0
-    min_channel_avg_volume: int = 100_000
     min_dollar_volume: int = 250_000
 
     base_impulse_enabled: bool = True
@@ -727,7 +726,6 @@ class ScanConfig:
     base_volume_mult: float = 10.0
     base_impulse_only: bool = False
 
-    max_gap_pct: float = 8.0
     max_stale_days: int = 5
     min_price: float = 0.5
     max_price: float = 20.0
@@ -1087,20 +1085,6 @@ def fetch_yahoo_batch(symbols: tuple[str, ...], days: int) -> dict[str, pd.DataF
     return out
 
 
-def fetch_daily_history(ticker: str, days: int, data_source: str) -> pd.DataFrame | None:
-    symbol = ticker.upper()
-    if data_source in {DATA_SOURCE_ALPACA_SIP, DATA_SOURCE_AUTO}:
-        alpaca_rows = fetch_alpaca_sip_delayed_batch((symbol,), days)
-        history = alpaca_rows.get(symbol)
-        if history is not None:
-            return history
-
-    if data_source in {DATA_SOURCE_YAHOO, DATA_SOURCE_AUTO}:
-        return fetch_yahoo_daily(symbol, days)
-
-    return None
-
-
 def required_history_days(cfg: ScanConfig) -> int:
     if cfg.scanner_mode == SCANNER_VCP:
         return max(int(cfg.vcp_days), 30)
@@ -1172,24 +1156,12 @@ def load_bars(
 
 # ── SIGNAL LOGIC ──────────────────────────────────────────────────
 @dataclass(frozen=True)
-class Channel:
-    low: float
-    high: float
-    width_pct: float
-    vol_max: float
-    vol_avg: float
-    avg_dollar_volume: float
-    max_gap_pct: float
-
-
-@dataclass(frozen=True)
 class BaseImpulse:
     low: float
     high: float
     width_pct: float
     vol_max: float
     vol_avg: float
-    max_gap_pct: float
     volume_mult: float
     move_pct: float
     body_pct: float
@@ -1219,43 +1191,6 @@ class SpringSetup:
     volume_mult: float
     from_low_pct: float
     move_pct: float
-
-
-def build_channel(df: pd.DataFrame, cfg: ScanConfig) -> Channel | None:
-    if len(df) < cfg.channel_days + 2:
-        return None
-
-    window = df.iloc[-(cfg.channel_days + 1) : -1].copy()
-    if len(window) < cfg.channel_days:
-        return None
-
-    if cfg.price_basis == "HIGH_LOW":
-        channel_low = float(window["Low"].min())
-        channel_high = float(window["High"].max())
-    else:
-        channel_low = float(window["Close"].min())
-        channel_high = float(window["Close"].max())
-
-    if channel_low <= 0 or channel_high <= channel_low:
-        return None
-
-    volumes = window["Volume"][window["Volume"] > 0]
-    if volumes.empty:
-        return None
-
-    prev_close = window["Close"].shift(1)
-    gaps = ((window["Open"] - prev_close).abs() / prev_close * 100).dropna()
-    max_gap = float(gaps.max()) if not gaps.empty else 0.0
-
-    return Channel(
-        low=channel_low,
-        high=channel_high,
-        width_pct=(channel_high - channel_low) / channel_low * 100,
-        vol_max=float(volumes.max()),
-        vol_avg=float(volumes.mean()),
-        avg_dollar_volume=float((window["Close"] * window["Volume"]).mean()),
-        max_gap_pct=max_gap,
-    )
 
 
 def build_base_impulse(df: pd.DataFrame, cfg: ScanConfig) -> BaseImpulse | None:
@@ -1296,8 +1231,6 @@ def build_base_impulse(df: pd.DataFrame, cfg: ScanConfig) -> BaseImpulse | None:
     if latest_volume <= vol_max * cfg.base_volume_mult:
         return None
 
-    prev_close = float(prev["Close"])
-    latest_gap_pct = (latest_open - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
     body_pct = abs(latest_close - latest_open) / latest_open * 100
     move_pct = (latest_close - latest_open) / latest_open * 100
     return BaseImpulse(
@@ -1306,7 +1239,6 @@ def build_base_impulse(df: pd.DataFrame, cfg: ScanConfig) -> BaseImpulse | None:
         width_pct=(prev_high - prev_low) / prev_low * 100,
         vol_max=vol_max,
         vol_avg=vol_avg,
-        max_gap_pct=abs(latest_gap_pct),
         volume_mult=volume_mult,
         move_pct=move_pct,
         body_pct=body_pct,
@@ -1464,15 +1396,55 @@ def build_spring_setup(df: pd.DataFrame, cfg: ScanConfig) -> SpringSetup | None:
     )
 
 
-def pattern_chart_data_uri(
+def pattern_chart_payload(
     df: pd.DataFrame,
     lookback: int,
     band_low: float | None = None,
     band_high: float | None = None,
     band_label: str = "зона сигнала",
-) -> str:
+) -> dict[str, Any]:
     chart_df = df.dropna(subset=["Open", "High", "Low", "Close"]).tail(max(lookback + 1, 14)).copy()
     if chart_df.empty:
+        return {}
+
+    chart_df["Volume"] = pd.to_numeric(chart_df["Volume"], errors="coerce").fillna(0)
+    chart_df["Open"] = pd.to_numeric(chart_df["Open"], errors="coerce")
+    chart_df["High"] = pd.to_numeric(chart_df["High"], errors="coerce")
+    chart_df["Low"] = pd.to_numeric(chart_df["Low"], errors="coerce")
+    chart_df["Close"] = pd.to_numeric(chart_df["Close"], errors="coerce")
+    chart_df = chart_df.dropna(subset=["Open", "High", "Low", "Close"])
+    if chart_df.empty:
+        return {}
+
+    if band_low is None or band_high is None:
+        if len(chart_df) >= 2:
+            prev = chart_df.iloc[-2]
+            band_low = float(prev["Low"])
+            band_high = float(prev["High"])
+
+    rows = []
+    for row in chart_df.itertuples(index=False):
+        rows.append(
+            {
+                "Open": float(getattr(row, "Open")),
+                "High": float(getattr(row, "High")),
+                "Low": float(getattr(row, "Low")),
+                "Close": float(getattr(row, "Close")),
+                "Volume": float(getattr(row, "Volume")),
+            }
+        )
+
+    return {
+        "rows": rows,
+        "band_low": band_low,
+        "band_high": band_high,
+        "band_label": band_label,
+    }
+
+
+def pattern_chart_svg(payload: dict[str, Any]) -> str:
+    rows = payload.get("rows") if isinstance(payload, dict) else None
+    if not isinstance(rows, list) or not rows:
         return ""
 
     width = 460
@@ -1486,21 +1458,11 @@ def pattern_chart_data_uri(
     price_h = price_bottom - price_top
     volume_h = volume_bottom - volume_top
 
-    chart_df["Volume"] = pd.to_numeric(chart_df["Volume"], errors="coerce").fillna(0)
-    chart_df["Open"] = pd.to_numeric(chart_df["Open"], errors="coerce")
-    chart_df["High"] = pd.to_numeric(chart_df["High"], errors="coerce")
-    chart_df["Low"] = pd.to_numeric(chart_df["Low"], errors="coerce")
-    chart_df["Close"] = pd.to_numeric(chart_df["Close"], errors="coerce")
-    chart_df = chart_df.dropna(subset=["Open", "High", "Low", "Close"])
-    if chart_df.empty:
-        return ""
-
-    plot_w = width - pad_x * 2
-
-    lows = chart_df["Low"]
-    highs = chart_df["High"]
-    min_price = float(lows.min())
-    max_price = float(highs.max())
+    min_price = min(float(row["Low"]) for row in rows)
+    max_price = max(float(row["High"]) for row in rows)
+    band_low = payload.get("band_low")
+    band_high = payload.get("band_high")
+    band_label = str(payload.get("band_label") or "зона сигнала")
     if band_low and band_low > 0:
         min_price = min(min_price, float(band_low))
     if band_high and band_high > 0:
@@ -1511,14 +1473,14 @@ def pattern_chart_data_uri(
     def y_pos(value: float) -> float:
         return price_top + (max_price - value) / (max_price - min_price) * price_h
 
-    max_volume = float(chart_df["Volume"].max())
+    max_volume = max(float(row.get("Volume", 0)) for row in rows)
     if max_volume <= 0:
         max_volume = 1.0
 
     def vol_y(value: float) -> float:
         return volume_bottom - value / max_volume * volume_h
 
-    count = len(chart_df)
+    count = len(rows)
     step = plot_w / max(count - 1, 1)
     candle_w = max(5.0, min(11.0, step * 0.62))
     parts = [
@@ -1530,14 +1492,8 @@ def pattern_chart_data_uri(
         f'<line x1="{pad_x}" x2="{width - pad_x}" y1="{price_bottom}" y2="{price_bottom}" stroke="#edf2f7"/>',
         f'<line x1="{pad_x}" x2="{width - pad_x}" y1="{volume_bottom}" y2="{volume_bottom}" stroke="#edf2f7"/>',
         f'<text x="{pad_x}" y="{height - 12}" fill="#667085" font-size="11" font-family="Inter, Arial, sans-serif">цена / объём</text>',
-        f'<text x="{width - pad_x}" y="{height - 12}" fill="#667085" font-size="11" font-family="Inter, Arial, sans-serif" text-anchor="end">{len(chart_df)} свечей</text>',
+        f'<text x="{width - pad_x}" y="{height - 12}" fill="#667085" font-size="11" font-family="Inter, Arial, sans-serif" text-anchor="end">{len(rows)} свечей</text>',
     ]
-
-    if band_low is None or band_high is None:
-        if len(chart_df) >= 2:
-            prev = chart_df.iloc[-2]
-            band_low = float(prev["Low"])
-            band_high = float(prev["High"])
 
     if band_low is not None and band_high is not None and band_high > band_low > 0:
         band_y = y_pos(float(band_high))
@@ -1548,20 +1504,20 @@ def pattern_chart_data_uri(
             f'font-size="11" font-weight="700" font-family="Inter, Arial, sans-serif">{html.escape(band_label)}</text>'
         )
 
-    prior_volumes = chart_df["Volume"].iloc[:-1]
-    if not prior_volumes.empty and float(prior_volumes.max()) > 0:
-        prior_max_y = vol_y(float(prior_volumes.max()))
+    prior_volumes = [float(row.get("Volume", 0)) for row in rows[:-1]]
+    if prior_volumes and max(prior_volumes) > 0:
+        prior_max_y = vol_y(max(prior_volumes))
         parts.append(
             f'<line x1="{pad_x}" x2="{width - pad_x}" y1="{prior_max_y:.2f}" y2="{prior_max_y:.2f}" '
             f'stroke="#667085" stroke-width="1.3" stroke-dasharray="5 4"/>'
         )
 
-    for idx, row in enumerate(chart_df.itertuples(index=False), start=0):
-        open_price = float(getattr(row, "Open"))
-        high_price = float(getattr(row, "High"))
-        low_price = float(getattr(row, "Low"))
-        close_price = float(getattr(row, "Close"))
-        volume = float(getattr(row, "Volume"))
+    for idx, row in enumerate(rows, start=0):
+        open_price = float(row["Open"])
+        high_price = float(row["High"])
+        low_price = float(row["Low"])
+        close_price = float(row["Close"])
+        volume = float(row.get("Volume", 0))
         x = pad_x + idx * step
         color = "#047857" if close_price >= open_price else "#b42318"
         y_high = y_pos(high_price)
@@ -1584,36 +1540,13 @@ def pattern_chart_data_uri(
         )
 
     parts.append("</svg>")
-    svg = "".join(parts)
-    encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
-    return f"data:image/svg+xml;base64,{encoded}"
+    return "".join(parts)
 
 
-def score_signal(
-    signal_code: str,
-    channel_width: float,
-    volume_mult: float,
-    breakout_pct: float,
-    max_gap_pct: float,
-    cfg: ScanConfig,
-) -> int:
-    if signal_code == SIG_BASE:
-        volume_score = min(70.0, volume_mult / max(cfg.base_volume_mult, 0.1) * 35.0)
-        move_score = min(20.0, max(0.0, breakout_pct) * 2.0)
-        return int(round(volume_score + move_score + 10.0))
-
-    volume_floor = cfg.min_volume_mult
-    max_width = cfg.max_channel_width_pct
-    volume_score = min(45.0, volume_mult / max(volume_floor, 0.1) * 22.5)
-    channel_score = max(
-        0.0,
-        min(25.0, (max_width - channel_width) / max(max_width, 0.1) * 25.0),
-    )
-    breakout_score = min(20.0, abs(breakout_pct) * 2.5)
-    if signal_code == SIG_SURGE:
-        breakout_score = min(breakout_score, 6.0)
-    gap_score = max(0.0, min(10.0, (1 - max_gap_pct / max(cfg.max_gap_pct, 0.1)) * 10.0))
-    return int(round(volume_score + channel_score + breakout_score + gap_score))
+def score_base_signal(setup: BaseImpulse, cfg: ScanConfig) -> int:
+    volume_score = min(70.0, setup.volume_mult / max(cfg.base_volume_mult, 0.1) * 35.0)
+    move_score = min(20.0, max(0.0, setup.move_pct) * 2.0)
+    return int(round(volume_score + move_score + 10.0))
 
 
 def score_vcp(setup: VcpSetup, cfg: ScanConfig) -> int:
@@ -1675,7 +1608,7 @@ def detect_signal(
         prev_close = float(df.iloc[-2]["Close"])
         latest_gap_pct = (latest_open - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
         volume_over_max_pct = (base.volume_mult - 1) * 100
-        score = score_signal(SIG_BASE, base.width_pct, base.volume_mult, base.move_pct, base.max_gap_pct, cfg)
+        score = score_base_signal(base, cfg)
         signal = SIGNAL_LABELS[SIG_BASE]
         return {
             "_sig": SIG_BASE,
@@ -1685,7 +1618,7 @@ def detect_signal(
             "_gap": latest_gap_pct,
             "_move_pct": base.move_pct,
             "_volume_over_max_pct": volume_over_max_pct,
-            "_chart_uri": pattern_chart_data_uri(
+            "_chart_payload": pattern_chart_payload(
                 df,
                 cfg.base_impulse_days,
                 base.low,
@@ -1703,9 +1636,6 @@ def detect_signal(
             "Объём ×": round(base.volume_mult, 2),
             "Объём": int(latest_volume),
             "Макс. объём периода": int(base.vol_max),
-            "Ср. объём канала": int(base.vol_avg),
-            "Ширина канала": f"{base.width_pct:.1f}%",
-            "Канал": f"вчера ${base.low:.4f}-${base.high:.4f}",
             "Тело свечи %": round(base.body_pct, 1),
             "Долларовый объём": int(price * latest_volume),
             "Капитализация": ticker_info.get("market_cap") or 0,
@@ -1730,7 +1660,7 @@ def detect_signal(
             "_width": setup.base_width_pct,
             "_gap": latest_gap_pct,
             "_move_pct": setup.move_pct,
-            "_chart_uri": pattern_chart_data_uri(
+            "_chart_payload": pattern_chart_payload(
                 df,
                 cfg.vcp_days,
                 setup.low,
@@ -1747,9 +1677,6 @@ def detect_signal(
             "Гэп сегодня": f"{latest_gap_pct:+.1f}%",
             "Объём ×": round(setup.current_volume_ratio, 2),
             "Объём": int(latest_volume),
-            "Ср. объём канала": int(latest_volume / setup.current_volume_ratio) if setup.current_volume_ratio > 0 else 0,
-            "Ширина канала": f"{setup.base_width_pct:.1f}%",
-            "Канал": f"VCP ${setup.low:.4f}-${setup.high:.4f}",
             "Тело свечи %": round(body_pct, 1),
             "Сжатие": f"{setup.first_width_pct:.1f}% → {setup.recent_width_pct:.1f}%",
             "Сухой объём": f"{setup.dry_volume_ratio:.2f}×",
@@ -1773,7 +1700,7 @@ def detect_signal(
             "_width": setup.support_range_pct,
             "_gap": latest_gap_pct,
             "_move_pct": setup.move_pct,
-            "_chart_uri": pattern_chart_data_uri(
+            "_chart_payload": pattern_chart_payload(
                 df,
                 max(cfg.spring_support_days, 30),
                 setup.support * 0.99,
@@ -1790,9 +1717,6 @@ def detect_signal(
             "Гэп сегодня": f"{latest_gap_pct:+.1f}%",
             "Объём ×": round(setup.volume_mult, 2),
             "Объём": int(latest_volume),
-            "Ср. объём канала": int(latest_volume / setup.volume_mult) if setup.volume_mult > 0 else 0,
-            "Ширина канала": f"{setup.support_range_pct:.1f}%",
-            "Канал": f"поддержка ${setup.support:.4f} / прокол ${setup.latest_low:.4f}",
             "Тело свечи %": round(body_pct, 1),
             "Прокол": f"{setup.break_pct:.1f}%",
             "Возврат": f"{setup.reclaim_pct:+.1f}%",
@@ -1845,8 +1769,9 @@ def scan_market(
             hits.append(row)
             st.session_state.stats["signals"] = len(hits)
             visible_hits = sort_results(hits, cfg.base_impulse_only)
+            visible_frame = display_frame(visible_hits, cfg.base_impulse_only)
             table_box.dataframe(
-                display_frame(visible_hits, cfg.base_impulse_only),
+                styled_display_frame(visible_frame),
                 use_container_width=True,
                 hide_index=True,
                 column_config=display_column_config(cfg.base_impulse_only),
@@ -1991,7 +1916,7 @@ def format_int_cell(value: Any) -> str:
         number = int(float(value))
     except (TypeError, ValueError):
         return ""
-    return f"{number:,}".replace(",", ".")
+    return f"{number:,}".replace(",", " ")
 
 
 def format_dollar_cell(value: Any) -> str:
@@ -2001,7 +1926,7 @@ def format_dollar_cell(value: Any) -> str:
         return ""
     if number <= 0:
         return ""
-    return f"${number:,}".replace(",", ".")
+    return f"${number:,}".replace(",", " ")
 
 
 def format_market_cap_cell(value: Any) -> str:
@@ -2020,9 +1945,6 @@ def format_signal_cell(row: pd.Series) -> str:
         return SIGNAL_SHORT_LABELS[sig]
     raw = str(row.get("Сигнал", ""))
     replacements = {
-        "ПРОБОЙ ВВЕРХ": "Пробой вверх",
-        "ПРОБОЙ ВНИЗ": "Пробой вниз",
-        "РАННИЙ ОБЪЁМ В КАНАЛЕ": "Ранний объём",
         "ВЗРЫВ ОБЪЁМА ИЗ БАЗЫ": "Взрыв базы",
     }
     return replacements.get(raw, raw)
@@ -2040,11 +1962,23 @@ def display_column_config(base_pattern: bool = False) -> dict[str, Any]:
             help="Сегодняшний объём / выбранная база сравнения объёма. Для взрыва базы это максимум любой из предыдущих свечей.",
         ),
         "Движение %": st.column_config.NumberColumn("Движение %", width="small", format="%.1f%%"),
-        "Объём": st.column_config.NumberColumn("Объём", width="medium", format="%d"),
-        "Долларовый объём": st.column_config.NumberColumn("Долларовый объём", width="medium", format="$%d"),
-        "Капитализация": st.column_config.NumberColumn("Капитализация", width="medium", format="$%d"),
+        "Объём": st.column_config.NumberColumn("Объём", width="medium"),
+        "Долларовый объём": st.column_config.NumberColumn("Долларовый объём", width="medium"),
+        "Капитализация": st.column_config.NumberColumn("Капитализация", width="medium"),
         "Время": st.column_config.TextColumn("Время", width="small"),
     }
+
+
+def spaced_number(value: Any, prefix: str = "") -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if pd.isna(number):
+        return ""
+    if number <= 0:
+        return "—" if prefix else ""
+    return f"{prefix}{int(round(number)):,}".replace(",", " ")
 
 
 def display_frame(rows: list[dict[str, Any]], base_pattern: bool = False, include_chart: bool = True) -> pd.DataFrame:
@@ -2079,13 +2013,23 @@ def display_frame(rows: list[dict[str, Any]], base_pattern: bool = False, includ
     return frame[columns]
 
 
+def styled_display_frame(frame: pd.DataFrame) -> pd.io.formats.style.Styler:
+    formatters = {
+        "Объём": lambda value: spaced_number(value),
+        "Долларовый объём": lambda value: spaced_number(value, "$"),
+        "Капитализация": lambda value: spaced_number(value, "$"),
+    }
+    active_formatters = {col: fmt for col, fmt in formatters.items() if col in frame.columns}
+    return frame.style.format(active_formatters)
+
+
 def render_results_summary(rows: list[dict[str, Any]]) -> None:
     count = len(rows)
     best_rvol = max((safe_float(row.get("_rvol")) for row in rows), default=0.0)
     total_dollar_volume = sum(safe_float(row.get("Долларовый объём")) for row in rows)
     latest_time = str(rows[0].get("Время", now_et_str())) if rows else now_et_str()
     count_parts = []
-    for code in (SIG_BASE, SIG_VCP, SIG_SPRING, SIG_UP, SIG_DOWN, SIG_SURGE):
+    for code in (SIG_BASE, SIG_VCP, SIG_SPRING):
         signal_count = sum(1 for row in rows if str(row.get("_sig", "")) == code)
         if signal_count:
             count_parts.append(f"{SIGNAL_SHORT_LABELS.get(code, code)} {signal_count}")
@@ -2110,156 +2054,23 @@ def render_results_summary(rows: list[dict[str, Any]]) -> None:
     )
 
 
-def format_chart_option(row: dict[str, Any]) -> str:
-    return (
-        f"{row.get('Тикер', '')} · {row.get('Сигнал', '')} · "
-        f"балл {row.get('Балл', '')} · выход {row.get('Выход %', '—')} · объём ×{row.get('Объём ×', '—')}"
-    )
-
-
-def build_signal_chart(df: pd.DataFrame, cfg: ScanConfig, signal_code: str | None = None) -> alt.Chart | None:
-    base = build_base_impulse(df, cfg) if signal_code == SIG_BASE else None
-    vcp = build_vcp_setup(df, cfg) if signal_code == SIG_VCP else None
-    spring = build_spring_setup(df, cfg) if signal_code == SIG_SPRING else None
-    if base is not None:
-        line_low = base.low
-        line_high = base.high
-        line_volume_avg = base.vol_avg
-        lookback_days = cfg.base_impulse_days
-        high_label = "Верх вчерашней свечи"
-        low_label = "Низ вчерашней свечи"
-        volume_label = "Средний объём 10 свечей"
-    elif vcp is not None:
-        line_low = vcp.low
-        line_high = vcp.high
-        line_volume_avg = float(pd.to_numeric(df.tail(cfg.vcp_days)["Volume"], errors="coerce").dropna().mean())
-        lookback_days = cfg.vcp_days
-        high_label = "Верх VCP-базы"
-        low_label = "Низ VCP-базы"
-        volume_label = "Средний объём VCP"
-    elif spring is not None:
-        line_low = spring.support * 0.99
-        line_high = spring.support * 1.01
-        line_volume_avg = float(pd.to_numeric(df.iloc[-(cfg.spring_support_days + 1) : -1]["Volume"], errors="coerce").dropna().mean())
-        lookback_days = max(30, cfg.spring_support_days)
-        high_label = "Зона поддержки +1%"
-        low_label = "Зона поддержки -1%"
-        volume_label = "Средний объём поддержки"
-    else:
-        return None
-
-    chart_df = df.tail(lookback_days + 8).reset_index()
-    chart_df.rename(columns={chart_df.columns[0]: "Date"}, inplace=True)
-    chart_df["Date"] = pd.to_datetime(chart_df["Date"], errors="coerce")
-    if getattr(chart_df["Date"].dt, "tz", None) is not None:
-        chart_df["Date"] = chart_df["Date"].dt.tz_convert(None)
-    chart_df = chart_df.dropna(subset=["Date", "Open", "High", "Low", "Close", "Volume"]).copy()
-    if chart_df.empty:
-        return None
-
-    chart_df["Направление"] = chart_df.apply(lambda row: "Вверх" if row["Close"] >= row["Open"] else "Вниз", axis=1)
-    channel_df = pd.DataFrame(
-        {
-            "Уровень": [line_high, line_low],
-            "Линия": [high_label, low_label],
-        }
-    )
-    volume_df = pd.DataFrame({"Уровень": [line_volume_avg], "Линия": [volume_label]})
-    latest_df = chart_df.tail(1).copy()
-
-    price_scale_min = min(float(chart_df["Low"].min()), line_low) * 0.985
-    price_scale_max = max(float(chart_df["High"].max()), line_high) * 1.015
-
-    color_scale = alt.Scale(domain=["Вверх", "Вниз"], range=["#047857", "#b42318"])
-    wick = (
-        alt.Chart(chart_df)
-        .mark_rule()
-        .encode(
-            x=alt.X("Date:T", title=None),
-            y=alt.Y("Low:Q", title="Цена", scale=alt.Scale(domain=[price_scale_min, price_scale_max])),
-            y2="High:Q",
-            color=alt.Color("Направление:N", scale=color_scale, legend=None),
-            tooltip=[
-                alt.Tooltip("Date:T", title="Дата"),
-                alt.Tooltip("Open:Q", title="Open", format=".4f"),
-                alt.Tooltip("High:Q", title="High", format=".4f"),
-                alt.Tooltip("Low:Q", title="Low", format=".4f"),
-                alt.Tooltip("Close:Q", title="Close", format=".4f"),
-                alt.Tooltip("Volume:Q", title="Volume", format=",.0f"),
-            ],
-        )
-    )
-    body = (
-        alt.Chart(chart_df)
-        .mark_bar(size=9)
-        .encode(
-            x=alt.X("Date:T", title=None),
-            y=alt.Y("Open:Q", title="Цена", scale=alt.Scale(domain=[price_scale_min, price_scale_max])),
-            y2="Close:Q",
-            color=alt.Color("Направление:N", scale=color_scale, legend=None),
-        )
-    )
-    channel_lines = (
-        alt.Chart(channel_df)
-        .mark_rule(strokeDash=[6, 4], size=2)
-        .encode(
-            y=alt.Y("Уровень:Q", title="Цена", scale=alt.Scale(domain=[price_scale_min, price_scale_max])),
-            color=alt.Color("Линия:N", scale=alt.Scale(range=["#175cd3", "#b54708"]), legend=alt.Legend(orient="top")),
-        )
-    )
-    open_marker = (
-        alt.Chart(latest_df)
-        .mark_point(filled=True, shape="diamond", size=95, color="#175cd3")
-        .encode(
-            x=alt.X("Date:T", title=None),
-            y=alt.Y("Open:Q", title="Цена", scale=alt.Scale(domain=[price_scale_min, price_scale_max])),
-            tooltip=[
-                alt.Tooltip("Date:T", title="Дата"),
-                alt.Tooltip("Open:Q", title="Открытие", format=".4f"),
-                alt.Tooltip("Close:Q", title="Закрытие", format=".4f"),
-            ],
-        )
-    )
-    price_chart = alt.layer(wick, body, channel_lines, open_marker).properties(height=330)
-
-    volume_bars = (
-        alt.Chart(chart_df)
-        .mark_bar(size=9, opacity=0.72)
-        .encode(
-            x=alt.X("Date:T", title=None),
-            y=alt.Y("Volume:Q", title="Объём"),
-            color=alt.Color("Направление:N", scale=color_scale, legend=None),
-            tooltip=[
-                alt.Tooltip("Date:T", title="Дата"),
-                alt.Tooltip("Volume:Q", title="Volume", format=",.0f"),
-            ],
-        )
-    )
-    volume_avg = (
-        alt.Chart(volume_df)
-        .mark_rule(strokeDash=[5, 4], color="#667085")
-        .encode(y=alt.Y("Уровень:Q", title="Объём"))
-    )
-    volume_chart = alt.layer(volume_bars, volume_avg).properties(height=105)
-
-    return alt.vconcat(price_chart, volume_chart).resolve_scale(x="shared")
-
-
-def render_signal_gallery(rows: list[dict[str, Any]]) -> None:
+def render_signal_gallery(rows: list[dict[str, Any]], max_cards: int) -> None:
     cards = [
         row
         for row in rows
-        if isinstance(row, dict) and row.get("_chart_uri")
+        if isinstance(row, dict) and row.get("_chart_payload")
     ]
     if not cards:
         return
 
     st.markdown('<div class="desk-section-title">Графики найденных акций</div>', unsafe_allow_html=True)
-    max_cards = min(len(cards), 60)
+    max_cards = min(len(cards), max(0, int(max_cards)))
+    if max_cards <= 0:
+        return
     columns = st.columns(2, gap="large")
     for idx, row in enumerate(cards[:max_cards]):
-        chart_uri = str(row.get("_chart_uri", ""))
-        if not chart_uri:
+        chart_svg = pattern_chart_svg(row.get("_chart_payload") or {})
+        if not chart_svg:
             continue
         ticker = html.escape(str(row.get("Тикер", "")))
         signal = html.escape(SIGNAL_SHORT_LABELS.get(str(row.get("_sig", "")), str(row.get("Сигнал", ""))))
@@ -2269,6 +2080,7 @@ def render_signal_gallery(rows: list[dict[str, Any]]) -> None:
         volume = html.escape(format_int_cell(row.get("Объём")))
         dollar_volume = html.escape(format_dollar_cell(row.get("Долларовый объём")))
         market_cap = html.escape(format_market_cap_cell(row.get("Капитализация")))
+        chart_html = f'<div class="pattern-chart-svg">{chart_svg}</div>'
         with columns[idx % 2]:
             st.markdown(
                 f"""
@@ -2286,54 +2098,11 @@ def render_signal_gallery(rows: list[dict[str, Any]]) -> None:
                         <div class="pattern-chart-stat"><span>Капитал</span><strong>{market_cap}</strong></div>
                         <div class="pattern-chart-stat"><span>Время</span><strong>{html.escape(str(row.get("Время", "")))}</strong></div>
                     </div>
-                    <img src="{html.escape(chart_uri, quote=True)}" alt="{ticker} chart" />
+                    {chart_html}
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-
-
-def render_signal_chart(rows: list[dict[str, Any]], cfg: ScanConfig, data_source: str) -> None:
-    clean_rows = [row for row in rows if isinstance(row, dict) and row.get("Тикер")]
-    if not clean_rows:
-        return
-
-    st.markdown('<div class="desk-section-title">График сигнала</div>', unsafe_allow_html=True)
-    selected_idx = st.selectbox(
-        "Сигнал на графике",
-        list(range(len(clean_rows))),
-        format_func=lambda idx: format_chart_option(clean_rows[idx]),
-        key="signal_chart_selector",
-    )
-    selected = clean_rows[int(selected_idx)]
-    ticker = str(selected.get("Тикер", "")).upper()
-    history_days = required_history_days(cfg)
-    history = fetch_daily_history(ticker, history_days, data_source)
-    if history is None:
-        st.warning(f"Не удалось загрузить график для {ticker} через {DATA_SOURCE_LABELS.get(data_source, data_source)}.")
-        return
-
-    chart = build_signal_chart(history, cfg, str(selected.get("_sig", "")))
-    if chart is None:
-        st.warning(f"Недостаточно свечей для графика {ticker}.")
-        return
-
-    if str(selected.get("_sig", "")) == SIG_BASE or cfg.base_impulse_only:
-        m1, m2, m3, m4, m5, m6 = st.columns(6)
-        m1.metric("Тикер", ticker)
-        m2.metric("Сигнал", "Взрыв базы")
-        m3.metric("Цена", format_price_cell(selected.get("Цена")))
-        m4.metric("RVOL", format_rw_cell(selected.get("_rvol")))
-        m5.metric("Движение", format_percent_cell(selected.get("_move_pct")))
-        m6.metric("Объём", format_int_cell(selected.get("Объём")))
-    else:
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Тикер", ticker)
-        m2.metric("Сигнал", str(selected.get("Сигнал", "")))
-        m3.metric("Канал", str(selected.get("Канал", "—")))
-        m4.metric("Объём ×", str(selected.get("Объём ×", "—")))
-        m5.metric("Гэп сегодня", str(selected.get("Гэп сегодня", "—")))
-    st.altair_chart(chart, use_container_width=True)
 
 
 # ── FORMAT HELPERS ──────────────────────────────────────────────────
@@ -2415,7 +2184,7 @@ with st.sidebar:
 
     st.markdown('<div class="desk-section-title">Данные</div>', unsafe_allow_html=True)
     data_source_label = st.selectbox(
-        "Свечи, канал и дневной объём",
+        "Свечи и дневной объём",
         [
             DATA_SOURCE_LABELS[DATA_SOURCE_AUTO],
             DATA_SOURCE_LABELS[DATA_SOURCE_ALPACA_SIP],
@@ -2453,22 +2222,10 @@ with st.sidebar:
         50,
         help=(
             "Ручной запуск проверит только эту пачку и остановится. "
-            f"Авто-скан будет идти по всему списку до {AUTO_SCAN_MARKET_LIMIT:,} акций такими пачками."
+            f"Авто-скан будет идти по всему списку до {format_int_cell(AUTO_SCAN_MARKET_LIMIT)} акций такими пачками."
         ),
     )
     st.caption("NASDAQ/NYSE/AMEX · обычные акции до 5 букв · без ETF, фондов, юнитов, варрантов, прав, привилегированных акций и долговых нот")
-
-    channel_days = 14
-    max_channel_width_pct = 8.0
-    price_basis = "HIGH_LOW"
-    max_gap_pct = 8.0
-    breakout_buffer_pct = 0.0
-    directions = "ALL"
-    require_price_break = False
-    allow_volume_alert_inside_channel = False
-    volume_baseline = "MAX"
-    min_volume_mult = 1.0
-    min_channel_avg_volume = 0
 
     st.markdown('<div class="desk-section-title">Свежесть и ликвидность</div>', unsafe_allow_html=True)
     max_stale_days = st.slider(
@@ -2586,6 +2343,14 @@ with st.sidebar:
         st.session_state.notified_signals = set()
         st.success("Повторы сброшены.")
 
+    st.markdown('<div class="desk-section-title">Отображение</div>', unsafe_allow_html=True)
+    chart_limit = st.select_slider(
+        "Графиков показывать",
+        options=[10, 20, 30, 50],
+        value=20,
+        help="Ограничивает только нижнюю галерею графиков. Таблица результатов остаётся полной.",
+    )
+
 
 # ── AUTO REFRESH ──────────────────────────────────────────────────
 if auto_scan and st_autorefresh is not None:
@@ -2600,22 +2365,11 @@ status_tone = {"success": "green", "warning": "amber", "info": "blue"}.get(statu
 
 cfg = ScanConfig(
     scanner_mode=scanner_mode,
-    channel_days=channel_days,
-    max_channel_width_pct=max_channel_width_pct,
-    price_basis=price_basis,
-    require_price_break=require_price_break,
-    allow_volume_alert_inside_channel=allow_volume_alert_inside_channel,
-    breakout_buffer_pct=breakout_buffer_pct,
-    directions=directions,
-    volume_baseline=volume_baseline,
-    min_volume_mult=min_volume_mult,
-    min_channel_avg_volume=int(min_channel_avg_volume),
     min_dollar_volume=int(min_dollar_volume),
     base_impulse_enabled=base_impulse_enabled,
     base_impulse_days=base_impulse_days,
     base_volume_mult=base_volume_mult,
     base_impulse_only=base_impulse_only,
-    max_gap_pct=max_gap_pct,
     max_stale_days=max_stale_days,
     min_price=min_price,
     max_price=max_price,
@@ -2662,7 +2416,7 @@ if cfg.scanner_mode == SCANNER_BASE:
         [
             chip("Режим", mode_label, "amber"),
             chip("Биржа", exchange),
-            chip("За прогон", max_tickers),
+            chip("За прогон", format_int_cell(max_tickers)),
             chip("Цена", f"${min_price:g}-${max_price:g}"),
             chip("Открытие", "внутри вчерашней свечи", "blue"),
             chip("RVOL", f">{cfg.base_volume_mult:g}x к макс. из {cfg.base_impulse_days}"),
@@ -2675,7 +2429,7 @@ elif cfg.scanner_mode == SCANNER_VCP:
         [
             chip("Режим", mode_label, "blue"),
             chip("Биржа", exchange),
-            chip("За прогон", max_tickers),
+            chip("За прогон", format_int_cell(max_tickers)),
             chip("Цена", f"${min_price:g}-${max_price:g}"),
             chip("VCP", f"{cfg.vcp_days} дней"),
             chip("База", f"до {cfg.vcp_max_base_width_pct:g}%"),
@@ -2685,7 +2439,7 @@ elif cfg.scanner_mode == SCANNER_VCP:
             chip("Сухой объём", f"≤ {cfg.vcp_dry_volume_ratio:g}x"),
             chip("Свежесть", f"{cfg.max_stale_days}д"),
             chip("Свечи/объём", DATA_SOURCE_LABELS.get(data_source, data_source), "green"),
-            chip("Долларовый объём", f"${cfg.min_dollar_volume:,}"),
+            chip("Долларовый объём", format_dollar_cell(cfg.min_dollar_volume)),
         ]
     )
 else:
@@ -2693,7 +2447,7 @@ else:
         [
             chip("Режим", mode_label, "green"),
             chip("Биржа", exchange),
-            chip("За прогон", max_tickers),
+            chip("За прогон", format_int_cell(max_tickers)),
             chip("Цена", f"${min_price:g}-${max_price:g}"),
             chip("Поддержка", f"{cfg.spring_support_days} дней"),
             chip("Дно", f"{cfg.spring_low_days} дней"),
@@ -2703,7 +2457,7 @@ else:
             chip("Объём", f"×{cfg.spring_volume_mult:g}"),
             chip("От дна", f"до {cfg.spring_max_from_low_pct:g}%"),
             chip("Свечи/объём", DATA_SOURCE_LABELS.get(data_source, data_source), "green"),
-            chip("Долларовый объём", f"${cfg.min_dollar_volume:,}"),
+            chip("Долларовый объём", format_dollar_cell(cfg.min_dollar_volume)),
         ]
     )
 st.markdown(
@@ -2736,21 +2490,24 @@ if auto_scan:
         if last_auto_total > 0:
             next_start = min(int(st.session_state.auto_scan_offset or 0), max(0, last_auto_total - 1))
             next_end = min(next_start + batch_size, last_auto_total)
-            next_range_hint = f" · следующая пачка: {next_start + 1}-{next_end} из {last_auto_total}"
+            next_range_hint = (
+                f" · следующая пачка: {format_int_cell(next_start + 1)}-"
+                f"{format_int_cell(next_end)} из {format_int_cell(last_auto_total)}"
+            )
         auto_text = (
             f"Авто-скан: каждые {auto_interval} мин · последний {elapsed_sec // 60} мин назад · "
-            f"следующий через {remaining // 60} мин · пачка {batch_size} акций · "
-            f"рынок до {AUTO_SCAN_MARKET_LIMIT:,}{next_range_hint}"
+            f"следующий через {remaining // 60} мин · пачка {format_int_cell(batch_size)} акций · "
+            f"рынок до {format_int_cell(AUTO_SCAN_MARKET_LIMIT)}{next_range_hint}"
         )
     else:
         should_auto_run = True
         auto_text = (
             f"Авто-скан: каждые {auto_interval} мин · первый запуск ожидается · "
-            f"пачка {batch_size} акций · рынок до {AUTO_SCAN_MARKET_LIMIT:,}"
+            f"пачка {format_int_cell(batch_size)} акций · рынок до {format_int_cell(AUTO_SCAN_MARKET_LIMIT)}"
         )
 else:
     should_auto_run = False
-    auto_text = f"Ручной запуск: проверит первые {batch_size} акций и остановится."
+    auto_text = f"Ручной запуск: проверит первые {format_int_cell(batch_size)} акций и остановится."
 
 st.markdown(f'<div class="desk-muted" style="margin:-0.2rem 0 0.65rem;">{html.escape(auto_text)}</div>', unsafe_allow_html=True)
 
@@ -2784,14 +2541,17 @@ if start_scan or (auto_scan and should_auto_run):
             scan_start = 0
         scan_end = min(scan_start + batch_size, len(all_tickers))
         ticker_infos = all_tickers[scan_start:scan_end]
-        scan_scope = f"авто {scan_start + 1}-{scan_end} из {len(all_tickers)}"
+        scan_scope = (
+            f"авто {format_int_cell(scan_start + 1)}-{format_int_cell(scan_end)} "
+            f"из {format_int_cell(len(all_tickers))}"
+        )
         st.session_state.last_auto_total = len(all_tickers)
     else:
         all_tickers = all_tickers_full
         scan_start = 0
         scan_end = min(batch_size, len(all_tickers))
         ticker_infos = all_tickers[:scan_end]
-        scan_scope = f"ручной первые {len(ticker_infos)} из {len(all_tickers)}"
+        scan_scope = f"ручной первые {format_int_cell(len(ticker_infos))} из {format_int_cell(len(all_tickers))}"
 
     if not ticker_infos:
         st.error("Нет тикеров для сканирования.")
@@ -2828,14 +2588,14 @@ if start_scan or (auto_scan and should_auto_run):
 
         if hits:
             done_message = (
-                f"Готово: найдено {len(hits)} сигналов · "
-                f"проверено {len(ticker_infos)} · {scan_scope}"
+                f"Готово: найдено {format_int_cell(len(hits))} сигналов · "
+                f"проверено {format_int_cell(len(ticker_infos))} · {scan_scope}"
             )
             status_box.success(done_message)
             if hasattr(st, "toast"):
                 st.toast(done_message, icon="✅")
         else:
-            done_message = f"Скан завершён: сигналов нет · проверено {len(ticker_infos)} · {scan_scope}"
+            done_message = f"Скан завершён: сигналов нет · проверено {format_int_cell(len(ticker_infos))} · {scan_scope}"
             status_box.info(done_message)
             if hasattr(st, "toast") and not is_auto_batch:
                 st.toast(done_message, icon="ℹ️")
@@ -2847,32 +2607,16 @@ if start_scan or (auto_scan and should_auto_run):
 st.session_state.results = sort_results(filter_results_for_config(st.session_state.results, cfg), cfg.base_impulse_only)
 
 if st.session_state.results:
-    df_results = pd.DataFrame(st.session_state.results)
-    if "_sig" in df_results.columns:
-        up_mask = df_results["_sig"].eq(SIG_UP)
-        down_mask = df_results["_sig"].eq(SIG_DOWN)
-        early_mask = df_results["_sig"].eq(SIG_SURGE)
-        base_mask = df_results["_sig"].eq(SIG_BASE)
-    else:
-        up_mask = df_results["Сигнал"].isin(["ПРОБОЙ ВВЕРХ", "BREAKOUT UP"])
-        down_mask = df_results["Сигнал"].isin(["ПРОБОЙ ВНИЗ", "BREAKDOWN DOWN"])
-        early_mask = df_results["Сигнал"].isin(["РАННИЙ ОБЪЁМ В КАНАЛЕ", "VOLUME IN CHANNEL"])
-        base_mask = df_results["Сигнал"].isin(["ВЗРЫВ ОБЪЁМА ИЗ БАЗЫ"])
-    up_count = int(up_mask.sum())
-    down_count = int(down_mask.sum())
-    early_count = int(early_mask.sum())
-    base_count = int(base_mask.sum())
-    best_score = int(df_results["Балл"].max()) if "Балл" in df_results else 0
-
     render_results_summary(st.session_state.results)
+    results_frame = display_frame(st.session_state.results, cfg.base_impulse_only)
     st.dataframe(
-        display_frame(st.session_state.results, cfg.base_impulse_only),
+        styled_display_frame(results_frame),
         use_container_width=True,
         hide_index=True,
         column_config=display_column_config(cfg.base_impulse_only),
         height=420,
     )
-    render_signal_gallery(st.session_state.results)
+    render_signal_gallery(st.session_state.results, chart_limit)
 
     csv = display_frame(st.session_state.results, cfg.base_impulse_only, include_chart=False).to_csv(index=False).encode("utf-8")
     st.download_button(
@@ -2900,4 +2644,3 @@ else:
         """,
         unsafe_allow_html=True,
     )
-
