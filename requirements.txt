@@ -1,0 +1,7 @@
+streamlit>=1.49
+altair>=5.0
+pandas>=2.2
+requests>=2.31
+yfinance>=0.2.65
+streamlit-autorefresh>=1.0.1
+tomli>=2.0; python_version < "3.11"
