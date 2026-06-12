@@ -1895,12 +1895,13 @@ def notify_signal(row: dict[str, Any]) -> None:
 
 
 def telegram_signal_message(row: dict[str, Any]) -> str:
-    ticker = html.escape(str(row["Тикер"]))
+    ticker = re.sub(r"[^A-Z]", "", str(row["Тикер"]).upper()) or "TICKER"
+    ticker = html.escape(ticker)
     rvol = safe_float(row.get("_rvol") or row.get("Объём ×"))
     if rvol <= 0:
-        return f"{ticker} · RVOL — · —%"
+        return f"{ticker} 0.00x +0%"
     volume_pct = (rvol - 1.0) * 100
-    return f"{ticker} · RVOL {rvol:.2f}x · {volume_pct:+.0f}%"
+    return f"{ticker} {rvol:.2f}x {volume_pct:+.0f}%"
 
 
 def result_key(row: dict[str, Any]) -> tuple[str, str, str]:
@@ -1911,10 +1912,11 @@ def sort_results(rows: list[dict[str, Any]], base_pattern: bool = False) -> list
     return sorted(
         rows,
         key=lambda row: (
-            safe_float(row.get("Балл")),
+            safe_float(row.get("Объём")),
+            safe_float(row.get("Долларовый объём")),
             safe_float(row.get("_rvol")),
             abs(safe_float(row.get("_move_pct"))),
-            safe_float(row.get("Объём")),
+            safe_float(row.get("Балл")),
         ),
         reverse=True,
     )
@@ -2030,16 +2032,17 @@ def display_column_config(base_pattern: bool = False) -> dict[str, Any]:
     return {
         "Тикер": st.column_config.TextColumn("Тикер", width="small"),
         "Сигнал": st.column_config.TextColumn("Сигнал", width="medium"),
-        "Цена": st.column_config.TextColumn("Цена", width="small"),
-        "RVOL": st.column_config.TextColumn(
+        "Цена": st.column_config.NumberColumn("Цена", width="small", format="$%.4f"),
+        "RVOL": st.column_config.NumberColumn(
             "RVOL",
             width="small",
+            format="%.2fx",
             help="Сегодняшний объём / выбранная база сравнения объёма. Для взрыва базы это максимум любой из предыдущих свечей.",
         ),
-        "Движение %": st.column_config.TextColumn("Движение %", width="small"),
-        "Объём": st.column_config.TextColumn("Объём", width="medium"),
-        "Долларовый объём": st.column_config.TextColumn("Долларовый объём", width="medium"),
-        "Капитализация": st.column_config.TextColumn("Капитализация", width="medium"),
+        "Движение %": st.column_config.NumberColumn("Движение %", width="small", format="%.1f%%"),
+        "Объём": st.column_config.NumberColumn("Объём", width="medium", format="%d"),
+        "Долларовый объём": st.column_config.NumberColumn("Долларовый объём", width="medium", format="$%d"),
+        "Капитализация": st.column_config.NumberColumn("Капитализация", width="medium", format="$%d"),
         "Время": st.column_config.TextColumn("Время", width="small"),
     }
 
@@ -2054,21 +2057,21 @@ def display_frame(rows: list[dict[str, Any]], base_pattern: bool = False, includ
     if "Сигнал" in frame.columns:
         frame["Сигнал"] = frame.apply(format_signal_cell, axis=1)
     if "Цена" in frame.columns:
-        frame["Цена"] = frame["Цена"].map(format_price_cell)
+        frame["Цена"] = pd.to_numeric(frame["Цена"], errors="coerce")
     if "_rvol" in frame.columns:
-        frame["RVOL"] = frame["_rvol"].map(format_rw_cell)
+        frame["RVOL"] = pd.to_numeric(frame["_rvol"], errors="coerce")
     elif "Объём ×" in frame.columns:
-        frame["RVOL"] = frame["Объём ×"].map(format_rw_cell)
+        frame["RVOL"] = pd.to_numeric(frame["Объём ×"], errors="coerce")
     if "_move_pct" in frame.columns:
-        frame["Движение %"] = frame["_move_pct"].map(format_percent_cell)
+        frame["Движение %"] = pd.to_numeric(frame["_move_pct"], errors="coerce")
     elif "Выход %" in frame.columns:
-        frame["Движение %"] = frame["Выход %"].map(format_percent_cell)
+        frame["Движение %"] = pd.to_numeric(frame["Выход %"].astype(str).str.replace("%", "", regex=False), errors="coerce")
     if "Объём" in frame.columns:
-        frame["Объём"] = frame["Объём"].map(format_int_cell)
+        frame["Объём"] = pd.to_numeric(frame["Объём"], errors="coerce").astype("Int64")
     if "Долларовый объём" in frame.columns:
-        frame["Долларовый объём"] = frame["Долларовый объём"].map(format_dollar_cell)
+        frame["Долларовый объём"] = pd.to_numeric(frame["Долларовый объём"], errors="coerce").astype("Int64")
     if "Капитализация" in frame.columns:
-        frame["Капитализация"] = frame["Капитализация"].map(format_market_cap_cell)
+        frame["Капитализация"] = pd.to_numeric(frame["Капитализация"], errors="coerce").astype("Int64")
     if not include_chart and "График" in display_cols:
         display_cols = [col for col in display_cols if col != "График"]
 
@@ -2092,7 +2095,7 @@ def render_results_summary(rows: list[dict[str, Any]]) -> None:
         <div class="base-results-bar">
             <div>
                 <div class="base-results-title">Найденные акции</div>
-                <div class="base-results-subtitle">Сортировка по сегодняшнему объёму, затем по RVOL и движению.</div>
+                <div class="base-results-subtitle">По умолчанию сверху акции с самым большим сегодняшним объёмом.</div>
             </div>
             <div class="base-results-stats">
                 {chip("Найдено", count, "blue")}
@@ -2565,7 +2568,7 @@ with st.sidebar:
     send_alerts = st.toggle("Telegram-уведомления", value=True)
     telegram_configured = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
     if st.button("Отправить тест Telegram", use_container_width=True, disabled=not telegram_configured):
-        if send_telegram("TEST · RVOL 1.00x · +0%"):
+        if send_telegram("TEST 1.00x +0%"):
             st.success("Тест отправлен.")
         else:
             st.error("Telegram не отправился. Проверь токен и chat_id.")
