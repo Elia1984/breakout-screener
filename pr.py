@@ -5,7 +5,6 @@ import base64
 import logging
 import os
 import re
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -34,7 +33,7 @@ except Exception:
 
 
 # ── APP CONFIG ─────────────────────────────────────────────────────
-st.set_page_config(page_title="Скринер накопления", page_icon="📊", layout="wide")
+st.set_page_config(page_title="PR Screener", page_icon="📊", layout="wide")
 
 
 def apply_custom_theme() -> None:
@@ -589,19 +588,54 @@ SIG_UP = "BREAKOUT_UP"
 SIG_DOWN = "BREAKDOWN"
 SIG_SURGE = "VOLUME_SURGE"
 SIG_BASE = "BASE_VOLUME_EXPLOSION"
+SIG_VCP = "VCP_SQUEEZE"
+SIG_SPRING = "SPRING_REVERSAL"
+
+SCANNER_BASE = "BASE_VOLUME"
+SCANNER_VCP = "VCP_SQUEEZE"
+SCANNER_SPRING = "SPRING_REVERSAL"
+
+SCANNER_LABELS = {
+    SCANNER_BASE: "Взрыв из базы",
+    SCANNER_VCP: "VCP-сжатие",
+    SCANNER_SPRING: "Spring-отскок",
+}
+SCANNER_HELP = {
+    SCANNER_BASE: (
+        "Ищет твой старый паттерн: сегодняшнее открытие внутри вчерашней свечи, "
+        "а сегодняшний объём выше максимального объёма среди предыдущих свечей."
+    ),
+    SCANNER_VCP: (
+        "Ищет сжатие перед движением: диапазон свечей постепенно становится уже, "
+        "объём сохнет, цена находится близко к верхней границе базы."
+    ),
+    SCANNER_SPRING: (
+        "Ищет ложный прокол поддержки: цена сходила ниже важного минимума, "
+        "но закрылась обратно выше поддержки на повышенном объёме."
+    ),
+}
+SCANNER_SUBTITLES = {
+    SCANNER_BASE: "Полный рынок · открытие внутри вчерашней свечи · объём выше всей базы",
+    SCANNER_VCP: "Полный рынок · сжатие диапазона · сухой объём · цена рядом с верхом базы",
+    SCANNER_SPRING: "Полный рынок · прокол поддержки · возврат над уровень · объёмный отскок",
+}
 
 SIGNAL_LABELS = {
     SIG_UP: "ПРОБОЙ ВВЕРХ",
     SIG_DOWN: "ПРОБОЙ ВНИЗ",
     SIG_SURGE: "РАННИЙ ОБЪЁМ В КАНАЛЕ",
     SIG_BASE: "ВЗРЫВ ОБЪЁМА ИЗ БАЗЫ",
+    SIG_VCP: "VCP-СЖАТИЕ",
+    SIG_SPRING: "SPRING ОТ ДНА",
 }
-SIGNAL_ICONS = {SIG_UP: "🟢", SIG_DOWN: "🔴", SIG_SURGE: "🔥", SIG_BASE: "⚡"}
+SIGNAL_ICONS = {SIG_UP: "🟢", SIG_DOWN: "🔴", SIG_SURGE: "🔥", SIG_BASE: "⚡", SIG_VCP: "🌀", SIG_SPRING: "🌱"}
 SIGNAL_SHORT_LABELS = {
     SIG_UP: "Пробой вверх",
     SIG_DOWN: "Пробой вниз",
     SIG_SURGE: "Ранний объём",
     SIG_BASE: "Взрыв базы",
+    SIG_VCP: "VCP-сжатие",
+    SIG_SPRING: "Spring от дна",
 }
 
 DISPLAY_COLS = [
@@ -673,6 +707,7 @@ ALPACA_HEADERS = {
 
 @dataclass(frozen=True)
 class ScanConfig:
+    scanner_mode: str = SCANNER_BASE
     channel_days: int = 14
     max_channel_width_pct: float = 8.0
     price_basis: str = "HIGH_LOW"  # HIGH_LOW / CLOSE
@@ -689,13 +724,28 @@ class ScanConfig:
 
     base_impulse_enabled: bool = True
     base_impulse_days: int = 10
-    base_volume_mult: float = 1.0
+    base_volume_mult: float = 10.0
     base_impulse_only: bool = False
 
     max_gap_pct: float = 8.0
     max_stale_days: int = 5
     min_price: float = 0.5
     max_price: float = 20.0
+
+    vcp_days: int = 45
+    vcp_max_base_width_pct: float = 35.0
+    vcp_max_recent_width_pct: float = 12.0
+    vcp_min_compression_pct: float = 25.0
+    vcp_near_high_pct: float = 8.0
+    vcp_dry_volume_ratio: float = 0.85
+
+    spring_support_days: int = 60
+    spring_low_days: int = 120
+    spring_break_pct: float = 1.0
+    spring_reclaim_pct: float = 0.0
+    spring_close_position_pct: float = 60.0
+    spring_volume_mult: float = 1.2
+    spring_max_from_low_pct: float = 35.0
 
 
 def now_et() -> datetime:
@@ -1051,6 +1101,14 @@ def fetch_daily_history(ticker: str, days: int, data_source: str) -> pd.DataFram
     return None
 
 
+def required_history_days(cfg: ScanConfig) -> int:
+    if cfg.scanner_mode == SCANNER_VCP:
+        return max(int(cfg.vcp_days), 30)
+    if cfg.scanner_mode == SCANNER_SPRING:
+        return max(int(cfg.spring_support_days), int(cfg.spring_low_days), 60)
+    return max(int(cfg.base_impulse_days), 5)
+
+
 def load_bars(
     ticker_infos: list[dict[str, Any]],
     cfg: ScanConfig,
@@ -1060,10 +1118,7 @@ def load_bars(
 ) -> dict[str, pd.DataFrame]:
     symbols = [str(item["ticker"]).upper() for item in ticker_infos]
     bars: dict[str, pd.DataFrame] = {}
-    history_days = cfg.base_impulse_days if cfg.base_impulse_only else max(
-        cfg.channel_days,
-        cfg.base_impulse_days if cfg.base_impulse_enabled else cfg.channel_days,
-    )
+    history_days = required_history_days(cfg)
 
     if data_source in {DATA_SOURCE_ALPACA_SIP, DATA_SOURCE_AUTO} and not (ALPACA_KEY and ALPACA_SECRET):
         status_box.caption("Alpaca SIP delayed недоступен: нет ALPACA_KEY / ALPACA_SECRET.")
@@ -1138,6 +1193,32 @@ class BaseImpulse:
     volume_mult: float
     move_pct: float
     body_pct: float
+
+
+@dataclass(frozen=True)
+class VcpSetup:
+    low: float
+    high: float
+    base_width_pct: float
+    recent_width_pct: float
+    first_width_pct: float
+    dry_volume_ratio: float
+    current_volume_ratio: float
+    distance_to_high_pct: float
+    move_pct: float
+
+
+@dataclass(frozen=True)
+class SpringSetup:
+    support: float
+    latest_low: float
+    support_range_pct: float
+    break_pct: float
+    reclaim_pct: float
+    close_position_pct: float
+    volume_mult: float
+    from_low_pct: float
+    move_pct: float
 
 
 def build_channel(df: pd.DataFrame, cfg: ScanConfig) -> Channel | None:
@@ -1229,6 +1310,157 @@ def build_base_impulse(df: pd.DataFrame, cfg: ScanConfig) -> BaseImpulse | None:
         volume_mult=volume_mult,
         move_pct=move_pct,
         body_pct=body_pct,
+    )
+
+
+def pct_range(frame: pd.DataFrame) -> float:
+    if frame.empty:
+        return 0.0
+    low = float(pd.to_numeric(frame["Low"], errors="coerce").min())
+    high = float(pd.to_numeric(frame["High"], errors="coerce").max())
+    if low <= 0 or high <= low:
+        return 0.0
+    return (high - low) / low * 100
+
+
+def build_vcp_setup(df: pd.DataFrame, cfg: ScanConfig) -> VcpSetup | None:
+    lookback = int(cfg.vcp_days)
+    if lookback < 30 or len(df) < lookback + 2:
+        return None
+
+    window = df.tail(lookback).copy()
+    if len(window) < lookback:
+        return None
+
+    third_size = len(window) // 3
+    thirds = [
+        window.iloc[:third_size],
+        window.iloc[third_size : third_size * 2],
+        window.iloc[third_size * 2 :],
+    ]
+    thirds = [part for part in thirds if not part.empty]
+    if len(thirds) != 3:
+        return None
+
+    first_width = pct_range(thirds[0])
+    recent_width = pct_range(thirds[-1])
+    base_width = pct_range(window)
+    if first_width <= 0 or recent_width <= 0 or base_width <= 0:
+        return None
+    if base_width > cfg.vcp_max_base_width_pct:
+        return None
+    if recent_width > cfg.vcp_max_recent_width_pct:
+        return None
+
+    required_recent_width = first_width * (1 - cfg.vcp_min_compression_pct / 100)
+    if recent_width > required_recent_width:
+        return None
+
+    close = float(window.iloc[-1]["Close"])
+    prev_close = float(df.iloc[-2]["Close"])
+    base_low = float(window["Low"].min())
+    base_high = float(window["High"].max())
+    if close <= 0 or prev_close <= 0 or base_high <= base_low:
+        return None
+
+    distance_to_high = (base_high - close) / base_high * 100
+    if distance_to_high < -2.0 or distance_to_high > cfg.vcp_near_high_pct:
+        return None
+
+    older_volume = pd.to_numeric(pd.concat([thirds[0]["Volume"], thirds[1]["Volume"]]), errors="coerce")
+    recent_volume = pd.to_numeric(thirds[-1]["Volume"], errors="coerce")
+    older_avg = float(older_volume[older_volume > 0].mean()) if not older_volume.empty else 0.0
+    recent_avg = float(recent_volume[recent_volume > 0].mean()) if not recent_volume.empty else 0.0
+    if older_avg <= 0 or recent_avg <= 0:
+        return None
+
+    dry_ratio = recent_avg / older_avg
+    if dry_ratio > cfg.vcp_dry_volume_ratio:
+        return None
+
+    current_volume = float(window.iloc[-1]["Volume"])
+    current_volume_ratio = current_volume / recent_avg if recent_avg > 0 else 0.0
+    move_pct = (close - prev_close) / prev_close * 100
+    return VcpSetup(
+        low=base_low,
+        high=base_high,
+        base_width_pct=base_width,
+        recent_width_pct=recent_width,
+        first_width_pct=first_width,
+        dry_volume_ratio=dry_ratio,
+        current_volume_ratio=current_volume_ratio,
+        distance_to_high_pct=distance_to_high,
+        move_pct=move_pct,
+    )
+
+
+def build_spring_setup(df: pd.DataFrame, cfg: ScanConfig) -> SpringSetup | None:
+    support_days = int(cfg.spring_support_days)
+    low_days = int(cfg.spring_low_days)
+    required = max(support_days, low_days)
+    if support_days < 20 or len(df) < required + 2:
+        return None
+
+    support_window = df.iloc[-(support_days + 1) : -1].copy()
+    if len(support_window) < support_days:
+        return None
+
+    latest = df.iloc[-1]
+    prev_close = float(df.iloc[-2]["Close"])
+    latest_open = float(latest["Open"])
+    latest_high = float(latest["High"])
+    latest_low = float(latest["Low"])
+    latest_close = float(latest["Close"])
+    latest_volume = float(latest["Volume"])
+    if min(latest_open, latest_high, latest_low, latest_close, prev_close) <= 0 or latest_volume <= 0:
+        return None
+    if latest_high <= latest_low:
+        return None
+
+    support = float(support_window["Low"].min())
+    support_high = float(support_window["High"].max())
+    if support <= 0 or support_high <= support:
+        return None
+
+    break_pct = (support - latest_low) / support * 100
+    if break_pct < cfg.spring_break_pct:
+        return None
+
+    reclaim_pct = (latest_close - support) / support * 100
+    if reclaim_pct < cfg.spring_reclaim_pct:
+        return None
+
+    close_position = (latest_close - latest_low) / (latest_high - latest_low) * 100
+    if close_position < cfg.spring_close_position_pct:
+        return None
+
+    ref_volume = pd.to_numeric(support_window["Volume"], errors="coerce")
+    ref_volume = ref_volume[ref_volume > 0]
+    if ref_volume.empty:
+        return None
+    volume_ref = float(ref_volume.mean())
+    volume_mult = latest_volume / volume_ref if volume_ref > 0 else 0.0
+    if volume_mult < cfg.spring_volume_mult:
+        return None
+
+    long_window = df.tail(low_days).copy()
+    long_low = float(long_window["Low"].min())
+    from_low_pct = (latest_close - long_low) / long_low * 100 if long_low > 0 else 999.0
+    if from_low_pct > cfg.spring_max_from_low_pct:
+        return None
+
+    move_pct = (latest_close - prev_close) / prev_close * 100
+    support_range_pct = (support_high - support) / support * 100
+    return SpringSetup(
+        support=support,
+        latest_low=latest_low,
+        support_range_pct=support_range_pct,
+        break_pct=break_pct,
+        reclaim_pct=reclaim_pct,
+        close_position_pct=close_position,
+        volume_mult=volume_mult,
+        from_low_pct=from_low_pct,
+        move_pct=move_pct,
     )
 
 
@@ -1384,18 +1616,31 @@ def score_signal(
     return int(round(volume_score + channel_score + breakout_score + gap_score))
 
 
+def score_vcp(setup: VcpSetup, cfg: ScanConfig) -> int:
+    compression_pct = max(0.0, (setup.first_width_pct - setup.recent_width_pct) / max(setup.first_width_pct, 0.1) * 100)
+    compression_score = min(35.0, compression_pct / max(cfg.vcp_min_compression_pct, 0.1) * 22.0)
+    dry_score = max(0.0, min(25.0, (cfg.vcp_dry_volume_ratio - setup.dry_volume_ratio) / max(cfg.vcp_dry_volume_ratio, 0.1) * 35.0))
+    near_high_score = max(0.0, min(25.0, (cfg.vcp_near_high_pct - setup.distance_to_high_pct) / max(cfg.vcp_near_high_pct, 0.1) * 25.0))
+    tight_score = max(0.0, min(15.0, (cfg.vcp_max_recent_width_pct - setup.recent_width_pct) / max(cfg.vcp_max_recent_width_pct, 0.1) * 15.0))
+    return int(round(compression_score + dry_score + near_high_score + tight_score))
+
+
+def score_spring(setup: SpringSetup, cfg: ScanConfig) -> int:
+    break_score = min(20.0, setup.break_pct / max(cfg.spring_break_pct, 0.1) * 10.0)
+    reclaim_score = max(0.0, min(25.0, setup.reclaim_pct * 4.0 + 10.0))
+    close_score = max(0.0, min(20.0, (setup.close_position_pct - cfg.spring_close_position_pct) / max(100.0 - cfg.spring_close_position_pct, 1.0) * 20.0))
+    volume_score = min(25.0, setup.volume_mult / max(cfg.spring_volume_mult, 0.1) * 16.0)
+    low_score = max(0.0, min(10.0, (cfg.spring_max_from_low_pct - setup.from_low_pct) / max(cfg.spring_max_from_low_pct, 0.1) * 10.0))
+    return int(round(break_score + reclaim_score + close_score + volume_score + low_score))
+
+
 def detect_signal(
     ticker_info: dict[str, Any],
     df: pd.DataFrame,
     cfg: ScanConfig,
     today: Any | None = None,
 ) -> dict[str, Any] | None:
-    if cfg.base_impulse_only:
-        required_days = cfg.base_impulse_days
-    elif cfg.base_impulse_enabled:
-        required_days = max(cfg.channel_days, cfg.base_impulse_days)
-    else:
-        required_days = cfg.channel_days
+    required_days = required_history_days(cfg)
     if df is None or len(df) < required_days + 2:
         return None
 
@@ -1420,11 +1665,13 @@ def detect_signal(
         return None
     if price < cfg.min_price or price > cfg.max_price:
         return None
-    if not cfg.base_impulse_only and price * latest_volume < cfg.min_dollar_volume:
+    if cfg.scanner_mode != SCANNER_BASE and price * latest_volume < cfg.min_dollar_volume:
         return None
 
-    base = build_base_impulse(df, cfg)
-    if base is not None and (cfg.base_impulse_only or cfg.directions != "DOWN"):
+    if cfg.scanner_mode == SCANNER_BASE:
+        base = build_base_impulse(df, cfg)
+        if base is None:
+            return None
         prev_close = float(df.iloc[-2]["Close"])
         latest_gap_pct = (latest_open - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
         volume_over_max_pct = (base.volume_mult - 1) * 100
@@ -1445,6 +1692,7 @@ def detect_signal(
                 base.high,
                 "зона вчерашней свечи",
             ),
+            "_scanner": cfg.scanner_mode,
             "Тикер": ticker_info["ticker"],
             "Название": (ticker_info.get("name") or "")[:34],
             "Биржа": ticker_info.get("exchange", ""),
@@ -1465,95 +1713,98 @@ def detect_signal(
             "Источник": df.attrs.get("source", ""),
             "Время": now_et_str(),
         }
-    if cfg.base_impulse_only:
-        return None
-
-    channel = build_channel(df, cfg)
-    if channel is None:
-        return None
-    if channel.width_pct > cfg.max_channel_width_pct:
-        return None
-    if channel.vol_avg < cfg.min_channel_avg_volume:
-        return None
-    if channel.max_gap_pct > cfg.max_gap_pct:
-        return None
-
-    upper = channel.high * (1 + cfg.breakout_buffer_pct / 100)
-    lower = channel.low * (1 - cfg.breakout_buffer_pct / 100)
 
     prev_close = float(df.iloc[-2]["Close"])
     latest_gap_pct = (latest_open - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
-    opened_outside_channel = latest_open > upper or latest_open < lower
-    if opened_outside_channel:
-        return None
-
-    breakout_up_pct = (price - channel.high) / channel.high * 100
-    breakdown_down_pct = (channel.low - price) / channel.low * 100
     body_pct = abs(price - latest_open) / latest_open * 100
 
-    volume_ref = channel.vol_max if cfg.volume_baseline == "MAX" else channel.vol_avg
-    if volume_ref <= 0:
-        return None
-    volume_mult = latest_volume / volume_ref
-    volume_ok = volume_mult >= cfg.min_volume_mult
-    if not volume_ok:
-        return None
+    if cfg.scanner_mode == SCANNER_VCP:
+        setup = build_vcp_setup(df, cfg)
+        if setup is None:
+            return None
+        score = score_vcp(setup, cfg)
+        return {
+            "_sig": SIG_VCP,
+            "_rvol": setup.current_volume_ratio,
+            "_score": score,
+            "_width": setup.base_width_pct,
+            "_gap": latest_gap_pct,
+            "_move_pct": setup.move_pct,
+            "_chart_uri": pattern_chart_data_uri(
+                df,
+                cfg.vcp_days,
+                setup.low,
+                setup.high,
+                "VCP-база",
+            ),
+            "_scanner": cfg.scanner_mode,
+            "Тикер": ticker_info["ticker"],
+            "Название": (ticker_info.get("name") or "")[:34],
+            "Биржа": ticker_info.get("exchange", ""),
+            "Сигнал": SIGNAL_LABELS[SIG_VCP],
+            "Цена": round(price, 4),
+            "Выход %": f"{setup.move_pct:+.1f}%",
+            "Гэп сегодня": f"{latest_gap_pct:+.1f}%",
+            "Объём ×": round(setup.current_volume_ratio, 2),
+            "Объём": int(latest_volume),
+            "Ср. объём канала": int(latest_volume / setup.current_volume_ratio) if setup.current_volume_ratio > 0 else 0,
+            "Ширина канала": f"{setup.base_width_pct:.1f}%",
+            "Канал": f"VCP ${setup.low:.4f}-${setup.high:.4f}",
+            "Тело свечи %": round(body_pct, 1),
+            "Сжатие": f"{setup.first_width_pct:.1f}% → {setup.recent_width_pct:.1f}%",
+            "Сухой объём": f"{setup.dry_volume_ratio:.2f}×",
+            "До верха": f"{setup.distance_to_high_pct:.1f}%",
+            "Долларовый объём": int(price * latest_volume),
+            "Капитализация": ticker_info.get("market_cap") or 0,
+            "Балл": score,
+            "Источник": df.attrs.get("source", ""),
+            "Время": now_et_str(),
+        }
 
-    signal_code = None
-    move_pct = 0.0
-    if price > upper:
-        signal_code = SIG_UP
-        move_pct = breakout_up_pct
-    elif price < lower:
-        signal_code = SIG_DOWN
-        move_pct = -breakdown_down_pct
-    elif cfg.allow_volume_alert_inside_channel and not cfg.require_price_break:
-        signal_code = SIG_SURGE
-        move_pct = 0.0
+    if cfg.scanner_mode == SCANNER_SPRING:
+        setup = build_spring_setup(df, cfg)
+        if setup is None:
+            return None
+        score = score_spring(setup, cfg)
+        return {
+            "_sig": SIG_SPRING,
+            "_rvol": setup.volume_mult,
+            "_score": score,
+            "_width": setup.support_range_pct,
+            "_gap": latest_gap_pct,
+            "_move_pct": setup.move_pct,
+            "_chart_uri": pattern_chart_data_uri(
+                df,
+                max(cfg.spring_support_days, 30),
+                setup.support * 0.99,
+                setup.support * 1.01,
+                "поддержка Spring",
+            ),
+            "_scanner": cfg.scanner_mode,
+            "Тикер": ticker_info["ticker"],
+            "Название": (ticker_info.get("name") or "")[:34],
+            "Биржа": ticker_info.get("exchange", ""),
+            "Сигнал": SIGNAL_LABELS[SIG_SPRING],
+            "Цена": round(price, 4),
+            "Выход %": f"{setup.move_pct:+.1f}%",
+            "Гэп сегодня": f"{latest_gap_pct:+.1f}%",
+            "Объём ×": round(setup.volume_mult, 2),
+            "Объём": int(latest_volume),
+            "Ср. объём канала": int(latest_volume / setup.volume_mult) if setup.volume_mult > 0 else 0,
+            "Ширина канала": f"{setup.support_range_pct:.1f}%",
+            "Канал": f"поддержка ${setup.support:.4f} / прокол ${setup.latest_low:.4f}",
+            "Тело свечи %": round(body_pct, 1),
+            "Прокол": f"{setup.break_pct:.1f}%",
+            "Возврат": f"{setup.reclaim_pct:+.1f}%",
+            "Закрытие дня": f"{setup.close_position_pct:.0f}%",
+            "Долларовый объём": int(price * latest_volume),
+            "Капитализация": ticker_info.get("market_cap") or 0,
+            "Балл": score,
+            "Источник": df.attrs.get("source", ""),
+            "Время": now_et_str(),
+        }
 
-    if signal_code is None:
-        return None
-    if cfg.directions == "UP" and signal_code != SIG_UP:
-        return None
-    if cfg.directions == "DOWN" and signal_code != SIG_DOWN:
-        return None
-
-    max_signal_gap_pct = max(channel.max_gap_pct, abs(latest_gap_pct))
-    score = score_signal(signal_code, channel.width_pct, volume_mult, move_pct, max_signal_gap_pct, cfg)
-    signal = SIGNAL_LABELS[signal_code]
-    return {
-        "_sig": signal_code,
-        "_rvol": volume_mult,
-        "_score": score,
-        "_width": channel.width_pct,
-        "_gap": latest_gap_pct,
-        "_move_pct": move_pct,
-        "_chart_uri": pattern_chart_data_uri(
-            df,
-            cfg.channel_days,
-            channel.low,
-            channel.high,
-            "канал",
-        ),
-        "Тикер": ticker_info["ticker"],
-        "Название": (ticker_info.get("name") or "")[:34],
-        "Биржа": ticker_info.get("exchange", ""),
-        "Сигнал": signal,
-        "Цена": round(price, 4),
-        "Выход %": f"{move_pct:+.1f}%" if move_pct else "—",
-        "Гэп сегодня": f"{latest_gap_pct:+.1f}%",
-        "Объём ×": round(volume_mult, 2),
-        "Объём": int(latest_volume),
-        "Ср. объём канала": int(channel.vol_avg),
-        "Ширина канала": f"{channel.width_pct:.1f}%",
-        "Канал": f"${channel.low:.4f}-${channel.high:.4f}",
-        "Тело свечи %": round(body_pct, 1),
-        "Долларовый объём": int(price * latest_volume),
-        "Капитализация": ticker_info.get("market_cap") or 0,
-        "Балл": score,
-        "Источник": df.attrs.get("source", ""),
-        "Время": now_et_str(),
-    }
+    return None
 
 
 def scan_market(
@@ -1630,7 +1881,7 @@ def send_telegram(message: str) -> bool:
 
 
 def notification_key(row: dict[str, Any]) -> str:
-    return f"{now_et().date().isoformat()}:{row['Тикер']}:{row.get('_sig') or row.get('Сигнал', '')}"
+    return f"{now_et().date().isoformat()}:{row.get('_scanner', '')}:{row['Тикер']}:{row.get('_sig') or row.get('Сигнал', '')}"
 
 
 def notify_signal(row: dict[str, Any]) -> None:
@@ -1645,41 +1896,32 @@ def notify_signal(row: dict[str, Any]) -> None:
 
 def telegram_signal_message(row: dict[str, Any]) -> str:
     ticker = html.escape(str(row["Тикер"]))
-    signal_text = str(row["Сигнал"])
-    signal = html.escape(signal_text)
-    icon = SIGNAL_ICONS.get(
-        str(row.get("_sig", "")),
-        "🟢" if ("ВВЕРХ" in signal_text or "UP" in signal_text) else ("🔴" if ("ВНИЗ" in signal_text or "DOWN" in signal_text) else "🔥"),
-    )
-    return (
-        f"{icon} <b>ACCUMULATION BREAKOUT</b>\n"
-        f"<b>{ticker}</b> · {signal} · ${row['Цена']}\n"
-        f"Выход: {row['Выход %']} | Гэп: {row.get('Гэп сегодня', '—')} | Объём ×{row['Объём ×']}\n"
-        f"Канал: {row['Канал']} | Ширина: {row['Ширина канала']}\n"
-        f"Балл: {row['Балл']}/100 | Источник: {html.escape(str(row['Источник']))}\n"
-        f"⏰ {now_et_str('%H:%M ET')}"
-    )
+    rvol = safe_float(row.get("_rvol") or row.get("Объём ×"))
+    if rvol <= 0:
+        return f"{ticker} · RVOL — · —%"
+    volume_pct = (rvol - 1.0) * 100
+    return f"{ticker} · RVOL {rvol:.2f}x · {volume_pct:+.0f}%"
 
 
-def result_key(row: dict[str, Any]) -> tuple[str, str]:
-    return str(row.get("Тикер", "")), str(row.get("Сигнал", ""))
+def result_key(row: dict[str, Any]) -> tuple[str, str, str]:
+    return str(row.get("_scanner", "")), str(row.get("Тикер", "")), str(row.get("Сигнал", ""))
 
 
 def sort_results(rows: list[dict[str, Any]], base_pattern: bool = False) -> list[dict[str, Any]]:
     return sorted(
         rows,
         key=lambda row: (
-            safe_float(row.get("Объём")),
+            safe_float(row.get("Балл")),
             safe_float(row.get("_rvol")),
             abs(safe_float(row.get("_move_pct"))),
-            safe_float(row.get("Балл")),
+            safe_float(row.get("Объём")),
         ),
         reverse=True,
     )
 
 
 def merge_results(new_rows: list[dict[str, Any]], old_rows: list[dict[str, Any]], base_pattern: bool = False) -> list[dict[str, Any]]:
-    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in old_rows:
         merged[result_key(row)] = row
     for row in new_rows:
@@ -1689,25 +1931,20 @@ def merge_results(new_rows: list[dict[str, Any]], old_rows: list[dict[str, Any]]
 
 def result_matches_active_patterns(row: dict[str, Any], cfg: ScanConfig) -> bool:
     signal_code = str(row.get("_sig", ""))
-    if cfg.base_impulse_only:
+    scanner = str(row.get("_scanner", ""))
+    if scanner:
+        return scanner == cfg.scanner_mode
+    if cfg.scanner_mode == SCANNER_BASE:
         return signal_code == SIG_BASE
-    if not cfg.base_impulse_enabled and signal_code == SIG_BASE:
-        return False
-    return True
+    if cfg.scanner_mode == SCANNER_VCP:
+        return signal_code == SIG_VCP
+    if cfg.scanner_mode == SCANNER_SPRING:
+        return signal_code == SIG_SPRING
+    return False
 
 
 def filter_results_for_config(rows: list[dict[str, Any]], cfg: ScanConfig) -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict) and result_matches_active_patterns(row, cfg)]
-
-
-def leader_analysis_matches_results(analysis: dict[str, Any] | None, rows: list[dict[str, Any]]) -> bool:
-    if not analysis:
-        return False
-    technical = analysis.get("technical")
-    if not isinstance(technical, dict):
-        return False
-    active_keys = {result_key(row) for row in rows if isinstance(row, dict)}
-    return result_key(technical) in active_keys
 
 
 def format_price_cell(value: Any) -> str:
@@ -1844,16 +2081,12 @@ def render_results_summary(rows: list[dict[str, Any]]) -> None:
     best_rvol = max((safe_float(row.get("_rvol")) for row in rows), default=0.0)
     total_dollar_volume = sum(safe_float(row.get("Долларовый объём")) for row in rows)
     latest_time = str(rows[0].get("Время", now_et_str())) if rows else now_et_str()
-    signal_counts = {
-        SIG_UP: sum(1 for row in rows if str(row.get("_sig", "")) == SIG_UP),
-        SIG_DOWN: sum(1 for row in rows if str(row.get("_sig", "")) == SIG_DOWN),
-        SIG_SURGE: sum(1 for row in rows if str(row.get("_sig", "")) == SIG_SURGE),
-        SIG_BASE: sum(1 for row in rows if str(row.get("_sig", "")) == SIG_BASE),
-    }
-    signal_mix = (
-        f"вверх {signal_counts[SIG_UP]} · вниз {signal_counts[SIG_DOWN]} · "
-        f"объём {signal_counts[SIG_SURGE]} · база {signal_counts[SIG_BASE]}"
-    )
+    count_parts = []
+    for code in (SIG_BASE, SIG_VCP, SIG_SPRING, SIG_UP, SIG_DOWN, SIG_SURGE):
+        signal_count = sum(1 for row in rows if str(row.get("_sig", "")) == code)
+        if signal_count:
+            count_parts.append(f"{SIGNAL_SHORT_LABELS.get(code, code)} {signal_count}")
+    signal_mix = " · ".join(count_parts) if count_parts else "нет"
     st.markdown(
         f"""
         <div class="base-results-bar">
@@ -1883,7 +2116,8 @@ def format_chart_option(row: dict[str, Any]) -> str:
 
 def build_signal_chart(df: pd.DataFrame, cfg: ScanConfig, signal_code: str | None = None) -> alt.Chart | None:
     base = build_base_impulse(df, cfg) if signal_code == SIG_BASE else None
-    channel = build_channel(df, cfg)
+    vcp = build_vcp_setup(df, cfg) if signal_code == SIG_VCP else None
+    spring = build_spring_setup(df, cfg) if signal_code == SIG_SPRING else None
     if base is not None:
         line_low = base.low
         line_high = base.high
@@ -1892,14 +2126,22 @@ def build_signal_chart(df: pd.DataFrame, cfg: ScanConfig, signal_code: str | Non
         high_label = "Верх вчерашней свечи"
         low_label = "Низ вчерашней свечи"
         volume_label = "Средний объём 10 свечей"
-    elif channel is not None:
-        line_low = channel.low
-        line_high = channel.high
-        line_volume_avg = channel.vol_avg
-        lookback_days = cfg.channel_days
-        high_label = "Верх канала"
-        low_label = "Низ канала"
-        volume_label = "Средний объём канала"
+    elif vcp is not None:
+        line_low = vcp.low
+        line_high = vcp.high
+        line_volume_avg = float(pd.to_numeric(df.tail(cfg.vcp_days)["Volume"], errors="coerce").dropna().mean())
+        lookback_days = cfg.vcp_days
+        high_label = "Верх VCP-базы"
+        low_label = "Низ VCP-базы"
+        volume_label = "Средний объём VCP"
+    elif spring is not None:
+        line_low = spring.support * 0.99
+        line_high = spring.support * 1.01
+        line_volume_avg = float(pd.to_numeric(df.iloc[-(cfg.spring_support_days + 1) : -1]["Volume"], errors="coerce").dropna().mean())
+        lookback_days = max(30, cfg.spring_support_days)
+        high_label = "Зона поддержки +1%"
+        low_label = "Зона поддержки -1%"
+        volume_label = "Средний объём поддержки"
     else:
         return None
 
@@ -2062,10 +2304,7 @@ def render_signal_chart(rows: list[dict[str, Any]], cfg: ScanConfig, data_source
     )
     selected = clean_rows[int(selected_idx)]
     ticker = str(selected.get("Тикер", "")).upper()
-    history_days = cfg.base_impulse_days if cfg.base_impulse_only else max(
-        cfg.channel_days,
-        cfg.base_impulse_days if cfg.base_impulse_enabled else cfg.channel_days,
-    )
+    history_days = required_history_days(cfg)
     history = fetch_daily_history(ticker, history_days, data_source)
     if history is None:
         st.warning(f"Не удалось загрузить график для {ticker} через {DATA_SOURCE_LABELS.get(data_source, data_source)}.")
@@ -2094,50 +2333,7 @@ def render_signal_chart(rows: list[dict[str, Any]], cfg: ScanConfig, data_source
     st.altair_chart(chart, use_container_width=True)
 
 
-# ── LEADER ANALYSIS ─────────────────────────────────────────────────
-POSITIVE_NEWS_TERMS: tuple[tuple[str, int], ...] = (
-    ("upgrade", 10),
-    ("raised price target", 9),
-    ("raises guidance", 9),
-    ("beats estimates", 9),
-    ("beat expectations", 9),
-    ("record revenue", 8),
-    ("profit", 7),
-    ("profitable", 7),
-    ("approval", 7),
-    ("fda approval", 9),
-    ("contract", 7),
-    ("partnership", 6),
-    ("launch", 5),
-    ("acquisition", 5),
-    ("buyout", 8),
-    ("secures", 6),
-    ("expands", 5),
-    ("surges", 5),
-    ("rallies", 5),
-)
-
-NEGATIVE_NEWS_TERMS: tuple[tuple[str, int], ...] = (
-    ("downgrade", 10),
-    ("cuts guidance", 10),
-    ("misses estimates", 9),
-    ("missed expectations", 9),
-    ("offering", 9),
-    ("dilution", 10),
-    ("lawsuit", 8),
-    ("investigation", 8),
-    ("sec probe", 10),
-    ("bankruptcy", 12),
-    ("delisting", 12),
-    ("reverse split", 9),
-    ("fraud", 12),
-    ("loss widens", 8),
-    ("plunges", 7),
-    ("falls", 5),
-    ("cuts", 5),
-)
-
-
+# ── FORMAT HELPERS ──────────────────────────────────────────────────
 def safe_float(value: Any, default: float = 0.0) -> float:
     if value is None:
         return default
@@ -2161,328 +2357,6 @@ def compact_number(value: Any) -> str:
     return f"{number:.0f}"
 
 
-def technical_rank(row: dict[str, Any]) -> float:
-    score = safe_float(row.get("Балл"))
-    volume_mult = safe_float(row.get("Объём ×"))
-    channel_width = safe_float(row.get("Ширина канала"))
-    dollar_volume = safe_float(row.get("Долларовый объём"))
-    signal = str(row.get("Сигнал", ""))
-
-    direction_bonus = 8.0 if "ВВЕРХ" in signal or "UP" in signal else 0.0
-    early_bonus = 4.0 if "ОБЪЁМ" in signal or "VOLUME" in signal else 0.0
-    base_bonus = 6.0 if "БАЗ" in signal or "BASE" in signal else 0.0
-    channel_bonus = max(0.0, 12.0 - channel_width)
-    liquidity_bonus = min(10.0, dollar_volume / 1_000_000)
-    volume_bonus = min(14.0, volume_mult * 2.0)
-    return score + direction_bonus + early_bonus + base_bonus + channel_bonus + liquidity_bonus + volume_bonus
-
-
-def clean_text(value: Any) -> str:
-    text = html.unescape(str(value or ""))
-    text = re.sub(r"<[^>]+>", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def normalize_news_item(raw: dict[str, Any], source: str) -> dict[str, str]:
-    return {
-        "title": clean_text(raw.get("headline") or raw.get("title")),
-        "summary": clean_text(raw.get("summary") or raw.get("description")),
-        "source": clean_text(raw.get("source") or source),
-        "url": str(raw.get("url") or raw.get("link") or ""),
-        "time": clean_text(raw.get("created_at") or raw.get("pubDate") or raw.get("published") or ""),
-    }
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def fetch_alpaca_news_batch(symbols: tuple[str, ...], limit: int, days: int) -> dict[str, list[dict[str, str]]]:
-    if not ALPACA_KEY or not ALPACA_SECRET or not symbols:
-        return {}
-
-    end = now_et()
-    start = end - timedelta(days=days)
-    try:
-        resp = requests.get(
-            f"{ALPACA_BASE}/v1beta1/news",
-            headers=ALPACA_HEADERS,
-            params={
-                "symbols": ",".join(symbols),
-                "limit": limit,
-                "sort": "desc",
-                "include_content": "false",
-                "start": start.isoformat(),
-                "end": end.isoformat(),
-            },
-            timeout=DATA_TIMEOUT_SEC,
-        )
-        if resp.status_code in {401, 403, 404}:
-            return {}
-        resp.raise_for_status()
-        rows = resp.json().get("news", []) or []
-    except Exception as exc:
-        LOGGER.info("Alpaca news batch failed: %s", exc)
-        return {}
-
-    out: dict[str, list[dict[str, str]]] = {}
-    for row in rows:
-        item = normalize_news_item(row, "Alpaca News")
-        if not item["title"]:
-            continue
-        for symbol in row.get("symbols", []) or []:
-            out.setdefault(str(symbol).upper(), []).append(item)
-    return out
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def fetch_alpaca_news(ticker: str, limit: int, days: int) -> list[dict[str, str]]:
-    if not ALPACA_KEY or not ALPACA_SECRET:
-        return []
-
-    end = now_et()
-    start = end - timedelta(days=days)
-    try:
-        resp = requests.get(
-            f"{ALPACA_BASE}/v1beta1/news",
-            headers=ALPACA_HEADERS,
-            params={
-                "symbols": ticker,
-                "limit": limit,
-                "sort": "desc",
-                "include_content": "false",
-                "start": start.isoformat(),
-                "end": end.isoformat(),
-            },
-            timeout=DATA_TIMEOUT_SEC,
-        )
-        if resp.status_code in {401, 403, 404}:
-            return []
-        resp.raise_for_status()
-        rows = resp.json().get("news", []) or []
-    except Exception as exc:
-        LOGGER.info("Alpaca news failed for %s: %s", ticker, exc)
-        return []
-
-    return [normalize_news_item(row, "Alpaca News") for row in rows if row.get("headline") or row.get("title")]
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def fetch_yahoo_news(ticker: str, limit: int) -> list[dict[str, str]]:
-    try:
-        resp = requests.get(
-            "https://feeds.finance.yahoo.com/rss/2.0/headline",
-            params={"s": ticker, "region": "US", "lang": "en-US"},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=DATA_TIMEOUT_SEC,
-        )
-        resp.raise_for_status()
-        root = ET.fromstring(resp.content)
-    except Exception as exc:
-        LOGGER.info("Yahoo news failed for %s: %s", ticker, exc)
-        return []
-
-    items: list[dict[str, str]] = []
-    for item in root.findall(".//item")[:limit]:
-        items.append(
-            normalize_news_item(
-                {
-                    "title": item.findtext("title"),
-                    "description": item.findtext("description"),
-                    "link": item.findtext("link"),
-                    "pubDate": item.findtext("pubDate"),
-                },
-                "Yahoo RSS",
-            )
-        )
-    return [item for item in items if item["title"]]
-
-
-def fetch_news_for_ticker(ticker: str, limit: int = 6, days: int = 7) -> tuple[list[dict[str, str]], str]:
-    alpaca_items = fetch_alpaca_news(ticker, limit, days)
-    if alpaca_items:
-        return alpaca_items, "Alpaca News"
-
-    yahoo_items = fetch_yahoo_news(ticker, limit)
-    if yahoo_items:
-        return yahoo_items, "Yahoo RSS"
-
-    return [], "нет свежих новостей"
-
-
-def score_news_items(items: list[dict[str, str]]) -> dict[str, Any]:
-    if not items:
-        return {
-            "score": 0,
-            "tone": "новостей нет",
-            "reasons": ["свежие новости не найдены"],
-            "headline": "Свежие новости не найдены",
-        }
-
-    text = " ".join(f"{item.get('title', '')} {item.get('summary', '')}" for item in items).lower()
-    positive_hits = [(term, weight) for term, weight in POSITIVE_NEWS_TERMS if term in text]
-    negative_hits = [(term, weight) for term, weight in NEGATIVE_NEWS_TERMS if term in text]
-
-    score = 50 + min(12, len(items) * 3)
-    score += sum(weight for _, weight in positive_hits)
-    score -= sum(weight for _, weight in negative_hits)
-    score = max(0, min(100, int(score)))
-
-    if score >= 68:
-        tone = "позитивный"
-    elif score >= 45:
-        tone = "нейтральный"
-    else:
-        tone = "рискованный"
-
-    reasons: list[str] = []
-    if positive_hits:
-        reasons.append("позитив: " + ", ".join(term for term, _ in positive_hits[:3]))
-    if negative_hits:
-        reasons.append("риски: " + ", ".join(term for term, _ in negative_hits[:3]))
-    if not reasons:
-        reasons.append("явных сильных слов в заголовках нет")
-
-    return {
-        "score": score,
-        "tone": tone,
-        "reasons": reasons,
-        "headline": items[0].get("title", "Новость без заголовка"),
-    }
-
-
-def build_leader_analysis(rows: list[dict[str, Any]], news_candidates: int) -> dict[str, Any] | None:
-    clean_rows = [row for row in rows if isinstance(row, dict) and row.get("Тикер")]
-    if not clean_rows:
-        return None
-
-    ranked_rows = sorted(clean_rows, key=technical_rank, reverse=True)
-    technical = ranked_rows[0]
-    top_rows = ranked_rows[: max(2, int(news_candidates))]
-    symbols = tuple({str(row.get("Тикер", "")).upper() for row in top_rows if row.get("Тикер")})
-    alpaca_news = fetch_alpaca_news_batch(symbols, 50, 7)
-
-    news_scores: list[dict[str, Any]] = []
-    for row in top_rows:
-        ticker = str(row.get("Тикер", ""))
-        items = alpaca_news.get(ticker.upper(), [])
-        source = "Alpaca News"
-        if not items:
-            items = fetch_yahoo_news(ticker, 6)
-            source = "Yahoo RSS" if items else "нет свежих новостей"
-        news_score = score_news_items(items)
-        news_scores.append(
-            {
-                "row": row,
-                "source": source,
-                "items": items,
-                "news_score": news_score,
-                "technical_rank": technical_rank(row),
-            }
-        )
-
-    news_with_items = [item for item in news_scores if item["items"]]
-    news_leader = max(
-        news_with_items,
-        key=lambda item: (item["news_score"]["score"], item["technical_rank"]),
-        default=None,
-    )
-
-    return {
-        "technical": technical,
-        "technical_rank": technical_rank(technical),
-        "news": news_leader,
-        "checked_news": len(news_scores),
-        "created_at": now_et_str(),
-    }
-
-
-def telegram_leader_message(analysis: dict[str, Any]) -> str:
-    tech = analysis["technical"]
-    lines = [
-        "🏁 <b>Разбор лидеров скринера</b>",
-        (
-            "💪 Техника: "
-            f"<b>{html.escape(str(tech['Тикер']))}</b> · {html.escape(str(tech['Сигнал']))} · "
-            f"балл {tech['Балл']}/100 · объём ×{tech['Объём ×']} · канал {html.escape(str(tech['Ширина канала']))}"
-        ),
-    ]
-
-    news = analysis.get("news")
-    if news:
-        row = news["row"]
-        score = news["news_score"]
-        headline = html.escape(str(score["headline"])[:180])
-        lines.append(
-            "📰 Новости: "
-            f"<b>{html.escape(str(row['Тикер']))}</b> · фон {score['score']}/100 · "
-            f"{html.escape(str(score['tone']))} · {headline}"
-        )
-    else:
-        lines.append("📰 Новости: по найденным сигналам свежий новостной лидер не найден.")
-
-    lines.append(f"⏰ {now_et_str('%H:%M ET')}")
-    return "\n".join(lines)
-
-
-def render_leader_analysis(analysis: dict[str, Any]) -> None:
-    tech = analysis["technical"]
-    news = analysis.get("news")
-
-    st.markdown('<div class="desk-section-title">Разбор лидеров</div>', unsafe_allow_html=True)
-    tech_col, news_col = st.columns(2)
-
-    with tech_col:
-        st.markdown(
-            f"""
-            <div class="leader-card">
-                <div class="leader-kicker">Самый сильный технический сигнал</div>
-                <div class="leader-symbol">{html.escape(str(tech["Тикер"]))}</div>
-                <div class="leader-line"><b>{html.escape(str(tech["Сигнал"]))}</b> · балл {html.escape(str(tech["Балл"]))}/100</div>
-                <div class="leader-line">Объём: ×{html.escape(str(tech["Объём ×"]))} · канал: {html.escape(str(tech["Ширина канала"]))}</div>
-                <div class="leader-line">Цена: ${html.escape(str(tech["Цена"]))} · долларовый объём: ${compact_number(tech.get("Долларовый объём"))}</div>
-                <div class="leader-note">Выбрано по сумме: балл сигнала, всплеск объёма, узость канала, ликвидность и направление.</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with news_col:
-        if news:
-            row = news["row"]
-            score = news["news_score"]
-            st.markdown(
-                f"""
-                <div class="leader-card">
-                    <div class="leader-kicker">Самый сильный новостной фон</div>
-                    <div class="leader-symbol">{html.escape(str(row["Тикер"]))}</div>
-                    <div class="leader-line"><b>Фон: {score["score"]}/100</b> · {html.escape(str(score["tone"]))} · {html.escape(str(news["source"]))}</div>
-                    <div class="leader-line">Техника: {html.escape(str(row["Сигнал"]))} · балл {html.escape(str(row["Балл"]))}/100</div>
-                    <div class="leader-note">{html.escape("; ".join(score["reasons"]))}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            with st.expander(f"Новости по {row['Тикер']}"):
-                for item in news["items"][:4]:
-                    title = item["title"]
-                    url = item.get("url", "")
-                    source = item.get("source", news["source"])
-                    if url:
-                        st.markdown(f"- [{title}]({url}) · {source}")
-                    else:
-                        st.markdown(f"- {title} · {source}")
-        else:
-            st.markdown(
-                """
-                <div class="leader-card">
-                    <div class="leader-kicker">Самый сильный новостной фон</div>
-                    <div class="leader-symbol">нет данных</div>
-                    <div class="leader-line">По найденным сигналам свежие новости не найдены.</div>
-                    <div class="leader-note">Для Alpaca News нужны Alpaca secrets; если их нет, код пробует Yahoo RSS.</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-
 # ── SESSION STATE ─────────────────────────────────────────────────
 if "results" not in st.session_state:
     st.session_state.results = []
@@ -2498,8 +2372,6 @@ elif isinstance(st.session_state.auto_last_run, datetime) and st.session_state.a
     st.session_state.auto_last_run = st.session_state.auto_last_run.replace(tzinfo=MARKET_TZ)
 if "auto_count" not in st.session_state:
     st.session_state.auto_count = 0
-if "leader_analysis" not in st.session_state:
-    st.session_state.leader_analysis = None
 if "auto_scan_offset" not in st.session_state:
     st.session_state.auto_scan_offset = 0
 if "auto_scan_signature" not in st.session_state:
@@ -2514,23 +2386,29 @@ with st.sidebar:
         """
         <div class="sidebar-brand">
             <div class="sidebar-brand-title">PR Screener</div>
-            <div class="sidebar-brand-subtitle">Накопление · канал · объём · пробой</div>
+            <div class="sidebar-brand-subtitle">Взрыв базы · VCP · Spring</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    st.markdown('<div class="desk-section-title">Режим</div>', unsafe_allow_html=True)
-    base_impulse_only = st.toggle(
-        "Только паттерн «Взрыв из базы»",
-        value=False,
+    st.markdown('<div class="desk-section-title">Тип скринера</div>', unsafe_allow_html=True)
+    scanner_names = list(SCANNER_LABELS.values())
+    scanner_label = st.radio(
+        "Активный скринер",
+        scanner_names,
+        index=0,
+        horizontal=False,
         help=(
-            "Если включено, скринер ищет только базу с резким объёмом: открытие внутри базы/вчерашней свечи, "
-            "объём выше максимума базы, без сегодняшнего гэпа за пределы паттерна."
+            "Выбери один активный поиск. Настройки остальных режимов ниже останутся видны, "
+            "но будут серыми и не будут участвовать в скане."
         ),
     )
-    if base_impulse_only:
-        st.caption("Режим взрыва: обычные пробои канала и ранний объём в канале не попадают в выдачу.")
+    scanner_mode = {label: code for code, label in SCANNER_LABELS.items()}[scanner_label]
+    base_impulse_only = scanner_mode == SCANNER_BASE
+    vcp_active = scanner_mode == SCANNER_VCP
+    spring_active = scanner_mode == SCANNER_SPRING
+    st.caption(SCANNER_HELP[scanner_mode])
 
     st.markdown('<div class="desk-section-title">Данные</div>', unsafe_allow_html=True)
     data_source_label = st.selectbox(
@@ -2568,7 +2446,7 @@ with st.sidebar:
         "Акций за прогон",
         50,
         10000,
-        500,
+        5000,
         50,
         help=(
             "Ручной запуск проверит только эту пачку и остановится. "
@@ -2577,112 +2455,98 @@ with st.sidebar:
     )
     st.caption("NASDAQ/NYSE/AMEX · обычные акции до 5 букв · без ETF, фондов, юнитов, варрантов, прав, привилегированных акций и долговых нот")
 
-    if base_impulse_only:
-        channel_days = 14
-        max_channel_width_pct = 8.0
-        price_basis = "HIGH_LOW"
-        max_gap_pct = 8.0
-        breakout_buffer_pct = 0.0
-        directions = "ALL"
-        require_price_break = False
-        allow_volume_alert_inside_channel = False
-        volume_baseline = "MAX"
-        min_volume_mult = 1.0
-        min_channel_avg_volume = 0
-        min_dollar_volume = 0
+    channel_days = 14
+    max_channel_width_pct = 8.0
+    price_basis = "HIGH_LOW"
+    max_gap_pct = 8.0
+    breakout_buffer_pct = 0.0
+    directions = "ALL"
+    require_price_break = False
+    allow_volume_alert_inside_channel = False
+    volume_baseline = "MAX"
+    min_volume_mult = 1.0
+    min_channel_avg_volume = 0
 
-        st.markdown('<div class="desk-section-title">Паттерн объёма</div>', unsafe_allow_html=True)
-        st.caption("Канал, ширина канала и пробой цены в этом режиме не используются.")
-        max_stale_days = st.slider(
-            "Свежесть последней свечи, дней",
-            1,
-            10,
-            5,
-            help="Отбрасывает тикеры, у которых последний дневной бар слишком старый.",
-        )
-    else:
-        st.markdown('<div class="desk-section-title">Канал накопления</div>', unsafe_allow_html=True)
-        channel_days = st.slider("Дней в канале", 10, 25, 14)
-        max_channel_width_pct = st.slider("Максимальная ширина канала (%)", 2.0, 25.0, 8.0, 0.5)
-        price_basis_label = st.radio(
-            "Расчёт канала",
-            ["High/Low — максимум и минимум свечей", "Close — только закрытия"],
-            index=0,
-            horizontal=True,
-            help="High/Low строже: берёт весь хвост свечей. Close мягче: смотрит только цены закрытия.",
-        )
-        price_basis = "HIGH_LOW" if price_basis_label.startswith("High/Low") else "CLOSE"
-        max_gap_pct = st.slider("Максимальный гэп внутри канала (%)", 1.0, 30.0, 8.0, 0.5)
-        max_stale_days = st.slider(
-            "Свежесть последней свечи, дней",
-            1,
-            10,
-            5,
-            help="Отбрасывает тикеры, у которых последний дневной бар слишком старый.",
-        )
-
-        st.markdown('<div class="desk-section-title">Выход и объём</div>', unsafe_allow_html=True)
-        breakout_buffer_pct = st.slider("Буфер выхода за канал (%)", 0.0, 10.0, 0.5, 0.1)
-        direction_label = st.radio(
-            "Направление",
-            ["Все", "Вверх", "Вниз"],
-            index=0,
-            horizontal=True,
-            help="Все: искать выход вверх и вниз. Вверх: только пробой верхней границы. Вниз: только пробой нижней границы.",
-        )
-        directions = {"Все": "ALL", "Вверх": "UP", "Вниз": "DOWN"}[direction_label]
-        signal_style = st.radio(
-            "Тип сигнала",
-            ["Только выход из канала", "Выход или ранний объём в канале"],
-            index=1,
-        )
-        require_price_break = signal_style == "Только выход из канала"
-        allow_volume_alert_inside_channel = signal_style == "Выход или ранний объём в канале"
-
-        st.markdown('<div class="desk-section-title">Объём</div>', unsafe_allow_html=True)
-        volume_label = st.radio(
-            "Сравнивать объём с",
-            ["MAX — максимум канала", "AVG — средний объём канала"],
-            index=1,
-            horizontal=True,
-            help="MAX строже: сегодняшний объём должен быть выше максимального объёма внутри канала. AVG мягче: сравнение со средним объёмом канала.",
-        )
-        volume_baseline = "MAX" if volume_label.startswith("MAX") else "AVG"
-        min_volume_mult = st.slider("Минимальный всплеск объёма ×", 1.0, 10.0, 2.0, 0.25)
-        min_channel_avg_volume = st.number_input("Минимальный средний объём канала", 0, 10_000_000, 100_000, 25_000)
-        min_dollar_volume = st.number_input("Минимальный долларовый объём сегодня", 0, 100_000_000, 250_000, 50_000)
+    st.markdown('<div class="desk-section-title">Свежесть и ликвидность</div>', unsafe_allow_html=True)
+    max_stale_days = st.slider(
+        "Свежесть последней свечи, дней",
+        1,
+        10,
+        5,
+        help="Отбрасывает тикеры, у которых последний дневной бар слишком старый.",
+    )
+    min_dollar_volume_input = st.number_input(
+        "Мин. долларовый объём сегодня",
+        0,
+        100_000_000,
+        250_000,
+        50_000,
+        disabled=base_impulse_only,
+        help="Для VCP и Spring фильтрует слишком тонкие акции. Для Взрыва из базы выключено, чтобы старый режим работал как раньше.",
+    )
+    min_dollar_volume = 0 if base_impulse_only else int(min_dollar_volume_input)
 
     st.markdown('<div class="desk-section-title">Взрыв из базы</div>', unsafe_allow_html=True)
-    if base_impulse_only:
-        base_impulse_enabled = True
-        st.caption("Паттерн включён принудительно, потому что выбран режим «только взрыв».")
-    else:
-        base_impulse_enabled = st.toggle(
-            "Добавлять взрыв объёма из базы к обычному каналу",
-            value=True,
-            help=(
-                "Дополнительный поиск для акций, которые открылись внутри вчерашней свечи/базы, "
-                "но сегодня дали объём выше любого из последних базовых дней."
-            ),
-        )
+    base_impulse_enabled = base_impulse_only
     base_impulse_days = st.slider(
         "Предыдущих свечей для сравнения объёма",
         5,
         20,
         10,
         1,
-        disabled=not base_impulse_enabled,
+        disabled=not base_impulse_only,
+        help=SCANNER_HELP[SCANNER_BASE],
     )
     base_volume_mult = st.slider(
         "Сегодняшний объём выше каждой прошлой свечи ×",
         1,
         50,
+        10,
         1,
-        1,
-        disabled=not base_impulse_enabled,
+        disabled=not base_impulse_only,
         help="1 означает: сегодняшний объём строго больше максимального объёма среди предыдущих свечей. 50 означает: больше максимума предыдущих свечей в 50 раз.",
     )
-    st.caption("Обязательное условие паттерна: сегодняшнее открытие внутри диапазона вчерашней свечи.")
+
+    st.markdown('<div class="desk-section-title">VCP-сжатие</div>', unsafe_allow_html=True)
+    vcp_days = st.slider(
+        "Период VCP, дней",
+        30,
+        90,
+        45,
+        5,
+        disabled=not vcp_active,
+        help=SCANNER_HELP[SCANNER_VCP],
+    )
+    vcp_max_base_width_pct = st.slider("Макс. ширина всей базы (%)", 15.0, 70.0, 35.0, 1.0, disabled=not vcp_active)
+    vcp_max_recent_width_pct = st.slider("Макс. ширина последней трети (%)", 3.0, 25.0, 12.0, 0.5, disabled=not vcp_active)
+    vcp_min_compression_pct = st.slider("Минимальное сжатие диапазона (%)", 10.0, 70.0, 25.0, 1.0, disabled=not vcp_active)
+    vcp_near_high_pct = st.slider("Цена не дальше от верха базы (%)", 2.0, 20.0, 8.0, 0.5, disabled=not vcp_active)
+    vcp_dry_volume_ratio = st.slider(
+        "Сухой объём: последняя треть / первые две",
+        0.30,
+        1.20,
+        0.85,
+        0.05,
+        disabled=not vcp_active,
+        help="0.85 значит: средний объём последней трети базы должен быть не выше 85% от среднего объёма первых двух третей.",
+    )
+
+    st.markdown('<div class="desk-section-title">Spring-отскок</div>', unsafe_allow_html=True)
+    spring_support_days = st.slider("Поддержка за дней", 30, 120, 60, 5, disabled=not spring_active, help=SCANNER_HELP[SCANNER_SPRING])
+    spring_low_days = st.slider("Дно смотреть за дней", 60, 250, 120, 10, disabled=not spring_active)
+    spring_break_pct = st.slider("Минимальный прокол поддержки (%)", 0.1, 10.0, 1.0, 0.1, disabled=not spring_active)
+    spring_reclaim_pct = st.slider("Возврат выше поддержки (%)", 0.0, 5.0, 0.0, 0.1, disabled=not spring_active)
+    spring_close_position_pct = st.slider(
+        "Закрытие в верхней части свечи (%)",
+        40.0,
+        90.0,
+        60.0,
+        1.0,
+        disabled=not spring_active,
+        help="60% значит: закрытие должно быть выше середины дневного диапазона и ближе к high.",
+    )
+    spring_volume_mult = st.slider("Объём выше среднего ×", 1.0, 5.0, 1.2, 0.1, disabled=not spring_active)
+    spring_max_from_low_pct = st.slider("Цена не дальше от дна периода (%)", 5.0, 80.0, 35.0, 1.0, disabled=not spring_active)
 
     st.markdown('<div class="desk-section-title">Цена</div>', unsafe_allow_html=True)
     price_col_1, price_col_2 = st.columns(2)
@@ -2697,35 +2561,11 @@ with st.sidebar:
     with price_col_2:
         max_price = st.number_input("Макс. цена", 0.01, 500.0, 20.0, 1.0)
 
-    if base_impulse_only:
-        analyze_leaders = False
-        news_candidate_count = 0
-    else:
-        st.markdown('<div class="desk-section-title">Разбор лидеров</div>', unsafe_allow_html=True)
-        analyze_leaders = st.toggle("Показывать лидеров после скана", value=True)
-        news_candidate_count = st.slider(
-            "Сколько сильных сигналов проверять по новостям",
-            2,
-            12,
-            6,
-            1,
-            disabled=not analyze_leaders,
-        )
-        st.caption("Новости: сначала Alpaca News, если доступны ключи; затем Yahoo RSS как резерв.")
-
     st.markdown('<div class="desk-section-title">Автоматизация</div>', unsafe_allow_html=True)
     send_alerts = st.toggle("Telegram-уведомления", value=True)
-    if base_impulse_only:
-        send_leader_summary = False
-    else:
-        send_leader_summary = analyze_leaders and send_alerts and st.toggle(
-            "Telegram-итог лидеров",
-            value=True,
-            disabled=not send_alerts,
-        )
     telegram_configured = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
     if st.button("Отправить тест Telegram", use_container_width=True, disabled=not telegram_configured):
-        if send_telegram(f"✅ Тест Telegram из скринера накопления · {now_et_str('%H:%M ET')}"):
+        if send_telegram("TEST · RVOL 1.00x · +0%"):
             st.success("Тест отправлен.")
         else:
             st.error("Telegram не отправился. Проверь токен и chat_id.")
@@ -2756,6 +2596,7 @@ status_kind, status_text = get_market_status()
 status_tone = {"success": "green", "warning": "amber", "info": "blue"}.get(status_kind, "")
 
 cfg = ScanConfig(
+    scanner_mode=scanner_mode,
     channel_days=channel_days,
     max_channel_width_pct=max_channel_width_pct,
     price_basis=price_basis,
@@ -2775,23 +2616,32 @@ cfg = ScanConfig(
     max_stale_days=max_stale_days,
     min_price=min_price,
     max_price=max_price,
+    vcp_days=vcp_days,
+    vcp_max_base_width_pct=vcp_max_base_width_pct,
+    vcp_max_recent_width_pct=vcp_max_recent_width_pct,
+    vcp_min_compression_pct=vcp_min_compression_pct,
+    vcp_near_high_pct=vcp_near_high_pct,
+    vcp_dry_volume_ratio=vcp_dry_volume_ratio,
+    spring_support_days=spring_support_days,
+    spring_low_days=spring_low_days,
+    spring_break_pct=spring_break_pct,
+    spring_reclaim_pct=spring_reclaim_pct,
+    spring_close_position_pct=spring_close_position_pct,
+    spring_volume_mult=spring_volume_mult,
+    spring_max_from_low_pct=spring_max_from_low_pct,
 )
 
 telegram_ready = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 telegram_tone = "green" if send_alerts and telegram_ready else ("red" if send_alerts else "amber")
 telegram_label = "готов" if send_alerts and telegram_ready else ("нет секрета" if send_alerts else "выкл")
-mode_subtitle = (
-    "Полный рынок · только паттерн «взрыв из базы»"
-    if cfg.base_impulse_only
-    else "Полный рынок · канал · пробой · ранний объём · взрыв из базы"
-)
-mode_label = "только взрыв" if cfg.base_impulse_only else "канал + база"
+mode_subtitle = SCANNER_SUBTITLES.get(cfg.scanner_mode, "")
+mode_label = SCANNER_LABELS.get(cfg.scanner_mode, "Скринер")
 
 st.markdown(
     f"""
     <div class="desk-header">
         <div>
-            <div class="desk-title">Скринер накопления</div>
+            <div class="desk-title">PR Screener</div>
             <div class="desk-subtitle">{html.escape(mode_subtitle)}</div>
         </div>
         <div class="desk-statusbar">
@@ -2804,7 +2654,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if cfg.base_impulse_only:
+if cfg.scanner_mode == SCANNER_BASE:
     setup_chips = "".join(
         [
             chip("Режим", mode_label, "amber"),
@@ -2817,21 +2667,38 @@ if cfg.base_impulse_only:
             chip("Источник", DATA_SOURCE_LABELS.get(data_source, data_source), "green"),
         ]
     )
-else:
+elif cfg.scanner_mode == SCANNER_VCP:
     setup_chips = "".join(
         [
             chip("Режим", mode_label, "blue"),
             chip("Биржа", exchange),
             chip("За прогон", max_tickers),
             chip("Цена", f"${min_price:g}-${max_price:g}"),
-            chip("Канал", f"{cfg.channel_days} дней / {cfg.max_channel_width_pct:g}%"),
-            chip("Расчёт", "High/Low: вся свеча" if cfg.price_basis == "HIGH_LOW" else "Close: закрытия"),
-            chip("Гэп", f"{cfg.max_gap_pct:g}%"),
+            chip("VCP", f"{cfg.vcp_days} дней"),
+            chip("База", f"до {cfg.vcp_max_base_width_pct:g}%"),
+            chip("Последняя треть", f"до {cfg.vcp_max_recent_width_pct:g}%"),
+            chip("Сжатие", f"от {cfg.vcp_min_compression_pct:g}%"),
+            chip("До верха", f"до {cfg.vcp_near_high_pct:g}%"),
+            chip("Сухой объём", f"≤ {cfg.vcp_dry_volume_ratio:g}x"),
             chip("Свежесть", f"{cfg.max_stale_days}д"),
-            chip("Сигнал", "Пробой + объём" if cfg.require_price_break else "Пробой или ранний объём"),
-            chip("Буфер", f"{cfg.breakout_buffer_pct:g}%"),
-            chip("RVOL", f"{cfg.volume_baseline} ({'макс.' if cfg.volume_baseline == 'MAX' else 'средн.'}) x{cfg.min_volume_mult:g}"),
-            chip("Объём паттерна", f"сегодня > {cfg.base_volume_mult:g}x каждой из {cfg.base_impulse_days}" if cfg.base_impulse_enabled else "выкл"),
+            chip("Свечи/объём", DATA_SOURCE_LABELS.get(data_source, data_source), "green"),
+            chip("Долларовый объём", f"${cfg.min_dollar_volume:,}"),
+        ]
+    )
+else:
+    setup_chips = "".join(
+        [
+            chip("Режим", mode_label, "green"),
+            chip("Биржа", exchange),
+            chip("За прогон", max_tickers),
+            chip("Цена", f"${min_price:g}-${max_price:g}"),
+            chip("Поддержка", f"{cfg.spring_support_days} дней"),
+            chip("Дно", f"{cfg.spring_low_days} дней"),
+            chip("Прокол", f"от {cfg.spring_break_pct:g}%"),
+            chip("Возврат", f"{cfg.spring_reclaim_pct:g}%"),
+            chip("Закрытие", f"верх {cfg.spring_close_position_pct:g}%"),
+            chip("Объём", f"×{cfg.spring_volume_mult:g}"),
+            chip("От дна", f"до {cfg.spring_max_from_low_pct:g}%"),
             chip("Свечи/объём", DATA_SOURCE_LABELS.get(data_source, data_source), "green"),
             chip("Долларовый объём", f"${cfg.min_dollar_volume:,}"),
         ]
@@ -2891,7 +2758,6 @@ with clear_col:
     if st.button("Очистить результаты", use_container_width=True):
         st.session_state.results = []
         st.session_state.stats = {"checked": 0, "signals": 0}
-        st.session_state.leader_analysis = None
         st.session_state.auto_scan_offset = 0
         st.session_state.auto_scan_signature = ""
         st.session_state.last_auto_total = None
@@ -2943,11 +2809,6 @@ if start_scan or (auto_scan and should_auto_run):
 
         active_old_results = filter_results_for_config(st.session_state.results, cfg)
         st.session_state.results = merge_results(hits, active_old_results, cfg.base_impulse_only)
-        if analyze_leaders and st.session_state.results:
-            status_box.caption("Разбираю лидеров: техника и новости...")
-            st.session_state.leader_analysis = build_leader_analysis(st.session_state.results, news_candidate_count)
-        else:
-            st.session_state.leader_analysis = None
 
         st.session_state.auto_last_run = now_et()
         st.session_state.auto_count += 1
@@ -2970,13 +2831,6 @@ if start_scan or (auto_scan and should_auto_run):
             status_box.success(done_message)
             if hasattr(st, "toast"):
                 st.toast(done_message, icon="✅")
-            if send_alerts:
-                send_telegram(
-                    f"✅ Скан накопления завершён · найдено {len(hits)} · "
-                    f"проверено {len(ticker_infos)} · {scan_scope} · {now_et_str('%H:%M ET')}"
-                )
-                if send_leader_summary and st.session_state.leader_analysis:
-                    send_telegram(telegram_leader_message(st.session_state.leader_analysis))
         else:
             done_message = f"Скан завершён: сигналов нет · проверено {len(ticker_infos)} · {scan_scope}"
             status_box.info(done_message)
@@ -2988,8 +2842,6 @@ if start_scan or (auto_scan and should_auto_run):
                 st.write("\n".join(st.session_state.scan_errors))
 
 st.session_state.results = sort_results(filter_results_for_config(st.session_state.results, cfg), cfg.base_impulse_only)
-if not leader_analysis_matches_results(st.session_state.leader_analysis, st.session_state.results):
-    st.session_state.leader_analysis = None
 
 if st.session_state.results:
     df_results = pd.DataFrame(st.session_state.results)
@@ -3008,15 +2860,6 @@ if st.session_state.results:
     early_count = int(early_mask.sum())
     base_count = int(base_mask.sum())
     best_score = int(df_results["Балл"].max()) if "Балл" in df_results else 0
-
-    if analyze_leaders:
-        leader_analysis = st.session_state.leader_analysis
-        if leader_analysis is None:
-            with st.spinner("Разбираю лидеров по технике и новостям..."):
-                leader_analysis = build_leader_analysis(st.session_state.results, news_candidate_count)
-                st.session_state.leader_analysis = leader_analysis
-        if leader_analysis:
-            render_leader_analysis(leader_analysis)
 
     render_results_summary(st.session_state.results)
     st.dataframe(
@@ -3052,5 +2895,3 @@ else:
             </div>
         </div>
         """,
-        unsafe_allow_html=True,
-    )
