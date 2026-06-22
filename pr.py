@@ -325,38 +325,16 @@ def apply_custom_theme() -> None:
                 margin-top: 0.55rem;
             }
 
-            .pattern-chart-card {
-                background: #ffffff;
-                border: 2px solid var(--desk-blue);
-                border-radius: 8px;
-                padding: 0.82rem;
-                margin-bottom: 0.95rem;
-                box-shadow: var(--desk-shadow);
-            }
-
             div[class*="st-key-chart_card_"] {
-                margin-bottom: 0.95rem !important;
-            }
-
-            div[class*="st-key-chart_card_"][data-testid="stVerticalBlockBorderWrapper"],
-            div[class*="st-key-chart_card_"] div[data-testid="stVerticalBlockBorderWrapper"] {
                 border: 2px solid var(--desk-blue) !important;
                 border-radius: 8px !important;
                 background: #ffffff !important;
                 box-shadow: var(--desk-shadow) !important;
+                margin-bottom: 0.95rem !important;
             }
 
-            div[class*="st-key-chart_card_"][data-testid="stVerticalBlockBorderWrapper"] > div,
-            div[class*="st-key-chart_card_"] div[data-testid="stVerticalBlockBorderWrapper"] > div {
+            div[data-testid="stVerticalBlock"][class*="st-key-chart_card_"] {
                 border-color: var(--desk-blue) !important;
-            }
-
-            div[data-testid="stVerticalBlockBorderWrapper"]:has(.pattern-chart-shell) {
-                border: 2px solid var(--desk-blue) !important;
-                border-radius: 8px !important;
-                background: #ffffff !important;
-                box-shadow: var(--desk-shadow) !important;
-                margin-bottom: 0.95rem !important;
             }
 
             .pattern-chart-shell {
@@ -425,7 +403,6 @@ def apply_custom_theme() -> None:
                 overflow-wrap: anywhere;
             }
 
-            .pattern-chart-card img,
             .pattern-chart-svg svg {
                 display: block;
                 width: 100%;
