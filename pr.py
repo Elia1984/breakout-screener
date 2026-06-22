@@ -334,6 +334,23 @@ def apply_custom_theme() -> None:
                 box-shadow: var(--desk-shadow);
             }
 
+            div[class*="st-key-chart_card_"] {
+                margin-bottom: 0.95rem !important;
+            }
+
+            div[class*="st-key-chart_card_"][data-testid="stVerticalBlockBorderWrapper"],
+            div[class*="st-key-chart_card_"] div[data-testid="stVerticalBlockBorderWrapper"] {
+                border: 2px solid var(--desk-blue) !important;
+                border-radius: 8px !important;
+                background: #ffffff !important;
+                box-shadow: var(--desk-shadow) !important;
+            }
+
+            div[class*="st-key-chart_card_"][data-testid="stVerticalBlockBorderWrapper"] > div,
+            div[class*="st-key-chart_card_"] div[data-testid="stVerticalBlockBorderWrapper"] > div {
+                border-color: var(--desk-blue) !important;
+            }
+
             div[data-testid="stVerticalBlockBorderWrapper"]:has(.pattern-chart-shell) {
                 border: 2px solid var(--desk-blue) !important;
                 border-radius: 8px !important;
@@ -414,7 +431,7 @@ def apply_custom_theme() -> None:
                 width: 100%;
                 aspect-ratio: 2.1 / 1;
                 object-fit: contain;
-                border: 2px solid var(--desk-blue);
+                border: 1px solid #eef2f6;
                 border-radius: 8px;
                 background: #ffffff;
             }
@@ -700,8 +717,8 @@ DATA_SOURCE_AUTO = "AUTO_ALPACA_SIP_YAHOO"
 DATA_SOURCE_ALPACA_SIP = "ALPACA_SIP_DELAYED"
 DATA_SOURCE_YAHOO = "YAHOO"
 DATA_SOURCE_LABELS = {
-    DATA_SOURCE_AUTO: "Alpaca SIP delayed → Yahoo",
-    DATA_SOURCE_ALPACA_SIP: "Alpaca SIP delayed",
+    DATA_SOURCE_AUTO: "Alpaca SIP delayed → Yahoo резерв",
+    DATA_SOURCE_ALPACA_SIP: "Только Alpaca SIP delayed",
     DATA_SOURCE_YAHOO: "Yahoo Finance",
 }
 
@@ -995,6 +1012,21 @@ def get_market_status() -> tuple[str, str]:
     if 16 * 60 < minute <= 20 * 60:
         return "info", "Post-Market активен (16:00-20:00 ET)"
     return "warning", "Рынок закрыт"
+
+
+def is_extended_session_timestamp(value: Any) -> bool:
+    try:
+        ts = pd.Timestamp(value)
+    except Exception:
+        return False
+    if pd.isna(ts):
+        return False
+    if ts.tzinfo is None:
+        ts = ts.tz_localize(MARKET_TZ)
+    else:
+        ts = ts.tz_convert(MARKET_TZ)
+    minute = ts.hour * 60 + ts.minute
+    return minute < 9 * 60 + 30 or minute >= 16 * 60
 
 
 def remember_error(message: str) -> None:
@@ -1609,14 +1641,15 @@ def pattern_chart_payload(
             band_high = float(prev["High"])
 
     rows = []
-    for row in chart_df.itertuples(index=False):
+    for timestamp, row in chart_df.iterrows():
         rows.append(
             {
-                "Open": float(getattr(row, "Open")),
-                "High": float(getattr(row, "High")),
-                "Low": float(getattr(row, "Low")),
-                "Close": float(getattr(row, "Close")),
-                "Volume": float(getattr(row, "Volume")),
+                "Open": float(row["Open"]),
+                "High": float(row["High"]),
+                "Low": float(row["Low"]),
+                "Close": float(row["Close"]),
+                "Volume": float(row["Volume"]),
+                "Extended": bool(timeframe_code == "M" and is_extended_session_timestamp(timestamp)),
             }
         )
 
@@ -1686,13 +1719,32 @@ def pattern_chart_svg(payload: dict[str, Any]) -> str:
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
         '<rect width="100%" height="100%" rx="8" fill="#ffffff"/>',
         f'<rect x="0.5" y="0.5" width="{width - 1}" height="{height - 1}" rx="8" fill="none" stroke="#d8dde6"/>',
+    ]
+
+    extended_start: int | None = None
+    for idx, row in enumerate(rows):
+        is_extended = bool(row.get("Extended"))
+        if is_extended and extended_start is None:
+            extended_start = idx
+        is_last = idx == count - 1
+        if extended_start is not None and (not is_extended or is_last):
+            extended_end = idx if is_extended and is_last else idx - 1
+            x = plot_left + extended_start * slot
+            w = (extended_end - extended_start + 1) * slot
+            parts.append(
+                f'<rect x="{x:.2f}" y="{price_top:.2f}" width="{w:.2f}" '
+                f'height="{volume_bottom - price_top:.2f}" fill="#eef0f3" opacity="0.78"/>'
+            )
+            extended_start = None
+
+    parts.extend([
         f'<line x1="{plot_left}" x2="{plot_right}" y1="{price_top}" y2="{price_top}" stroke="#edf2f7"/>',
         f'<line x1="{plot_left}" x2="{plot_right}" y1="{(price_top + price_bottom) / 2:.2f}" y2="{(price_top + price_bottom) / 2:.2f}" stroke="#edf2f7"/>',
         f'<line x1="{plot_left}" x2="{plot_right}" y1="{price_bottom}" y2="{price_bottom}" stroke="#d0d5dd"/>',
         f'<line x1="{plot_left}" x2="{plot_right}" y1="{volume_bottom}" y2="{volume_bottom}" stroke="#d0d5dd"/>',
         f'<text x="{plot_left}" y="15" fill="#667085" font-size="12" font-weight="700" font-family="Inter, Arial, sans-serif">{timeframe} · {len(rows)} свечей</text>',
         f'<text x="{plot_right}" y="15" fill="#344054" font-size="12" font-weight="800" font-family="Inter, Arial, sans-serif" text-anchor="end">${last_close:.4g}</text>',
-    ]
+    ])
 
     if band_low is not None and band_high is not None and band_high > band_low > 0:
         band_y = y_pos(float(band_high))
@@ -2467,7 +2519,7 @@ def render_signal_gallery(rows: list[dict[str, Any]], max_cards: int) -> None:
         dollar_volume = html.escape(format_dollar_cell(row.get("Долларовый объём")))
         market_cap = html.escape(format_market_cap_cell(row.get("Капитализация")))
 
-        with st.container(border=True):
+        with st.container(border=True, key=f"chart_card_{key_base}"):
             st.markdown(
                 f"""
                 <div class="pattern-chart-shell">
@@ -2613,14 +2665,13 @@ with st.sidebar:
     data_source_label = st.selectbox(
         "Свечи и дневной объём",
         [
-            DATA_SOURCE_LABELS[DATA_SOURCE_AUTO],
             DATA_SOURCE_LABELS[DATA_SOURCE_ALPACA_SIP],
-            DATA_SOURCE_LABELS[DATA_SOURCE_YAHOO],
+            DATA_SOURCE_LABELS[DATA_SOURCE_AUTO],
         ],
         index=0,
         help=(
-            "Alpaca SIP delayed — полный рынок SIP/CTA/UTP по всем биржам с задержкой 16 минут. "
-            "Yahoo остаётся резервом, если Alpaca не отдаст тикер."
+            "По умолчанию используем только Alpaca SIP delayed. Резерв Yahoo можно включить вручную, "
+            "если Alpaca временно не отдаёт часть тикеров."
         ),
     )
     data_source = {label: code for code, label in DATA_SOURCE_LABELS.items()}[data_source_label]
@@ -2628,7 +2679,7 @@ with st.sidebar:
         st.caption(f"Alpaca SIP delayed: полный рынок, задержка {ALPACA_SIP_DELAY_MINUTES} минут.")
         if not (ALPACA_KEY and ALPACA_SECRET):
             st.warning("Для Alpaca SIP delayed нужны ALPACA_KEY и ALPACA_SECRET в secrets.")
-    if data_source in {DATA_SOURCE_AUTO, DATA_SOURCE_YAHOO} and yf is None:
+    if data_source == DATA_SOURCE_AUTO and yf is None:
         st.warning("yfinance не установлен: Yahoo Finance недоступен как резерв.")
 
     st.markdown('<div class="desk-section-title">Рынок</div>', unsafe_allow_html=True)
@@ -2910,8 +2961,8 @@ st.markdown(
 
 render_market_overview(data_source)
 
-if data_source in {DATA_SOURCE_AUTO, DATA_SOURCE_YAHOO} and yf is None:
-    st.warning("yfinance не установлен. Установи пакет: pip install yfinance")
+if data_source == DATA_SOURCE_AUTO and yf is None:
+    st.warning("yfinance не установлен. Резерв Yahoo недоступен; текущий скан пойдёт через Alpaca.")
 if send_alerts and not telegram_ready:
     st.warning(
         "Telegram включён, но TELEGRAM_TOKEN или TELEGRAM_CHAT_ID не найдены в Streamlit secrets. "
