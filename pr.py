@@ -327,12 +327,23 @@ def apply_custom_theme() -> None:
 
             .pattern-chart-card {
                 background: #ffffff;
-                border: 1px solid var(--desk-line);
-                border-top: 3px solid var(--desk-blue);
+                border: 2px solid var(--desk-blue);
                 border-radius: 8px;
                 padding: 0.82rem;
                 margin-bottom: 0.95rem;
                 box-shadow: var(--desk-shadow);
+            }
+
+            div[data-testid="stVerticalBlockBorderWrapper"]:has(.pattern-chart-shell) {
+                border: 2px solid var(--desk-blue) !important;
+                border-radius: 8px !important;
+                background: #ffffff !important;
+                box-shadow: var(--desk-shadow) !important;
+                margin-bottom: 0.95rem !important;
+            }
+
+            .pattern-chart-shell {
+                padding: 0.12rem 0.02rem 0;
             }
 
             .pattern-chart-head {
@@ -367,7 +378,7 @@ def apply_custom_theme() -> None:
                 display: grid;
                 grid-template-columns: repeat(4, minmax(0, 1fr));
                 gap: 0.45rem;
-                margin-bottom: 0.65rem;
+                margin-bottom: 0.35rem;
             }
 
             .pattern-chart-stat {
@@ -403,16 +414,18 @@ def apply_custom_theme() -> None:
                 width: 100%;
                 aspect-ratio: 2.1 / 1;
                 object-fit: contain;
-                border: 1px solid #eef2f6;
+                border: 2px solid var(--desk-blue);
                 border-radius: 8px;
                 background: #ffffff;
             }
 
-            .chart-timeframe-note {
-                color: var(--desk-muted);
-                font-size: 0.76rem;
-                line-height: 1.35;
-                margin: -0.1rem 0 0.45rem;
+            .pattern-chart-shell + div[data-testid="stHorizontalBlock"] {
+                margin: 0.1rem 0 0.45rem;
+                align-items: center;
+            }
+
+            .pattern-chart-shell + div[data-testid="stHorizontalBlock"] [data-testid="stRadio"] {
+                margin-bottom: 0;
             }
 
             .market-overview {
@@ -842,6 +855,22 @@ def now_et_str(fmt: str = "%H:%M:%S ET") -> str:
     return now_et().strftime(fmt)
 
 
+def format_elapsed_since(started_at: datetime | None) -> str:
+    if not started_at:
+        return "0 сек"
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=MARKET_TZ)
+    seconds = max(0, int((now_et() - started_at.astimezone(MARKET_TZ)).total_seconds()))
+    minutes, seconds = divmod(seconds, 60)
+    if minutes:
+        return f"{minutes} мин {seconds:02d} сек"
+    return f"{seconds} сек"
+
+
+def elapsed_scan_suffix(started_at: datetime | None) -> str:
+    return f" · прошло: {format_elapsed_since(started_at)}"
+
+
 def parse_number(value: Any, default: float | None = None) -> float | None:
     if value is None:
         return default
@@ -1197,18 +1226,19 @@ def load_bars(
     data_source: str,
     progress_box: Any,
     status_box: Any,
+    scan_started_at: datetime | None = None,
 ) -> dict[str, pd.DataFrame]:
     symbols = [str(item["ticker"]).upper() for item in ticker_infos]
     bars: dict[str, pd.DataFrame] = {}
     history_days = required_history_days(cfg)
 
     if data_source in {DATA_SOURCE_ALPACA_SIP, DATA_SOURCE_AUTO} and not (ALPACA_KEY and ALPACA_SECRET):
-        status_box.caption("Alpaca SIP delayed недоступен: нет ALPACA_KEY / ALPACA_SECRET.")
+        status_box.caption(f"Alpaca SIP delayed недоступен: нет ALPACA_KEY / ALPACA_SECRET.{elapsed_scan_suffix(scan_started_at)}")
         if data_source == DATA_SOURCE_ALPACA_SIP:
             return bars
 
     if data_source in {DATA_SOURCE_YAHOO, DATA_SOURCE_AUTO} and yf is None:
-        status_box.caption("Yahoo Finance недоступен: пакет yfinance не установлен.")
+        status_box.caption(f"Yahoo Finance недоступен: пакет yfinance не установлен.{elapsed_scan_suffix(scan_started_at)}")
         if data_source == DATA_SOURCE_YAHOO:
             return bars
 
@@ -1218,6 +1248,7 @@ def load_bars(
             status_box.caption(
                 f"Загружаю Alpaca SIP delayed ({ALPACA_SIP_DELAY_MINUTES} мин) · "
                 f"пачка {idx}/{len(batches)} · готово: {len(bars)}"
+                f"{elapsed_scan_suffix(scan_started_at)}"
             )
             bars.update(fetch_alpaca_sip_delayed_batch(tuple(batch), history_days))
             progress_box.progress(0.55 * idx / max(len(batches), 1))
@@ -1244,6 +1275,7 @@ def load_bars(
         status_box.caption(
             f"Загружаю Yahoo Finance · пачка {idx}/{len(yahoo_batches)} · "
             f"готово: {len(bars)}"
+            f"{elapsed_scan_suffix(scan_started_at)}"
         )
         bars.update(fetch_yahoo_batch(tuple(batch), history_days))
         progress_box.progress(0.55 + 0.15 * idx / max(len(yahoo_batches), 1))
@@ -1990,6 +2022,7 @@ def scan_market(
     table_box: Any,
     send_alerts: bool,
 ) -> list[dict[str, Any]]:
+    scan_started_at = now_et()
     dismissed = active_dismissed_tickers()
     if dismissed:
         ticker_infos = [
@@ -2004,17 +2037,21 @@ def scan_market(
     st.session_state.scan_errors = []
 
     if total <= 0:
-        status_box.caption("В этой пачке все тикеры скрыты на 7 часов.")
+        st.session_state.last_scan_elapsed = format_elapsed_since(scan_started_at)
+        status_box.caption(f"В этой пачке все тикеры скрыты на 7 часов.{elapsed_scan_suffix(scan_started_at)}")
         return []
 
-    bars = load_bars(ticker_infos, cfg, data_source, progress_box, status_box)
+    bars = load_bars(ticker_infos, cfg, data_source, progress_box, status_box, scan_started_at)
     today = now_et().date()
 
     for idx, ticker_info in enumerate(ticker_infos, start=1):
         ticker = ticker_info["ticker"]
         progress_box.progress(min(1.0, 0.7 + 0.3 * idx / max(total, 1)))
         if idx % 50 == 1 or idx == total:
-            status_box.caption(f"Анализирую {idx}/{total} · найдено: {len(hits)}")
+            status_box.caption(
+                f"Анализирую {idx}/{total} · найдено: {len(hits)}"
+                f"{elapsed_scan_suffix(scan_started_at)}"
+            )
 
         try:
             history = bars.get(str(ticker).upper())
@@ -2043,6 +2080,7 @@ def scan_market(
 
         st.session_state.stats["checked"] = idx
 
+    st.session_state.last_scan_elapsed = format_elapsed_since(scan_started_at)
     return sort_results(hits, cfg.base_impulse_only)
 
 
@@ -2417,46 +2455,8 @@ def render_signal_gallery(rows: list[dict[str, Any]], max_cards: int) -> None:
         signal_raw = str(row.get("_sig", ""))
         scanner_raw = str(row.get("_scanner", ""))
         key_base = re.sub(r"[^A-Za-z0-9_]+", "_", f"{scanner_raw}_{ticker_raw}_{signal_raw}_{idx}")
-        timeframe_col, action_col = st.columns([0.86, 0.14], vertical_alignment="center")
-        with timeframe_col:
-            timeframe = st.radio(
-                f"Таймфрейм {ticker_raw}",
-                ["D", "M"],
-                horizontal=True,
-                key=f"chart_tf_{key_base}",
-                label_visibility="collapsed",
-            )
-        with action_col:
-            if st.button(
-                "×",
-                key=f"dismiss_chart_{key_base}",
-                help=f"Скрыть {ticker_raw} на {DISMISS_TTL_HOURS} часов",
-                use_container_width=True,
-            ):
-                hidden = dismiss_ticker(ticker_raw)
-                if hidden and hasattr(st, "toast"):
-                    st.toast(f"Скрыто на {DISMISS_TTL_HOURS} часов: {hidden}")
-                rerun_app()
-
-        chart_payload = row.get("_chart_payload") or {}
-        timeframe_note = "D: 100 дневных свечей; синие линии — выбранная база/уровень сигнала, протянутые через весь график."
-        if timeframe == "M":
-            minute_df = fetch_alpaca_minute_bars(ticker_raw, CHART_VISIBLE_CANDLES)
-            if minute_df is not None:
-                chart_payload = pattern_chart_payload(
-                    minute_df,
-                    CHART_VISIBLE_CANDLES,
-                    visible_candles=CHART_VISIBLE_CANDLES,
-                    timeframe="M",
-                    band_days=0,
-                    show_default_band=False,
-                )
-                timeframe_note = "M: последние 100 минутных свечей Alpaca SIP delayed; дневная база на минутке не рисуется."
-            else:
-                timeframe_note = "M недоступен: нет минутных данных Alpaca; ниже оставлена дневка."
-
-        chart_svg = pattern_chart_svg(chart_payload)
-        if not chart_svg:
+        daily_payload = row.get("_chart_payload") or {}
+        if not pattern_chart_svg(daily_payload):
             continue
         ticker = html.escape(str(row.get("Тикер", "")))
         signal = html.escape(SIGNAL_SHORT_LABELS.get(str(row.get("_sig", "")), str(row.get("Сигнал", ""))))
@@ -2466,29 +2466,66 @@ def render_signal_gallery(rows: list[dict[str, Any]], max_cards: int) -> None:
         volume = html.escape(format_int_cell(row.get("Объём")))
         dollar_volume = html.escape(format_dollar_cell(row.get("Долларовый объём")))
         market_cap = html.escape(format_market_cap_cell(row.get("Капитализация")))
-        chart_html = f'<div class="pattern-chart-svg">{chart_svg}</div>'
-        st.markdown(
-            f"""
-            <div class="pattern-chart-card">
-                <div class="pattern-chart-head">
-                    <div>
-                        <div class="pattern-chart-symbol">{ticker}</div>
-                        <div class="desk-muted">{signal}</div>
+
+        with st.container(border=True):
+            st.markdown(
+                f"""
+                <div class="pattern-chart-shell">
+                    <div class="pattern-chart-head">
+                        <div>
+                            <div class="pattern-chart-symbol">{ticker}</div>
+                            <div class="desk-muted">{signal}</div>
+                        </div>
+                        <div class="pattern-chart-meta">{price}<br>{rw} · {move}</div>
                     </div>
-                    <div class="pattern-chart-meta">{price}<br>{rw} · {move}</div>
+                    <div class="pattern-chart-stats">
+                        <div class="pattern-chart-stat"><span>Объём</span><strong>{volume}</strong></div>
+                        <div class="pattern-chart-stat"><span>$ объём</span><strong>{dollar_volume}</strong></div>
+                        <div class="pattern-chart-stat"><span>Капитал</span><strong>{market_cap}</strong></div>
+                        <div class="pattern-chart-stat"><span>Время</span><strong>{html.escape(str(row.get("Время", "")))}</strong></div>
+                    </div>
                 </div>
-                <div class="pattern-chart-stats">
-                    <div class="pattern-chart-stat"><span>Объём</span><strong>{volume}</strong></div>
-                    <div class="pattern-chart-stat"><span>$ объём</span><strong>{dollar_volume}</strong></div>
-                    <div class="pattern-chart-stat"><span>Капитал</span><strong>{market_cap}</strong></div>
-                    <div class="pattern-chart-stat"><span>Время</span><strong>{html.escape(str(row.get("Время", "")))}</strong></div>
-                </div>
-                <div class="chart-timeframe-note">{html.escape(timeframe_note)}</div>
-                {chart_html}
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+                """,
+                unsafe_allow_html=True,
+            )
+
+            timeframe_col, action_col = st.columns([0.84, 0.16], vertical_alignment="center")
+            with timeframe_col:
+                timeframe = st.radio(
+                    f"Таймфрейм {ticker_raw}",
+                    ["D", "M"],
+                    horizontal=True,
+                    key=f"chart_tf_{key_base}",
+                    label_visibility="collapsed",
+                )
+            with action_col:
+                if st.button(
+                    "×",
+                    key=f"dismiss_chart_{key_base}",
+                    help=f"Скрыть {ticker_raw} на {DISMISS_TTL_HOURS} часов",
+                    use_container_width=True,
+                ):
+                    hidden = dismiss_ticker(ticker_raw)
+                    if hidden and hasattr(st, "toast"):
+                        st.toast(f"Скрыто на {DISMISS_TTL_HOURS} часов: {hidden}")
+                    rerun_app()
+
+            chart_payload = daily_payload
+            if timeframe == "M":
+                minute_df = fetch_alpaca_minute_bars(ticker_raw, CHART_VISIBLE_CANDLES)
+                if minute_df is not None:
+                    chart_payload = pattern_chart_payload(
+                        minute_df,
+                        CHART_VISIBLE_CANDLES,
+                        visible_candles=CHART_VISIBLE_CANDLES,
+                        timeframe="M",
+                        band_days=0,
+                        show_default_band=False,
+                    )
+
+            chart_svg = pattern_chart_svg(chart_payload)
+            if chart_svg:
+                st.markdown(f'<div class="pattern-chart-svg">{chart_svg}</div>', unsafe_allow_html=True)
 
 
 # ── FORMAT HELPERS ──────────────────────────────────────────────────
@@ -2538,6 +2575,8 @@ if "auto_scan_signature" not in st.session_state:
     st.session_state.auto_scan_signature = ""
 if "last_auto_total" not in st.session_state:
     st.session_state.last_auto_total = None
+if "last_scan_elapsed" not in st.session_state:
+    st.session_state.last_scan_elapsed = ""
 
 
 # ── SIDEBAR ───────────────────────────────────────────────────────
@@ -3005,15 +3044,19 @@ if start_scan or (auto_scan and should_auto_run):
             st.session_state.auto_scan_offset = next_offset
 
         if hits:
+            elapsed_text = str(st.session_state.get("last_scan_elapsed") or "")
+            elapsed_part = f" · время {elapsed_text}" if elapsed_text else ""
             done_message = (
                 f"Готово: найдено {format_int_cell(len(hits))} сигналов · "
-                f"проверено {format_int_cell(len(ticker_infos))} · {scan_scope}"
+                f"проверено {format_int_cell(len(ticker_infos))} · {scan_scope}{elapsed_part}"
             )
             status_box.success(done_message)
             if hasattr(st, "toast"):
                 st.toast(done_message, icon="✅")
         else:
-            done_message = f"Скан завершён: сигналов нет · проверено {format_int_cell(len(ticker_infos))} · {scan_scope}"
+            elapsed_text = str(st.session_state.get("last_scan_elapsed") or "")
+            elapsed_part = f" · время {elapsed_text}" if elapsed_text else ""
+            done_message = f"Скан завершён: сигналов нет · проверено {format_int_cell(len(ticker_infos))} · {scan_scope}{elapsed_part}"
             status_box.info(done_message)
             if hasattr(st, "toast") and not is_auto_batch:
                 st.toast(done_message, icon="ℹ️")
