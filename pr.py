@@ -330,8 +330,8 @@ def apply_custom_theme() -> None:
                 border: 1px solid var(--desk-line);
                 border-top: 3px solid var(--desk-blue);
                 border-radius: 8px;
-                padding: 0.95rem;
-                margin-bottom: 1.05rem;
+                padding: 0.82rem;
+                margin-bottom: 0.95rem;
                 box-shadow: var(--desk-shadow);
             }
 
@@ -401,10 +401,91 @@ def apply_custom_theme() -> None:
             .pattern-chart-svg svg {
                 display: block;
                 width: 100%;
-                aspect-ratio: 1.35 / 1;
+                aspect-ratio: 2.1 / 1;
                 object-fit: contain;
                 border: 1px solid #eef2f6;
                 border-radius: 8px;
+                background: #ffffff;
+            }
+
+            .chart-timeframe-note {
+                color: var(--desk-muted);
+                font-size: 0.76rem;
+                line-height: 1.35;
+                margin: -0.1rem 0 0.45rem;
+            }
+
+            .market-overview {
+                background: #ffffff;
+                border: 1px solid var(--desk-line);
+                border-radius: 8px;
+                padding: 0.75rem 0.85rem 0.85rem;
+                margin: 0 0 0.85rem;
+                box-shadow: var(--desk-shadow-soft);
+            }
+
+            .market-title {
+                color: var(--desk-muted);
+                font-size: 0.72rem;
+                font-weight: 820;
+                letter-spacing: 0.06em;
+                text-transform: uppercase;
+                margin-bottom: 0.55rem;
+            }
+
+            .market-grid {
+                display: grid;
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+                gap: 0.6rem;
+            }
+
+            .market-card {
+                border: 1px solid #e4e7ec;
+                border-radius: 8px;
+                background: #f8fafc;
+                padding: 0.55rem;
+                min-width: 0;
+            }
+
+            .market-card-head {
+                display: flex;
+                justify-content: space-between;
+                align-items: flex-start;
+                gap: 0.6rem;
+                margin-bottom: 0.35rem;
+            }
+
+            .market-symbol {
+                color: var(--desk-navy);
+                font-size: 1.02rem;
+                font-weight: 840;
+                line-height: 1.1;
+            }
+
+            .market-change {
+                font-size: 0.82rem;
+                font-weight: 820;
+                line-height: 1.1;
+                text-align: right;
+                white-space: nowrap;
+            }
+
+            .market-change span {
+                color: var(--desk-muted);
+                font-size: 0.7rem;
+                font-weight: 700;
+            }
+
+            .market-change.up { color: var(--desk-green); }
+            .market-change.down { color: var(--desk-red); }
+            .market-change.flat { color: var(--desk-muted); }
+
+            .market-chart svg {
+                display: block;
+                width: 100%;
+                aspect-ratio: 2.1 / 1;
+                object-fit: contain;
+                border-radius: 7px;
                 background: #ffffff;
             }
 
@@ -509,6 +590,10 @@ def apply_custom_theme() -> None:
                 .pattern-chart-stats {
                     grid-template-columns: repeat(2, minmax(0, 1fr));
                 }
+
+                .market-grid {
+                    grid-template-columns: 1fr;
+                }
             }
 
             @media (max-width: 600px) {
@@ -542,7 +627,7 @@ def apply_custom_theme() -> None:
                 }
 
                 .pattern-chart-stats {
-                    grid-template-columns: 1fr;
+                    grid-template-columns: repeat(2, minmax(0, 1fr));
                 }
             }
 
@@ -595,6 +680,8 @@ BATCH_SIZE = 120
 ALPACA_SIP_DELAY_MINUTES = 16
 MAX_BARS_PAGES = 25
 AUTO_SCAN_MARKET_LIMIT = 10_000
+CHART_VISIBLE_CANDLES = 100
+DISMISS_TTL_HOURS = 7
 
 DATA_SOURCE_AUTO = "AUTO_ALPACA_SIP_YAHOO"
 DATA_SOURCE_ALPACA_SIP = "ALPACA_SIP_DELAYED"
@@ -723,7 +810,8 @@ class ScanConfig:
 
     base_impulse_enabled: bool = True
     base_impulse_days: int = 10
-    base_volume_mult: float = 10.0
+    base_max_width_pct: float = 20.0
+    base_volume_mult: float = 2.0
     base_impulse_only: bool = False
 
     max_stale_days: int = 5
@@ -955,6 +1043,16 @@ def rfc3339_utc(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def yahoo_period_for_days(days: int) -> str:
+    if days <= 20:
+        return "90d"
+    if days <= 120:
+        return "6mo"
+    if days <= 240:
+        return "1y"
+    return "2y"
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_alpaca_sip_delayed_batch(symbols: tuple[str, ...], days: int) -> dict[str, pd.DataFrame]:
     if not ALPACA_KEY or not ALPACA_SECRET or not symbols:
@@ -1021,7 +1119,7 @@ def fetch_yahoo_daily(ticker: str, days: int) -> pd.DataFrame | None:
     if yf is None:
         return None
 
-    period = "90d" if days <= 20 else "6mo"
+    period = yahoo_period_for_days(days)
     try:
         df = yf.download(
             ticker,
@@ -1043,7 +1141,7 @@ def fetch_yahoo_batch(symbols: tuple[str, ...], days: int) -> dict[str, pd.DataF
     if yf is None or not symbols:
         return {}
 
-    period = "90d" if days <= 20 else "6mo"
+    period = yahoo_period_for_days(days)
     try:
         df = yf.download(
             tickers=list(symbols),
@@ -1087,10 +1185,10 @@ def fetch_yahoo_batch(symbols: tuple[str, ...], days: int) -> dict[str, pd.DataF
 
 def required_history_days(cfg: ScanConfig) -> int:
     if cfg.scanner_mode == SCANNER_VCP:
-        return max(int(cfg.vcp_days), 30)
+        return max(int(cfg.vcp_days), 30, CHART_VISIBLE_CANDLES)
     if cfg.scanner_mode == SCANNER_SPRING:
-        return max(int(cfg.spring_support_days), int(cfg.spring_low_days), 60)
-    return max(int(cfg.base_impulse_days), 5)
+        return max(int(cfg.spring_support_days), int(cfg.spring_low_days), 60, CHART_VISIBLE_CANDLES)
+    return max(int(cfg.base_impulse_days), 5, CHART_VISIBLE_CANDLES)
 
 
 def load_bars(
@@ -1152,6 +1250,47 @@ def load_bars(
 
     progress_box.progress(0.7)
     return bars
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_alpaca_minute_bars(ticker: str, count: int = CHART_VISIBLE_CANDLES) -> pd.DataFrame | None:
+    symbol = str(ticker or "").upper().strip()
+    if not symbol or not ALPACA_KEY or not ALPACA_SECRET:
+        return None
+
+    end_dt = alpaca_sip_end_utc()
+    start_dt = end_dt - timedelta(days=5)
+    params = {
+        "symbols": symbol,
+        "timeframe": "1Min",
+        "start": rfc3339_utc(start_dt),
+        "end": rfc3339_utc(end_dt),
+        "limit": 10000,
+        "adjustment": "split",
+        "feed": "sip",
+        "sort": "asc",
+    }
+
+    try:
+        resp = requests.get(
+            f"{ALPACA_BASE}/v2/stocks/bars",
+            headers=ALPACA_HEADERS,
+            params=params,
+            timeout=DATA_TIMEOUT_SEC,
+        )
+        if resp.status_code in {401, 403}:
+            LOGGER.info("Alpaca minute auth/permission failed for %s: %s", symbol, resp.status_code)
+            return None
+        resp.raise_for_status()
+        rows = (resp.json().get("bars") or {}).get(symbol) or []
+    except Exception as exc:
+        LOGGER.info("Alpaca minute bars failed for %s: %s", symbol, exc)
+        return None
+
+    normalized = normalize_ohlcv(pd.DataFrame(rows), "Alpaca SIP 1Min")
+    if normalized is None or len(normalized) < 2:
+        return None
+    return normalized.tail(max(2, int(count)))
 
 
 # ── SIGNAL LOGIC ──────────────────────────────────────────────────
@@ -1219,6 +1358,14 @@ def build_base_impulse(df: pd.DataFrame, cfg: ScanConfig) -> BaseImpulse | None:
     if not (prev_low <= latest_open <= prev_high):
         return None
 
+    base_low = float(window["Low"].min())
+    base_high = float(window["High"].max())
+    if base_low <= 0 or base_high <= base_low:
+        return None
+    base_width_pct = (base_high - base_low) / base_low * 100
+    if cfg.base_max_width_pct > 0 and base_width_pct > cfg.base_max_width_pct:
+        return None
+
     volumes = pd.to_numeric(window["Volume"], errors="coerce").dropna()
     if len(volumes) < lookback or (volumes < 0).any():
         return None
@@ -1234,9 +1381,9 @@ def build_base_impulse(df: pd.DataFrame, cfg: ScanConfig) -> BaseImpulse | None:
     body_pct = abs(latest_close - latest_open) / latest_open * 100
     move_pct = (latest_close - latest_open) / latest_open * 100
     return BaseImpulse(
-        low=prev_low,
-        high=prev_high,
-        width_pct=(prev_high - prev_low) / prev_low * 100,
+        low=base_low,
+        high=base_high,
+        width_pct=base_width_pct,
         vol_max=vol_max,
         vol_avg=vol_avg,
         volume_mult=volume_mult,
@@ -1402,8 +1549,15 @@ def pattern_chart_payload(
     band_low: float | None = None,
     band_high: float | None = None,
     band_label: str = "зона сигнала",
+    *,
+    visible_candles: int = CHART_VISIBLE_CANDLES,
+    band_days: int | None = None,
+    timeframe: str = "D",
+    show_default_band: bool = True,
 ) -> dict[str, Any]:
-    chart_df = df.dropna(subset=["Open", "High", "Low", "Close"]).tail(max(lookback + 1, 14)).copy()
+    candles = max(2, int(visible_candles))
+    timeframe_code = str(timeframe or "D").upper()
+    chart_df = df.dropna(subset=["Open", "High", "Low", "Close"]).tail(candles).copy()
     if chart_df.empty:
         return {}
 
@@ -1416,7 +1570,7 @@ def pattern_chart_payload(
     if chart_df.empty:
         return {}
 
-    if band_low is None or band_high is None:
+    if show_default_band and (band_low is None or band_high is None):
         if len(chart_df) >= 2:
             prev = chart_df.iloc[-2]
             band_low = float(prev["Low"])
@@ -1439,6 +1593,9 @@ def pattern_chart_payload(
         "band_low": band_low,
         "band_high": band_high,
         "band_label": band_label,
+        "band_days": int(band_days if band_days is not None else lookback),
+        "timeframe": timeframe_code,
+        "required_visible_candles": candles if timeframe_code == "D" and candles >= CHART_VISIBLE_CANDLES else 0,
     }
 
 
@@ -1446,15 +1603,21 @@ def pattern_chart_svg(payload: dict[str, Any]) -> str:
     rows = payload.get("rows") if isinstance(payload, dict) else None
     if not isinstance(rows, list) or not rows:
         return ""
+    required_count = int(payload.get("required_visible_candles") or 0)
+    if required_count and len(rows) < required_count:
+        return ""
 
-    width = 460
-    height = 340
-    pad_x = 28
-    price_top = 18
-    price_bottom = 222
-    volume_top = 252
-    volume_bottom = 315
-    plot_w = width - pad_x * 2
+    width = 760
+    height = 360
+    pad_left = 34
+    pad_right = 14
+    price_top = 20
+    price_bottom = 232
+    volume_top = 260
+    volume_bottom = 326
+    plot_left = pad_left
+    plot_right = width - pad_right
+    plot_w = plot_right - plot_left
     price_h = price_bottom - price_top
     volume_h = volume_bottom - volume_top
 
@@ -1462,13 +1625,15 @@ def pattern_chart_svg(payload: dict[str, Any]) -> str:
     max_price = max(float(row["High"]) for row in rows)
     band_low = payload.get("band_low")
     band_high = payload.get("band_high")
-    band_label = str(payload.get("band_label") or "зона сигнала")
     if band_low and band_low > 0:
         min_price = min(min_price, float(band_low))
     if band_high and band_high > 0:
         max_price = max(max_price, float(band_high))
     if min_price <= 0 or max_price <= min_price:
         return ""
+    price_span = max_price - min_price
+    min_price = max(0.0001, min_price - price_span * 0.06)
+    max_price = max_price + price_span * 0.08
 
     def y_pos(value: float) -> float:
         return price_top + (max_price - value) / (max_price - min_price) * price_h
@@ -1481,35 +1646,45 @@ def pattern_chart_svg(payload: dict[str, Any]) -> str:
         return volume_bottom - value / max_volume * volume_h
 
     count = len(rows)
-    step = plot_w / max(count - 1, 1)
-    candle_w = max(5.0, min(11.0, step * 0.62))
+    slot = plot_w / max(count, 1)
+    candle_w = max(2.6, min(8.0, slot * 0.58))
+    timeframe = html.escape(str(payload.get("timeframe") or "D"))
+    last_close = float(rows[-1]["Close"])
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
         '<rect width="100%" height="100%" rx="8" fill="#ffffff"/>',
         f'<rect x="0.5" y="0.5" width="{width - 1}" height="{height - 1}" rx="8" fill="none" stroke="#d8dde6"/>',
-        f'<line x1="{pad_x}" x2="{width - pad_x}" y1="{price_top}" y2="{price_top}" stroke="#edf2f7"/>',
-        f'<line x1="{pad_x}" x2="{width - pad_x}" y1="{(price_top + price_bottom) / 2:.2f}" y2="{(price_top + price_bottom) / 2:.2f}" stroke="#edf2f7"/>',
-        f'<line x1="{pad_x}" x2="{width - pad_x}" y1="{price_bottom}" y2="{price_bottom}" stroke="#edf2f7"/>',
-        f'<line x1="{pad_x}" x2="{width - pad_x}" y1="{volume_bottom}" y2="{volume_bottom}" stroke="#edf2f7"/>',
-        f'<text x="{pad_x}" y="{height - 12}" fill="#667085" font-size="11" font-family="Inter, Arial, sans-serif">цена / объём</text>',
-        f'<text x="{width - pad_x}" y="{height - 12}" fill="#667085" font-size="11" font-family="Inter, Arial, sans-serif" text-anchor="end">{len(rows)} свечей</text>',
+        f'<line x1="{plot_left}" x2="{plot_right}" y1="{price_top}" y2="{price_top}" stroke="#edf2f7"/>',
+        f'<line x1="{plot_left}" x2="{plot_right}" y1="{(price_top + price_bottom) / 2:.2f}" y2="{(price_top + price_bottom) / 2:.2f}" stroke="#edf2f7"/>',
+        f'<line x1="{plot_left}" x2="{plot_right}" y1="{price_bottom}" y2="{price_bottom}" stroke="#d0d5dd"/>',
+        f'<line x1="{plot_left}" x2="{plot_right}" y1="{volume_bottom}" y2="{volume_bottom}" stroke="#d0d5dd"/>',
+        f'<text x="{plot_left}" y="15" fill="#667085" font-size="12" font-weight="700" font-family="Inter, Arial, sans-serif">{timeframe} · {len(rows)} свечей</text>',
+        f'<text x="{plot_right}" y="15" fill="#344054" font-size="12" font-weight="800" font-family="Inter, Arial, sans-serif" text-anchor="end">${last_close:.4g}</text>',
     ]
 
     if band_low is not None and band_high is not None and band_high > band_low > 0:
         band_y = y_pos(float(band_high))
         band_h = max(1.0, y_pos(float(band_low)) - band_y)
-        parts.append(f'<rect x="{pad_x}" y="{band_y:.2f}" width="{plot_w}" height="{band_h:.2f}" rx="3" fill="#dbeafe" opacity="0.72"/>')
+        parts.append(f'<rect x="{plot_left:.2f}" y="{band_y:.2f}" width="{plot_w:.2f}" height="{band_h:.2f}" rx="4" fill="#dbeafe" opacity="0.22"/>')
         parts.append(
-            f'<text x="{pad_x + 6}" y="{max(price_top + 12, band_y - 5):.2f}" fill="#175cd3" '
-            f'font-size="11" font-weight="700" font-family="Inter, Arial, sans-serif">{html.escape(band_label)}</text>'
+            f'<line x1="{plot_left}" x2="{plot_right}" y1="{band_y:.2f}" y2="{band_y:.2f}" '
+            f'stroke="#175cd3" stroke-width="1.25" stroke-dasharray="5 4" opacity="0.86"/>'
+        )
+        parts.append(
+            f'<line x1="{plot_left}" x2="{plot_right}" y1="{band_y + band_h:.2f}" y2="{band_y + band_h:.2f}" '
+            f'stroke="#175cd3" stroke-width="1.25" stroke-dasharray="5 4" opacity="0.86"/>'
         )
 
     prior_volumes = [float(row.get("Volume", 0)) for row in rows[:-1]]
     if prior_volumes and max(prior_volumes) > 0:
         prior_max_y = vol_y(max(prior_volumes))
         parts.append(
-            f'<line x1="{pad_x}" x2="{width - pad_x}" y1="{prior_max_y:.2f}" y2="{prior_max_y:.2f}" '
+            f'<line x1="{plot_left}" x2="{plot_right}" y1="{prior_max_y:.2f}" y2="{prior_max_y:.2f}" '
             f'stroke="#667085" stroke-width="1.3" stroke-dasharray="5 4"/>'
+        )
+        parts.append(
+            f'<text x="{plot_right}" y="{max(volume_top + 10, prior_max_y - 4):.2f}" fill="#667085" '
+            f'font-size="10" font-weight="700" font-family="Inter, Arial, sans-serif" text-anchor="end">прошл. max volume</text>'
         )
 
     for idx, row in enumerate(rows, start=0):
@@ -1518,7 +1693,7 @@ def pattern_chart_svg(payload: dict[str, Any]) -> str:
         low_price = float(row["Low"])
         close_price = float(row["Close"])
         volume = float(row.get("Volume", 0))
-        x = pad_x + idx * step
+        x = plot_left + slot * (idx + 0.5)
         color = "#047857" if close_price >= open_price else "#b42318"
         y_high = y_pos(high_price)
         y_low = y_pos(low_price)
@@ -1526,13 +1701,12 @@ def pattern_chart_svg(payload: dict[str, Any]) -> str:
         y_close = y_pos(close_price)
         body_y = min(y_open, y_close)
         body_h = max(1.2, abs(y_close - y_open))
-        stroke_w = 2.4 if idx == count - 1 else 1.5
         vol_top = vol_y(volume)
         vol_h = max(1.0, volume_bottom - vol_top)
-        parts.append(f'<line x1="{x:.2f}" x2="{x:.2f}" y1="{y_high:.2f}" y2="{y_low:.2f}" stroke="{color}" stroke-width="{stroke_w}"/>')
+        parts.append(f'<line x1="{x:.2f}" x2="{x:.2f}" y1="{y_high:.2f}" y2="{y_low:.2f}" stroke="{color}" stroke-width="1.25"/>')
         parts.append(
             f'<rect x="{x - candle_w / 2:.2f}" y="{body_y:.2f}" width="{candle_w:.2f}" height="{body_h:.2f}" '
-            f'rx="1" fill="{color}" opacity="0.95"/>'
+            f'rx="1.2" fill="{color}" opacity="0.96"/>'
         )
         parts.append(
             f'<rect x="{x - candle_w / 2:.2f}" y="{vol_top:.2f}" width="{candle_w:.2f}" height="{vol_h:.2f}" '
@@ -1541,6 +1715,73 @@ def pattern_chart_svg(payload: dict[str, Any]) -> str:
 
     parts.append("</svg>")
     return "".join(parts)
+
+
+INDEX_TICKERS = (
+    ("SPY", "S&P 500"),
+    ("QQQ", "Nasdaq 100"),
+    ("IWM", "Small caps"),
+)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_index_bars(data_source: str) -> dict[str, pd.DataFrame]:
+    symbols = tuple(symbol for symbol, _ in INDEX_TICKERS)
+    bars: dict[str, pd.DataFrame] = {}
+
+    if data_source in {DATA_SOURCE_ALPACA_SIP, DATA_SOURCE_AUTO} and ALPACA_KEY and ALPACA_SECRET:
+        bars.update(fetch_alpaca_sip_delayed_batch(symbols, 40))
+
+    missing = tuple(symbol for symbol in symbols if symbol not in bars)
+    if data_source in {DATA_SOURCE_YAHOO, DATA_SOURCE_AUTO} and missing and yf is not None:
+        bars.update(fetch_yahoo_batch(missing, 40))
+
+    return bars
+
+
+def render_market_overview(data_source: str) -> None:
+    bars = fetch_index_bars(data_source)
+    cards: list[str] = []
+    for symbol, name in INDEX_TICKERS:
+        df = bars.get(symbol)
+        if df is None or len(df) < 2:
+            cards.append(
+                f'<div class="market-card"><div class="market-card-head">'
+                f'<div><div class="market-symbol">{symbol}</div><div class="desk-muted">{html.escape(name)}</div></div>'
+                f'<div class="market-change flat">нет данных</div></div></div>'
+            )
+            continue
+
+        close = pd.to_numeric(df["Close"], errors="coerce").dropna()
+        if len(close) < 2:
+            cards.append(
+                f'<div class="market-card"><div class="market-card-head">'
+                f'<div><div class="market-symbol">{symbol}</div><div class="desk-muted">{html.escape(name)}</div></div>'
+                f'<div class="market-change flat">нет данных</div></div></div>'
+            )
+            continue
+        last = float(close.iloc[-1])
+        prev = float(close.iloc[-2])
+        change_pct = (last - prev) / prev * 100 if prev > 0 else 0.0
+        tone = "up" if change_pct >= 0 else "down"
+        chart_svg = pattern_chart_svg(pattern_chart_payload(df, 35, visible_candles=35, timeframe="D", show_default_band=False))
+        cards.append(
+            f'<div class="market-card"><div class="market-card-head">'
+            f'<div><div class="market-symbol">{symbol}</div><div class="desk-muted">{html.escape(name)}</div></div>'
+            f'<div class="market-change {tone}">{change_pct:+.2f}%<br><span>${last:,.2f}</span></div>'
+            f'</div><div class="market-chart">{chart_svg}</div></div>'
+        )
+
+    if not cards:
+        return
+
+    st.markdown(
+        '<div class="market-overview">'
+        '<div class="market-title">Направление рынка сегодня</div>'
+        f'<div class="market-grid">{"".join(cards)}</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def score_base_signal(setup: BaseImpulse, cfg: ScanConfig) -> int:
@@ -1623,7 +1864,10 @@ def detect_signal(
                 cfg.base_impulse_days,
                 base.low,
                 base.high,
-                "зона вчерашней свечи",
+                "база",
+                visible_candles=CHART_VISIBLE_CANDLES,
+                band_days=cfg.base_impulse_days,
+                timeframe="D",
             ),
             "_scanner": cfg.scanner_mode,
             "Тикер": ticker_info["ticker"],
@@ -1666,6 +1910,9 @@ def detect_signal(
                 setup.low,
                 setup.high,
                 "VCP-база",
+                visible_candles=CHART_VISIBLE_CANDLES,
+                band_days=min(cfg.vcp_days, CHART_VISIBLE_CANDLES),
+                timeframe="D",
             ),
             "_scanner": cfg.scanner_mode,
             "Тикер": ticker_info["ticker"],
@@ -1706,6 +1953,9 @@ def detect_signal(
                 setup.support * 0.99,
                 setup.support * 1.01,
                 "поддержка Spring",
+                visible_candles=CHART_VISIBLE_CANDLES,
+                band_days=min(max(cfg.spring_support_days, 30), CHART_VISIBLE_CANDLES),
+                timeframe="D",
             ),
             "_scanner": cfg.scanner_mode,
             "Тикер": ticker_info["ticker"],
@@ -1740,10 +1990,22 @@ def scan_market(
     table_box: Any,
     send_alerts: bool,
 ) -> list[dict[str, Any]]:
+    dismissed = active_dismissed_tickers()
+    if dismissed:
+        ticker_infos = [
+            item
+            for item in ticker_infos
+            if normalize_ticker_id(item.get("ticker")) not in dismissed
+        ]
+
     hits: list[dict[str, Any]] = []
     total = len(ticker_infos)
     st.session_state.stats = {"checked": 0, "signals": 0}
     st.session_state.scan_errors = []
+
+    if total <= 0:
+        status_box.caption("В этой пачке все тикеры скрыты на 7 часов.")
+        return []
 
     bars = load_bars(ticker_infos, cfg, data_source, progress_box, status_box)
     today = now_et().date()
@@ -1823,14 +2085,82 @@ def telegram_signal_message(row: dict[str, Any]) -> str:
     ticker = re.sub(r"[^A-Z]", "", str(row["Тикер"]).upper()) or "TICKER"
     ticker = html.escape(ticker)
     rvol = safe_float(row.get("_rvol") or row.get("Объём ×"))
+    move_pct = safe_float(row.get("_move_pct"))
     if rvol <= 0:
         return f"{ticker} 0.00x +0%"
-    volume_pct = (rvol - 1.0) * 100
-    return f"{ticker} {rvol:.2f}x {volume_pct:+.0f}%"
+    return f"{ticker} {rvol:.2f}x {move_pct:+.1f}%"
 
 
 def result_key(row: dict[str, Any]) -> tuple[str, str, str]:
     return str(row.get("_scanner", "")), str(row.get("Тикер", "")), str(row.get("Сигнал", ""))
+
+
+def normalize_ticker_id(value: Any) -> str:
+    return re.sub(r"[^A-Z0-9.\-]+", "", str(value or "").upper()).strip()
+
+
+def parse_dismiss_expiry(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        expiry = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            expiry = datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=MARKET_TZ)
+    return expiry.astimezone(MARKET_TZ)
+
+
+def active_dismissed_tickers() -> dict[str, datetime]:
+    raw = st.session_state.setdefault("dismissed_tickers", {})
+    if not isinstance(raw, dict):
+        raw = {}
+    current = now_et()
+    active: dict[str, datetime] = {}
+    for ticker, expiry_raw in raw.items():
+        symbol = normalize_ticker_id(ticker)
+        expiry = parse_dismiss_expiry(expiry_raw)
+        if symbol and expiry and expiry > current:
+            active[symbol] = expiry
+    st.session_state.dismissed_tickers = {ticker: expiry.isoformat() for ticker, expiry in active.items()}
+    return active
+
+
+def is_ticker_dismissed(ticker: Any) -> bool:
+    symbol = normalize_ticker_id(ticker)
+    return bool(symbol and symbol in active_dismissed_tickers())
+
+
+def dismiss_ticker(ticker: Any) -> str:
+    symbol = normalize_ticker_id(ticker)
+    if not symbol:
+        return ""
+    dismissed = active_dismissed_tickers()
+    dismissed[symbol] = now_et() + timedelta(hours=DISMISS_TTL_HOURS)
+    st.session_state.dismissed_tickers = {key: value.isoformat() for key, value in dismissed.items()}
+    st.session_state.results = [
+        row
+        for row in st.session_state.get("results", [])
+        if normalize_ticker_id(row.get("Тикер")) != symbol
+    ]
+    return symbol
+
+
+def filter_dismissed_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    dismissed = active_dismissed_tickers()
+    if not dismissed:
+        return rows
+    return [row for row in rows if normalize_ticker_id(row.get("Тикер")) not in dismissed]
+
+
+def rerun_app() -> None:
+    if hasattr(st, "rerun"):
+        st.rerun()
+    elif hasattr(st, "experimental_rerun"):
+        st.experimental_rerun()
 
 
 def sort_results(rows: list[dict[str, Any]], base_pattern: bool = False) -> list[dict[str, Any]]:
@@ -1871,7 +2201,8 @@ def result_matches_active_patterns(row: dict[str, Any], cfg: ScanConfig) -> bool
 
 
 def filter_results_for_config(rows: list[dict[str, Any]], cfg: ScanConfig) -> list[dict[str, Any]]:
-    return [row for row in rows if isinstance(row, dict) and result_matches_active_patterns(row, cfg)]
+    active_rows = [row for row in rows if isinstance(row, dict) and result_matches_active_patterns(row, cfg)]
+    return filter_dismissed_results(active_rows)
 
 
 def format_price_cell(value: Any) -> str:
@@ -2054,6 +2385,20 @@ def render_results_summary(rows: list[dict[str, Any]]) -> None:
     )
 
 
+def render_results_table(rows: list[dict[str, Any]], cfg: ScanConfig) -> None:
+    results_frame = display_frame(rows, cfg.base_impulse_only)
+    if results_frame.empty:
+        return
+
+    st.dataframe(
+        styled_display_frame(results_frame),
+        use_container_width=True,
+        hide_index=True,
+        column_config=display_column_config(cfg.base_impulse_only),
+        height=420,
+    )
+
+
 def render_signal_gallery(rows: list[dict[str, Any]], max_cards: int) -> None:
     cards = [
         row
@@ -2067,9 +2412,50 @@ def render_signal_gallery(rows: list[dict[str, Any]], max_cards: int) -> None:
     max_cards = min(len(cards), max(0, int(max_cards)))
     if max_cards <= 0:
         return
-    columns = st.columns(2, gap="large")
     for idx, row in enumerate(cards[:max_cards]):
-        chart_svg = pattern_chart_svg(row.get("_chart_payload") or {})
+        ticker_raw = str(row.get("Тикер", ""))
+        signal_raw = str(row.get("_sig", ""))
+        scanner_raw = str(row.get("_scanner", ""))
+        key_base = re.sub(r"[^A-Za-z0-9_]+", "_", f"{scanner_raw}_{ticker_raw}_{signal_raw}_{idx}")
+        timeframe_col, action_col = st.columns([0.86, 0.14], vertical_alignment="center")
+        with timeframe_col:
+            timeframe = st.radio(
+                f"Таймфрейм {ticker_raw}",
+                ["D", "M"],
+                horizontal=True,
+                key=f"chart_tf_{key_base}",
+                label_visibility="collapsed",
+            )
+        with action_col:
+            if st.button(
+                "×",
+                key=f"dismiss_chart_{key_base}",
+                help=f"Скрыть {ticker_raw} на {DISMISS_TTL_HOURS} часов",
+                use_container_width=True,
+            ):
+                hidden = dismiss_ticker(ticker_raw)
+                if hidden and hasattr(st, "toast"):
+                    st.toast(f"Скрыто на {DISMISS_TTL_HOURS} часов: {hidden}")
+                rerun_app()
+
+        chart_payload = row.get("_chart_payload") or {}
+        timeframe_note = "D: 100 дневных свечей; синие линии — выбранная база/уровень сигнала, протянутые через весь график."
+        if timeframe == "M":
+            minute_df = fetch_alpaca_minute_bars(ticker_raw, CHART_VISIBLE_CANDLES)
+            if minute_df is not None:
+                chart_payload = pattern_chart_payload(
+                    minute_df,
+                    CHART_VISIBLE_CANDLES,
+                    visible_candles=CHART_VISIBLE_CANDLES,
+                    timeframe="M",
+                    band_days=0,
+                    show_default_band=False,
+                )
+                timeframe_note = "M: последние 100 минутных свечей Alpaca SIP delayed; дневная база на минутке не рисуется."
+            else:
+                timeframe_note = "M недоступен: нет минутных данных Alpaca; ниже оставлена дневка."
+
+        chart_svg = pattern_chart_svg(chart_payload)
         if not chart_svg:
             continue
         ticker = html.escape(str(row.get("Тикер", "")))
@@ -2081,28 +2467,28 @@ def render_signal_gallery(rows: list[dict[str, Any]], max_cards: int) -> None:
         dollar_volume = html.escape(format_dollar_cell(row.get("Долларовый объём")))
         market_cap = html.escape(format_market_cap_cell(row.get("Капитализация")))
         chart_html = f'<div class="pattern-chart-svg">{chart_svg}</div>'
-        with columns[idx % 2]:
-            st.markdown(
-                f"""
-                <div class="pattern-chart-card">
-                    <div class="pattern-chart-head">
-                        <div>
-                            <div class="pattern-chart-symbol">{ticker}</div>
-                            <div class="desk-muted">{signal}</div>
-                        </div>
-                        <div class="pattern-chart-meta">{price}<br>{rw} · {move}</div>
+        st.markdown(
+            f"""
+            <div class="pattern-chart-card">
+                <div class="pattern-chart-head">
+                    <div>
+                        <div class="pattern-chart-symbol">{ticker}</div>
+                        <div class="desk-muted">{signal}</div>
                     </div>
-                    <div class="pattern-chart-stats">
-                        <div class="pattern-chart-stat"><span>Объём</span><strong>{volume}</strong></div>
-                        <div class="pattern-chart-stat"><span>$ объём</span><strong>{dollar_volume}</strong></div>
-                        <div class="pattern-chart-stat"><span>Капитал</span><strong>{market_cap}</strong></div>
-                        <div class="pattern-chart-stat"><span>Время</span><strong>{html.escape(str(row.get("Время", "")))}</strong></div>
-                    </div>
-                    {chart_html}
+                    <div class="pattern-chart-meta">{price}<br>{rw} · {move}</div>
                 </div>
-                """,
-                unsafe_allow_html=True,
-            )
+                <div class="pattern-chart-stats">
+                    <div class="pattern-chart-stat"><span>Объём</span><strong>{volume}</strong></div>
+                    <div class="pattern-chart-stat"><span>$ объём</span><strong>{dollar_volume}</strong></div>
+                    <div class="pattern-chart-stat"><span>Капитал</span><strong>{market_cap}</strong></div>
+                    <div class="pattern-chart-stat"><span>Время</span><strong>{html.escape(str(row.get("Время", "")))}</strong></div>
+                </div>
+                <div class="chart-timeframe-note">{html.escape(timeframe_note)}</div>
+                {chart_html}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 # ── FORMAT HELPERS ──────────────────────────────────────────────────
@@ -2138,6 +2524,8 @@ if "scan_errors" not in st.session_state:
     st.session_state.scan_errors = []
 if "notified_signals" not in st.session_state:
     st.session_state.notified_signals = set()
+if "dismissed_tickers" not in st.session_state:
+    st.session_state.dismissed_tickers = {}
 if "auto_last_run" not in st.session_state:
     st.session_state.auto_last_run = None
 elif isinstance(st.session_state.auto_last_run, datetime) and st.session_state.auto_last_run.tzinfo is None:
@@ -2257,11 +2645,20 @@ with st.sidebar:
         disabled=not base_impulse_only,
         help=SCANNER_HELP[SCANNER_BASE],
     )
+    base_max_width_pct = st.slider(
+        "Макс. ширина базы (%)",
+        2.0,
+        80.0,
+        20.0,
+        1.0,
+        disabled=not base_impulse_only,
+        help="Ширина канала считается по выбранным предыдущим свечам: high базы против low базы. 20% значит, что база за выбранные дни должна быть не шире 20%.",
+    )
     base_volume_mult = st.slider(
         "Сегодняшний объём выше каждой прошлой свечи ×",
         1,
         50,
-        10,
+        2,
         1,
         disabled=not base_impulse_only,
         help="1 означает: сегодняшний объём строго больше максимального объёма среди предыдущих свечей. 50 означает: больше максимума предыдущих свечей в 50 раз.",
@@ -2322,7 +2719,7 @@ with st.sidebar:
         max_price = st.number_input("Макс. цена", 0.01, 500.0, 20.0, 1.0)
 
     st.markdown('<div class="desk-section-title">Автоматизация</div>', unsafe_allow_html=True)
-    send_alerts = st.toggle("Telegram-уведомления", value=True)
+    send_alerts = st.toggle("Telegram-уведомления", value=False)
     telegram_configured = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
     if st.button("Отправить тест Telegram", use_container_width=True, disabled=not telegram_configured):
         if send_telegram("TEST 1.00x +0%"):
@@ -2346,9 +2743,9 @@ with st.sidebar:
     st.markdown('<div class="desk-section-title">Отображение</div>', unsafe_allow_html=True)
     chart_limit = st.select_slider(
         "Графиков показывать",
-        options=[10, 20, 30, 50],
-        value=20,
-        help="Ограничивает только нижнюю галерею графиков. Таблица результатов остаётся полной.",
+        options=[5, 10, 15, 20, 30],
+        value=10,
+        help="Для телефона лучше 5-10. Таблица результатов остаётся полной, ограничивается только лента графиков.",
     )
 
 
@@ -2368,6 +2765,7 @@ cfg = ScanConfig(
     min_dollar_volume=int(min_dollar_volume),
     base_impulse_enabled=base_impulse_enabled,
     base_impulse_days=base_impulse_days,
+    base_max_width_pct=base_max_width_pct,
     base_volume_mult=base_volume_mult,
     base_impulse_only=base_impulse_only,
     max_stale_days=max_stale_days,
@@ -2419,6 +2817,7 @@ if cfg.scanner_mode == SCANNER_BASE:
             chip("За прогон", format_int_cell(max_tickers)),
             chip("Цена", f"${min_price:g}-${max_price:g}"),
             chip("Открытие", "внутри вчерашней свечи", "blue"),
+            chip("База", f"{cfg.base_impulse_days} св. до {cfg.base_max_width_pct:g}%"),
             chip("RVOL", f">{cfg.base_volume_mult:g}x к макс. из {cfg.base_impulse_days}"),
             chip("Свежесть", f"{cfg.max_stale_days}д"),
             chip("Источник", DATA_SOURCE_LABELS.get(data_source, data_source), "green"),
@@ -2469,6 +2868,8 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+render_market_overview(data_source)
 
 if data_source in {DATA_SOURCE_AUTO, DATA_SOURCE_YAHOO} and yf is None:
     st.warning("yfinance не установлен. Установи пакет: pip install yfinance")
@@ -2522,6 +2923,23 @@ with clear_col:
         st.session_state.auto_scan_signature = ""
         st.session_state.last_auto_total = None
         st.rerun()
+
+
+dismissed_now = active_dismissed_tickers()
+if dismissed_now:
+    preview = ", ".join(
+        f"{ticker} до {expiry.strftime('%H:%M')}"
+        for ticker, expiry in sorted(dismissed_now.items())[:10]
+    )
+    if len(dismissed_now) > 10:
+        preview += f" +{len(dismissed_now) - 10}"
+    hidden_col, restore_col = st.columns([0.78, 0.22])
+    with hidden_col:
+        st.caption(f"Скрыты на {DISMISS_TTL_HOURS} часов: {preview}")
+    with restore_col:
+        if st.button("Вернуть скрытые", use_container_width=True):
+            st.session_state.dismissed_tickers = {}
+            rerun_app()
 
 
 if start_scan or (auto_scan and should_auto_run):
@@ -2608,14 +3026,7 @@ st.session_state.results = sort_results(filter_results_for_config(st.session_sta
 
 if st.session_state.results:
     render_results_summary(st.session_state.results)
-    results_frame = display_frame(st.session_state.results, cfg.base_impulse_only)
-    st.dataframe(
-        styled_display_frame(results_frame),
-        use_container_width=True,
-        hide_index=True,
-        column_config=display_column_config(cfg.base_impulse_only),
-        height=420,
-    )
+    render_results_table(st.session_state.results, cfg)
     render_signal_gallery(st.session_state.results, chart_limit)
 
     csv = display_frame(st.session_state.results, cfg.base_impulse_only, include_chart=False).to_csv(index=False).encode("utf-8")
@@ -2644,3 +3055,4 @@ else:
         """,
         unsafe_allow_html=True,
     )
+
