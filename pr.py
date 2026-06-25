@@ -337,6 +337,15 @@ def apply_custom_theme() -> None:
                 border-color: var(--desk-blue) !important;
             }
 
+            div[class*="st-key-chart_card_new_"] {
+                border-color: var(--desk-red) !important;
+                box-shadow: 0 12px 32px rgba(180, 35, 24, 0.14) !important;
+            }
+
+            div[data-testid="stVerticalBlock"][class*="st-key-chart_card_new_"] {
+                border-color: var(--desk-red) !important;
+            }
+
             .pattern-chart-shell {
                 padding: 0.12rem 0.02rem 0;
             }
@@ -413,13 +422,29 @@ def apply_custom_theme() -> None:
                 background: #ffffff;
             }
 
-            .pattern-chart-shell + div[data-testid="stHorizontalBlock"] {
-                margin: 0.1rem 0 0.45rem;
-                align-items: center;
+            .pattern-chart-action-row {
+                display: flex;
+                justify-content: flex-end;
+                margin: 0.1rem 0 0.5rem;
             }
 
-            .pattern-chart-shell + div[data-testid="stHorizontalBlock"] [data-testid="stRadio"] {
-                margin-bottom: 0;
+            .pattern-chart-stack {
+                display: grid;
+                grid-template-columns: 1fr;
+                gap: 0.62rem;
+            }
+
+            .pattern-chart-panel {
+                min-width: 0;
+            }
+
+            .pattern-chart-panel-title {
+                color: var(--desk-muted);
+                font-size: 0.68rem;
+                font-weight: 820;
+                letter-spacing: 0.05em;
+                text-transform: uppercase;
+                margin: 0.1rem 0 0.25rem;
             }
 
             .market-overview {
@@ -683,32 +708,38 @@ MARKET_TZ = ZoneInfo("America/New_York")
 ALPACA_BASE = "https://data.alpaca.markets"
 DATA_TIMEOUT_SEC = 15
 NASDAQ_TIMEOUT_SEC = 20
+ALPACA_CACHE_TTL_SEC = 10
+YAHOO_CACHE_TTL_SEC = 60
 BATCH_SIZE = 120
 ALPACA_SIP_DELAY_MINUTES = 16
 MAX_BARS_PAGES = 25
 AUTO_SCAN_MARKET_LIMIT = 10_000
 CHART_VISIBLE_CANDLES = 100
+MINUTE_CHART_VISIBLE_CANDLES = 500
 DISMISS_TTL_HOURS = 7
 
 DATA_SOURCE_AUTO = "AUTO_ALPACA_SIP_YAHOO"
-DATA_SOURCE_ALPACA_SIP = "ALPACA_SIP_DELAYED"
+DATA_SOURCE_ALPACA_SIP = "ALPACA_SIP"
 DATA_SOURCE_YAHOO = "YAHOO"
 DATA_SOURCE_LABELS = {
-    DATA_SOURCE_AUTO: "Alpaca SIP delayed → Yahoo резерв",
-    DATA_SOURCE_ALPACA_SIP: "Только Alpaca SIP delayed",
+    DATA_SOURCE_AUTO: "Alpaca SIP → Yahoo резерв",
+    DATA_SOURCE_ALPACA_SIP: "Только Alpaca SIP",
     DATA_SOURCE_YAHOO: "Yahoo Finance",
 }
 
 SIG_BASE = "BASE_VOLUME_EXPLOSION"
+SIG_RVOL = "RELATIVE_VOLUME"
 SIG_VCP = "VCP_SQUEEZE"
 SIG_SPRING = "SPRING_REVERSAL"
 
 SCANNER_BASE = "BASE_VOLUME"
+SCANNER_RVOL = "RELATIVE_VOLUME"
 SCANNER_VCP = "VCP_SQUEEZE"
 SCANNER_SPRING = "SPRING_REVERSAL"
 
 SCANNER_LABELS = {
     SCANNER_BASE: "Взрыв из базы",
+    SCANNER_RVOL: "Относительный объём RW",
     SCANNER_VCP: "VCP-сжатие",
     SCANNER_SPRING: "Spring-отскок",
 }
@@ -716,6 +747,10 @@ SCANNER_HELP = {
     SCANNER_BASE: (
         "Ищет твой старый паттерн: сегодняшнее открытие внутри вчерашней свечи, "
         "а сегодняшний объём выше максимального объёма среди предыдущих свечей."
+    ),
+    SCANNER_RVOL: (
+        "Ищет акции, где сегодняшний объём резко выше средней за выбранное число дней. "
+        "Это классический фильтр RW/RVOL: бумага сейчас в игре."
     ),
     SCANNER_VCP: (
         "Ищет сжатие перед движением: диапазон свечей постепенно становится уже, "
@@ -728,17 +763,20 @@ SCANNER_HELP = {
 }
 SCANNER_SUBTITLES = {
     SCANNER_BASE: "Полный рынок · открытие внутри вчерашней свечи · объём выше всей базы",
+    SCANNER_RVOL: "Полный рынок · сегодняшний объём против средней за N дней",
     SCANNER_VCP: "Полный рынок · сжатие диапазона · сухой объём · цена рядом с верхом базы",
     SCANNER_SPRING: "Полный рынок · прокол поддержки · возврат над уровень · объёмный отскок",
 }
 
 SIGNAL_LABELS = {
     SIG_BASE: "ВЗРЫВ ОБЪЁМА ИЗ БАЗЫ",
+    SIG_RVOL: "ОТНОСИТЕЛЬНЫЙ ОБЪЁМ RW",
     SIG_VCP: "VCP-СЖАТИЕ",
     SIG_SPRING: "SPRING ОТ ДНА",
 }
 SIGNAL_SHORT_LABELS = {
     SIG_BASE: "Взрыв базы",
+    SIG_RVOL: "RW объём",
     SIG_VCP: "VCP-сжатие",
     SIG_SPRING: "Spring от дна",
 }
@@ -817,7 +855,8 @@ class ScanConfig:
 
     base_impulse_enabled: bool = True
     base_impulse_days: int = 10
-    base_max_width_pct: float = 20.0
+    base_width_filter_enabled: bool = True
+    base_max_width_pct: float = 40.0
     base_volume_mult: float = 2.0
     base_impulse_only: bool = False
 
@@ -825,20 +864,23 @@ class ScanConfig:
     min_price: float = 0.5
     max_price: float = 20.0
 
-    vcp_days: int = 45
-    vcp_max_base_width_pct: float = 35.0
-    vcp_max_recent_width_pct: float = 12.0
-    vcp_min_compression_pct: float = 25.0
-    vcp_near_high_pct: float = 8.0
-    vcp_dry_volume_ratio: float = 0.85
+    rvol_avg_days: int = 30
+    rvol_mult: float = 2.0
+
+    vcp_days: int = 60
+    vcp_max_base_width_pct: float = 30.0
+    vcp_max_recent_width_pct: float = 10.0
+    vcp_min_compression_pct: float = 35.0
+    vcp_near_high_pct: float = 10.0
+    vcp_dry_volume_ratio: float = 0.80
 
     spring_support_days: int = 60
     spring_low_days: int = 120
-    spring_break_pct: float = 1.0
-    spring_reclaim_pct: float = 0.0
+    spring_break_pct: float = 0.7
+    spring_reclaim_pct: float = 0.2
     spring_close_position_pct: float = 60.0
     spring_volume_mult: float = 1.2
-    spring_max_from_low_pct: float = 35.0
+    spring_max_from_low_pct: float = 30.0
 
 
 def now_et() -> datetime:
@@ -1073,8 +1115,17 @@ def get_nasdaq_tickers(exchange: str, max_price: float) -> list[dict[str, Any]]:
 
 
 # ── DATA SOURCES ──────────────────────────────────────────────────
-def alpaca_sip_end_utc() -> datetime:
-    return datetime.now(timezone.utc).replace(microsecond=0) - timedelta(minutes=ALPACA_SIP_DELAY_MINUTES)
+def alpaca_mode_label(realtime: bool) -> str:
+    if realtime:
+        return "Alpaca SIP real-time"
+    return f"Alpaca SIP задержка {ALPACA_SIP_DELAY_MINUTES} мин"
+
+
+def alpaca_sip_end_utc(realtime: bool = True) -> datetime:
+    end_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    if realtime:
+        return end_dt
+    return end_dt - timedelta(minutes=ALPACA_SIP_DELAY_MINUTES)
 
 
 def rfc3339_utc(dt: datetime) -> str:
@@ -1091,12 +1142,13 @@ def yahoo_period_for_days(days: int) -> str:
     return "2y"
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_alpaca_sip_delayed_batch(symbols: tuple[str, ...], days: int) -> dict[str, pd.DataFrame]:
+@st.cache_data(ttl=ALPACA_CACHE_TTL_SEC, show_spinner=False)
+def fetch_alpaca_sip_batch(symbols: tuple[str, ...], days: int, realtime: bool = True) -> dict[str, pd.DataFrame]:
     if not ALPACA_KEY or not ALPACA_SECRET or not symbols:
         return {}
 
-    end_dt = alpaca_sip_end_utc()
+    source_label = alpaca_mode_label(realtime)
+    end_dt = alpaca_sip_end_utc(realtime)
     start_dt = end_dt - timedelta(days=max(90, int(days) * 6))
     params: dict[str, Any] = {
         "symbols": ",".join(symbol.upper() for symbol in symbols),
@@ -1123,7 +1175,7 @@ def fetch_alpaca_sip_delayed_batch(symbols: tuple[str, ...], days: int) -> dict[
                 timeout=DATA_TIMEOUT_SEC,
             )
             if resp.status_code in {401, 403}:
-                LOGGER.info("Alpaca SIP delayed auth/permission failed: %s %s", resp.status_code, resp.text[:300])
+                LOGGER.info("%s auth/permission failed with status %s.", source_label, resp.status_code)
                 return {}
             resp.raise_for_status()
             payload = resp.json()
@@ -1137,22 +1189,22 @@ def fetch_alpaca_sip_delayed_batch(symbols: tuple[str, ...], days: int) -> dict[
             if not page_token:
                 break
         if page_token:
-            LOGGER.info("Alpaca SIP delayed pagination stopped after %s pages.", MAX_BARS_PAGES)
+            LOGGER.info("%s pagination stopped after %s pages.", source_label, MAX_BARS_PAGES)
     except Exception as exc:
-        LOGGER.info("Alpaca SIP delayed batch failed: %s", exc)
+        LOGGER.info("%s batch failed: %s", source_label, exc)
         return {}
 
     out: dict[str, pd.DataFrame] = {}
     for symbol, rows in bars_by_symbol.items():
         if not rows:
             continue
-        normalized = normalize_ohlcv(pd.DataFrame(rows), "Alpaca SIP delayed")
+        normalized = normalize_ohlcv(pd.DataFrame(rows), source_label)
         if normalized is not None and len(normalized) >= days + 2:
             out[symbol] = normalized
     return out
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=YAHOO_CACHE_TTL_SEC, show_spinner=False)
 def fetch_yahoo_daily(ticker: str, days: int) -> pd.DataFrame | None:
     if yf is None:
         return None
@@ -1174,7 +1226,7 @@ def fetch_yahoo_daily(ticker: str, days: int) -> pd.DataFrame | None:
     return normalize_ohlcv(df, "Yahoo Finance")
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=YAHOO_CACHE_TTL_SEC, show_spinner=False)
 def fetch_yahoo_batch(symbols: tuple[str, ...], days: int) -> dict[str, pd.DataFrame]:
     if yf is None or not symbols:
         return {}
@@ -1222,6 +1274,8 @@ def fetch_yahoo_batch(symbols: tuple[str, ...], days: int) -> dict[str, pd.DataF
 
 
 def required_history_days(cfg: ScanConfig) -> int:
+    if cfg.scanner_mode == SCANNER_RVOL:
+        return max(int(cfg.rvol_avg_days), 5, CHART_VISIBLE_CANDLES)
     if cfg.scanner_mode == SCANNER_VCP:
         return max(int(cfg.vcp_days), 30, CHART_VISIBLE_CANDLES)
     if cfg.scanner_mode == SCANNER_SPRING:
@@ -1233,6 +1287,7 @@ def load_bars(
     ticker_infos: list[dict[str, Any]],
     cfg: ScanConfig,
     data_source: str,
+    alpaca_realtime: bool,
     progress_box: Any,
     status_box: Any,
     scan_started_at: datetime | None = None,
@@ -1242,7 +1297,7 @@ def load_bars(
     history_days = required_history_days(cfg)
 
     if data_source in {DATA_SOURCE_ALPACA_SIP, DATA_SOURCE_AUTO} and not (ALPACA_KEY and ALPACA_SECRET):
-        status_box.caption(f"Alpaca SIP delayed недоступен: нет ALPACA_KEY / ALPACA_SECRET.{elapsed_scan_suffix(scan_started_at)}")
+        status_box.caption(f"{alpaca_mode_label(alpaca_realtime)} недоступен: нет ALPACA_KEY / ALPACA_SECRET.{elapsed_scan_suffix(scan_started_at)}")
         if data_source == DATA_SOURCE_ALPACA_SIP:
             return bars
 
@@ -1253,13 +1308,14 @@ def load_bars(
 
     batches = list(chunks(symbols, BATCH_SIZE))
     if data_source in {DATA_SOURCE_ALPACA_SIP, DATA_SOURCE_AUTO} and ALPACA_KEY and ALPACA_SECRET:
+        alpaca_label = alpaca_mode_label(alpaca_realtime)
         for idx, batch in enumerate(batches, start=1):
             status_box.caption(
-                f"Загружаю Alpaca SIP delayed ({ALPACA_SIP_DELAY_MINUTES} мин) · "
+                f"Загружаю {alpaca_label} · "
                 f"пачка {idx}/{len(batches)} · готово: {len(bars)}"
                 f"{elapsed_scan_suffix(scan_started_at)}"
             )
-            bars.update(fetch_alpaca_sip_delayed_batch(tuple(batch), history_days))
+            bars.update(fetch_alpaca_sip_batch(tuple(batch), history_days, alpaca_realtime))
             progress_box.progress(0.55 * idx / max(len(batches), 1))
 
         if data_source == DATA_SOURCE_ALPACA_SIP:
@@ -1293,16 +1349,20 @@ def load_bars(
     return bars
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_alpaca_minute_bars(ticker: str, count: int = CHART_VISIBLE_CANDLES) -> pd.DataFrame | None:
-    symbol = str(ticker or "").upper().strip()
-    if not symbol or not ALPACA_KEY or not ALPACA_SECRET:
-        return None
+@st.cache_data(ttl=ALPACA_CACHE_TTL_SEC, show_spinner=False)
+def fetch_alpaca_minute_bars_batch(
+    symbols: tuple[str, ...],
+    count: int = MINUTE_CHART_VISIBLE_CANDLES,
+    realtime: bool = True,
+) -> dict[str, pd.DataFrame]:
+    clean_symbols = tuple(dict.fromkeys(str(symbol or "").upper().strip() for symbol in symbols if str(symbol or "").strip()))
+    if not clean_symbols or not ALPACA_KEY or not ALPACA_SECRET:
+        return {}
 
-    end_dt = alpaca_sip_end_utc()
+    end_dt = alpaca_sip_end_utc(realtime)
     start_dt = end_dt - timedelta(days=5)
     params = {
-        "symbols": symbol,
+        "symbols": ",".join(clean_symbols),
         "timeframe": "1Min",
         "start": rfc3339_utc(start_dt),
         "end": rfc3339_utc(end_dt),
@@ -1312,26 +1372,59 @@ def fetch_alpaca_minute_bars(ticker: str, count: int = CHART_VISIBLE_CANDLES) ->
         "sort": "asc",
     }
 
+    bars_by_symbol: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in clean_symbols}
+    page_token = None
     try:
-        resp = requests.get(
-            f"{ALPACA_BASE}/v2/stocks/bars",
-            headers=ALPACA_HEADERS,
-            params=params,
-            timeout=DATA_TIMEOUT_SEC,
-        )
-        if resp.status_code in {401, 403}:
-            LOGGER.info("Alpaca minute auth/permission failed for %s: %s", symbol, resp.status_code)
-            return None
-        resp.raise_for_status()
-        rows = (resp.json().get("bars") or {}).get(symbol) or []
+        for _ in range(MAX_BARS_PAGES):
+            request_params = params.copy()
+            if page_token:
+                request_params["page_token"] = page_token
+            resp = requests.get(
+                f"{ALPACA_BASE}/v2/stocks/bars",
+                headers=ALPACA_HEADERS,
+                params=request_params,
+                timeout=DATA_TIMEOUT_SEC,
+            )
+            if resp.status_code in {401, 403}:
+                LOGGER.info("Alpaca minute auth/permission failed: %s", resp.status_code)
+                return {}
+            resp.raise_for_status()
+            payload = resp.json()
+            raw_bars = payload.get("bars") or {}
+            if isinstance(raw_bars, dict):
+                for symbol, rows in raw_bars.items():
+                    symbol_key = str(symbol).upper()
+                    if isinstance(rows, list):
+                        bars_by_symbol.setdefault(symbol_key, []).extend(rows)
+            page_token = payload.get("next_page_token")
+            if not page_token:
+                break
+        if page_token:
+            LOGGER.info("Alpaca minute pagination stopped after %s pages.", MAX_BARS_PAGES)
     except Exception as exc:
-        LOGGER.info("Alpaca minute bars failed for %s: %s", symbol, exc)
-        return None
+        LOGGER.info("Alpaca minute batch failed: %s", exc)
+        return {}
 
-    normalized = normalize_ohlcv(pd.DataFrame(rows), "Alpaca SIP 1Min")
-    if normalized is None or len(normalized) < 2:
+    out: dict[str, pd.DataFrame] = {}
+    source_label = f"{alpaca_mode_label(realtime)} 1Min"
+    for symbol, rows in bars_by_symbol.items():
+        if not rows:
+            continue
+        normalized = normalize_ohlcv(pd.DataFrame(rows), source_label)
+        if normalized is not None and len(normalized) >= 2:
+            out[symbol] = normalized.tail(max(2, int(count)))
+    return out
+
+
+def fetch_alpaca_minute_bars(
+    ticker: str,
+    count: int = MINUTE_CHART_VISIBLE_CANDLES,
+    realtime: bool = True,
+) -> pd.DataFrame | None:
+    symbol = str(ticker or "").upper().strip()
+    if not symbol:
         return None
-    return normalized.tail(max(2, int(count)))
+    return fetch_alpaca_minute_bars_batch((symbol,), count, realtime).get(symbol)
 
 
 # ── SIGNAL LOGIC ──────────────────────────────────────────────────
@@ -1345,6 +1438,18 @@ class BaseImpulse:
     volume_mult: float
     move_pct: float
     body_pct: float
+
+
+@dataclass(frozen=True)
+class RvolSetup:
+    low: float
+    high: float
+    width_pct: float
+    avg_volume: float
+    rvol: float
+    dollar_volume: float
+    move_pct: float
+    range_days: int
 
 
 @dataclass(frozen=True)
@@ -1404,7 +1509,7 @@ def build_base_impulse(df: pd.DataFrame, cfg: ScanConfig) -> BaseImpulse | None:
     if base_low <= 0 or base_high <= base_low:
         return None
     base_width_pct = (base_high - base_low) / base_low * 100
-    if cfg.base_max_width_pct > 0 and base_width_pct > cfg.base_max_width_pct:
+    if cfg.base_width_filter_enabled and cfg.base_max_width_pct > 0 and base_width_pct > cfg.base_max_width_pct:
         return None
 
     volumes = pd.to_numeric(window["Volume"], errors="coerce").dropna()
@@ -1430,6 +1535,52 @@ def build_base_impulse(df: pd.DataFrame, cfg: ScanConfig) -> BaseImpulse | None:
         volume_mult=volume_mult,
         move_pct=move_pct,
         body_pct=body_pct,
+    )
+
+
+def build_rvol_setup(df: pd.DataFrame, cfg: ScanConfig) -> RvolSetup | None:
+    avg_days = int(cfg.rvol_avg_days)
+    if avg_days < 5 or len(df) < avg_days + 2:
+        return None
+
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+    price = float(latest["Close"])
+    volume = float(latest["Volume"])
+    prev_close = float(prev["Close"])
+    if price <= 0 or volume <= 0 or prev_close <= 0:
+        return None
+
+    avg_window = pd.to_numeric(df["Volume"].iloc[-(avg_days + 1) : -1], errors="coerce")
+    avg_window = avg_window[avg_window > 0]
+    if avg_window.empty:
+        return None
+    avg_volume = float(avg_window.mean())
+    if avg_volume <= 0:
+        return None
+
+    rvol = volume / avg_volume
+    if rvol < cfg.rvol_mult:
+        return None
+
+    range_days = min(avg_days, 24)
+    range_window = df.iloc[-(range_days + 1) : -1].copy()
+    low = float(pd.to_numeric(range_window["Low"], errors="coerce").min())
+    high = float(pd.to_numeric(range_window["High"], errors="coerce").max())
+    if low <= 0 or high <= low:
+        return None
+
+    move_pct = (price - prev_close) / prev_close * 100
+    width_pct = (high - low) / low * 100
+    return RvolSetup(
+        low=low,
+        high=high,
+        width_pct=width_pct,
+        avg_volume=avg_volume,
+        rvol=rvol,
+        dollar_volume=price * volume,
+        move_pct=move_pct,
+        range_days=range_days,
     )
 
 
@@ -1689,7 +1840,15 @@ def pattern_chart_svg(payload: dict[str, Any]) -> str:
 
     count = len(rows)
     slot = plot_w / max(count, 1)
-    candle_w = max(2.6, min(8.0, slot * 0.58))
+    if count >= 700:
+        candle_w = max(0.45, min(1.1, slot * 0.72))
+        wick_w = 0.62
+    elif count >= 250:
+        candle_w = max(0.9, min(2.2, slot * 0.64))
+        wick_w = 0.85
+    else:
+        candle_w = max(2.6, min(8.0, slot * 0.58))
+        wick_w = 1.25
     timeframe = html.escape(str(payload.get("timeframe") or "D"))
     last_close = float(rows[-1]["Close"])
     parts = [
@@ -1743,10 +1902,11 @@ def pattern_chart_svg(payload: dict[str, Any]) -> str:
             f'<line x1="{plot_left}" x2="{plot_right}" y1="{prior_max_y:.2f}" y2="{prior_max_y:.2f}" '
             f'stroke="#667085" stroke-width="1.3" stroke-dasharray="5 4"/>'
         )
-        parts.append(
-            f'<text x="{plot_right}" y="{max(volume_top + 10, prior_max_y - 4):.2f}" fill="#667085" '
-            f'font-size="10" font-weight="700" font-family="Inter, Arial, sans-serif" text-anchor="end">прошл. max volume</text>'
-        )
+        if count <= 250:
+            parts.append(
+                f'<text x="{plot_right}" y="{max(volume_top + 10, prior_max_y - 4):.2f}" fill="#667085" '
+                f'font-size="10" font-weight="700" font-family="Inter, Arial, sans-serif" text-anchor="end">прошл. max volume</text>'
+            )
 
     for idx, row in enumerate(rows, start=0):
         open_price = float(row["Open"])
@@ -1764,7 +1924,7 @@ def pattern_chart_svg(payload: dict[str, Any]) -> str:
         body_h = max(1.2, abs(y_close - y_open))
         vol_top = vol_y(volume)
         vol_h = max(1.0, volume_bottom - vol_top)
-        parts.append(f'<line x1="{x:.2f}" x2="{x:.2f}" y1="{y_high:.2f}" y2="{y_low:.2f}" stroke="{color}" stroke-width="1.25"/>')
+        parts.append(f'<line x1="{x:.2f}" x2="{x:.2f}" y1="{y_high:.2f}" y2="{y_low:.2f}" stroke="{color}" stroke-width="{wick_w:.2f}"/>')
         parts.append(
             f'<rect x="{x - candle_w / 2:.2f}" y="{body_y:.2f}" width="{candle_w:.2f}" height="{body_h:.2f}" '
             f'rx="1.2" fill="{color}" opacity="0.96"/>'
@@ -1785,13 +1945,13 @@ INDEX_TICKERS = (
 )
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_index_bars(data_source: str) -> dict[str, pd.DataFrame]:
+@st.cache_data(ttl=ALPACA_CACHE_TTL_SEC, show_spinner=False)
+def fetch_index_bars(data_source: str, alpaca_realtime: bool = True) -> dict[str, pd.DataFrame]:
     symbols = tuple(symbol for symbol, _ in INDEX_TICKERS)
     bars: dict[str, pd.DataFrame] = {}
 
     if data_source in {DATA_SOURCE_ALPACA_SIP, DATA_SOURCE_AUTO} and ALPACA_KEY and ALPACA_SECRET:
-        bars.update(fetch_alpaca_sip_delayed_batch(symbols, 40))
+        bars.update(fetch_alpaca_sip_batch(symbols, 40, alpaca_realtime))
 
     missing = tuple(symbol for symbol in symbols if symbol not in bars)
     if data_source in {DATA_SOURCE_YAHOO, DATA_SOURCE_AUTO} and missing and yf is not None:
@@ -1800,8 +1960,8 @@ def fetch_index_bars(data_source: str) -> dict[str, pd.DataFrame]:
     return bars
 
 
-def render_market_overview(data_source: str) -> None:
-    bars = fetch_index_bars(data_source)
+def render_market_overview(data_source: str, alpaca_realtime: bool = True) -> None:
+    bars = fetch_index_bars(data_source, alpaca_realtime)
     cards: list[str] = []
     for symbol, name in INDEX_TICKERS:
         df = bars.get(symbol)
@@ -1849,6 +2009,13 @@ def score_base_signal(setup: BaseImpulse, cfg: ScanConfig) -> int:
     volume_score = min(70.0, setup.volume_mult / max(cfg.base_volume_mult, 0.1) * 35.0)
     move_score = min(20.0, max(0.0, setup.move_pct) * 2.0)
     return int(round(volume_score + move_score + 10.0))
+
+
+def score_rvol(setup: RvolSetup, cfg: ScanConfig) -> int:
+    volume_score = min(60.0, setup.rvol / max(cfg.rvol_mult, 0.1) * 30.0)
+    liquidity_score = min(25.0, setup.dollar_volume / 2_000_000 * 25.0)
+    move_score = min(15.0, max(0.0, setup.move_pct) * 0.6)
+    return int(round(volume_score + liquidity_score + move_score))
 
 
 def score_vcp(setup: VcpSetup, cfg: ScanConfig) -> int:
@@ -1953,6 +2120,47 @@ def detect_signal(
     latest_gap_pct = (latest_open - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
     body_pct = abs(price - latest_open) / latest_open * 100
 
+    if cfg.scanner_mode == SCANNER_RVOL:
+        setup = build_rvol_setup(df, cfg)
+        if setup is None:
+            return None
+        score = score_rvol(setup, cfg)
+        return {
+            "_sig": SIG_RVOL,
+            "_rvol": setup.rvol,
+            "_score": score,
+            "_width": setup.width_pct,
+            "_gap": latest_gap_pct,
+            "_move_pct": setup.move_pct,
+            "_chart_payload": pattern_chart_payload(
+                df,
+                setup.range_days,
+                setup.low,
+                setup.high,
+                "RW-диапазон",
+                visible_candles=CHART_VISIBLE_CANDLES,
+                band_days=setup.range_days,
+                timeframe="D",
+            ),
+            "_scanner": cfg.scanner_mode,
+            "Тикер": ticker_info["ticker"],
+            "Название": (ticker_info.get("name") or "")[:34],
+            "Биржа": ticker_info.get("exchange", ""),
+            "Сигнал": SIGNAL_LABELS[SIG_RVOL],
+            "Цена": round(price, 4),
+            "Выход %": f"{setup.move_pct:+.1f}%",
+            "Гэп сегодня": f"{latest_gap_pct:+.1f}%",
+            "Объём ×": round(setup.rvol, 2),
+            "Объём": int(latest_volume),
+            "Средний объём": int(setup.avg_volume),
+            "Тело свечи %": round(body_pct, 1),
+            "Долларовый объём": int(setup.dollar_volume),
+            "Капитализация": ticker_info.get("market_cap") or 0,
+            "Балл": score,
+            "Источник": df.attrs.get("source", ""),
+            "Время": now_et_str(),
+        }
+
     if cfg.scanner_mode == SCANNER_VCP:
         setup = build_vcp_setup(df, cfg)
         if setup is None:
@@ -2046,6 +2254,7 @@ def scan_market(
     ticker_infos: list[dict[str, Any]],
     cfg: ScanConfig,
     data_source: str,
+    alpaca_realtime: bool,
     progress_box: Any,
     status_box: Any,
     table_box: Any,
@@ -2070,7 +2279,7 @@ def scan_market(
         status_box.caption(f"В этой пачке все тикеры скрыты на 7 часов.{elapsed_scan_suffix(scan_started_at)}")
         return []
 
-    bars = load_bars(ticker_infos, cfg, data_source, progress_box, status_box, scan_started_at)
+    bars = load_bars(ticker_infos, cfg, data_source, alpaca_realtime, progress_box, status_box, scan_started_at)
     today = now_et().date()
 
     for idx, ticker_info in enumerate(ticker_infos, start=1):
@@ -2126,7 +2335,7 @@ def send_telegram(message: str) -> bool:
             timeout=10,
         )
         if resp.status_code != 200:
-            LOGGER.warning("Telegram failed: %s %s", resp.status_code, resp.text[:300])
+            LOGGER.warning("Telegram failed with status %s.", resp.status_code)
             return False
         return True
     except Exception as exc:
@@ -2160,6 +2369,63 @@ def telegram_signal_message(row: dict[str, Any]) -> str:
 
 def result_key(row: dict[str, Any]) -> tuple[str, str, str]:
     return str(row.get("_scanner", "")), str(row.get("Тикер", "")), str(row.get("Сигнал", ""))
+
+
+def market_session_key(current: datetime | None = None) -> str:
+    current = (current or now_et()).astimezone(MARKET_TZ)
+    session_start = current.replace(hour=9, minute=30, second=0, microsecond=0)
+    session_date = current.date() if current >= session_start else (current - timedelta(days=1)).date()
+    return session_date.isoformat()
+
+
+def current_session_seen_result_keys() -> set[tuple[str, str, str]]:
+    session_key = market_session_key()
+    if st.session_state.get("seen_signal_session_key") != session_key:
+        st.session_state.seen_signal_session_key = session_key
+        st.session_state.seen_signal_keys = set()
+    seen = st.session_state.setdefault("seen_signal_keys", set())
+    if not isinstance(seen, set):
+        seen = set(seen or [])
+        st.session_state.seen_signal_keys = seen
+    return seen
+
+
+def remember_seen_results(rows: list[dict[str, Any]]) -> None:
+    session_key = market_session_key()
+    seen = current_session_seen_result_keys()
+    for row in rows:
+        if isinstance(row, dict) and row.get("_seen_session_key") == session_key:
+            seen.add(result_key(row))
+    st.session_state.seen_signal_keys = seen
+
+
+def clear_new_scan_flags(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cleared: list[dict[str, Any]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            next_row = row.copy()
+            next_row["_new_this_scan"] = False
+            cleared.append(next_row)
+    return cleared
+
+
+def mark_new_scan_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    session_key = market_session_key()
+    seen = current_session_seen_result_keys()
+    marked: list[dict[str, Any]] = []
+    scan_keys: set[tuple[str, str, str]] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        key = result_key(row)
+        next_row = row.copy()
+        next_row["_new_this_scan"] = key not in seen and key not in scan_keys
+        next_row["_seen_session_key"] = session_key
+        marked.append(next_row)
+        scan_keys.add(key)
+    seen.update(scan_keys)
+    st.session_state.seen_signal_keys = seen
+    return marked
 
 
 def normalize_ticker_id(value: Any) -> str:
@@ -2234,9 +2500,9 @@ def sort_results(rows: list[dict[str, Any]], base_pattern: bool = False) -> list
     return sorted(
         rows,
         key=lambda row: (
+            safe_float(row.get("_rvol") or row.get("Объём ×")),
             safe_float(row.get("Объём")),
             safe_float(row.get("Долларовый объём")),
-            safe_float(row.get("_rvol")),
             abs(safe_float(row.get("_move_pct"))),
             safe_float(row.get("Балл")),
         ),
@@ -2260,6 +2526,8 @@ def result_matches_active_patterns(row: dict[str, Any], cfg: ScanConfig) -> bool
         return scanner == cfg.scanner_mode
     if cfg.scanner_mode == SCANNER_BASE:
         return signal_code == SIG_BASE
+    if cfg.scanner_mode == SCANNER_RVOL:
+        return signal_code == SIG_RVOL
     if cfg.scanner_mode == SCANNER_VCP:
         return signal_code == SIG_VCP
     if cfg.scanner_mode == SCANNER_SPRING:
@@ -2267,8 +2535,25 @@ def result_matches_active_patterns(row: dict[str, Any], cfg: ScanConfig) -> bool
     return False
 
 
-def filter_results_for_config(rows: list[dict[str, Any]], cfg: ScanConfig) -> list[dict[str, Any]]:
+def result_matches_data_mode(row: dict[str, Any], data_source: str | None, alpaca_realtime: bool) -> bool:
+    if data_source is None:
+        return True
+    source = str(row.get("Источник", ""))
+    if source.startswith("Alpaca SIP"):
+        return source.startswith(alpaca_mode_label(alpaca_realtime))
+    if source == "Yahoo Finance":
+        return data_source in {DATA_SOURCE_AUTO, DATA_SOURCE_YAHOO}
+    return True
+
+
+def filter_results_for_config(
+    rows: list[dict[str, Any]],
+    cfg: ScanConfig,
+    data_source: str | None = None,
+    alpaca_realtime: bool = True,
+) -> list[dict[str, Any]]:
     active_rows = [row for row in rows if isinstance(row, dict) and result_matches_active_patterns(row, cfg)]
+    active_rows = [row for row in active_rows if result_matches_data_mode(row, data_source, alpaca_realtime)]
     return filter_dismissed_results(active_rows)
 
 
@@ -2357,7 +2642,7 @@ def display_column_config(base_pattern: bool = False) -> dict[str, Any]:
             "RVOL",
             width="small",
             format="%.2fx",
-            help="Сегодняшний объём / выбранная база сравнения объёма. Для взрыва базы это максимум любой из предыдущих свечей.",
+            help="Сегодняшний объём / выбранная база сравнения. В режиме RW это средний объём за N дней; во Взрыве базы это максимум прошлых свечей.",
         ),
         "Движение %": st.column_config.NumberColumn("Движение %", width="small", format="%.1f%%"),
         "Объём": st.column_config.NumberColumn("Объём", width="medium"),
@@ -2427,7 +2712,7 @@ def render_results_summary(rows: list[dict[str, Any]]) -> None:
     total_dollar_volume = sum(safe_float(row.get("Долларовый объём")) for row in rows)
     latest_time = str(rows[0].get("Время", now_et_str())) if rows else now_et_str()
     count_parts = []
-    for code in (SIG_BASE, SIG_VCP, SIG_SPRING):
+    for code in (SIG_BASE, SIG_RVOL, SIG_VCP, SIG_SPRING):
         signal_count = sum(1 for row in rows if str(row.get("_sig", "")) == code)
         if signal_count:
             count_parts.append(f"{SIGNAL_SHORT_LABELS.get(code, code)} {signal_count}")
@@ -2437,7 +2722,7 @@ def render_results_summary(rows: list[dict[str, Any]]) -> None:
         <div class="base-results-bar">
             <div>
                 <div class="base-results-title">Найденные акции</div>
-                <div class="base-results-subtitle">По умолчанию сверху акции с самым большим сегодняшним объёмом.</div>
+                <div class="base-results-subtitle">По умолчанию сверху акции с самым большим RVOL.</div>
             </div>
             <div class="base-results-stats">
                 {chip("Найдено", count, "blue")}
@@ -2466,26 +2751,34 @@ def render_results_table(rows: list[dict[str, Any]], cfg: ScanConfig) -> None:
     )
 
 
-def render_signal_gallery(rows: list[dict[str, Any]], max_cards: int) -> None:
-    cards = [
+def render_signal_gallery(rows: list[dict[str, Any]], alpaca_realtime: bool = True) -> None:
+    cards = sort_results([
         row
         for row in rows
         if isinstance(row, dict) and row.get("_chart_payload")
-    ]
+    ])
     if not cards:
         return
 
-    st.markdown('<div class="desk-section-title">Графики найденных акций</div>', unsafe_allow_html=True)
-    max_cards = min(len(cards), max(0, int(max_cards)))
-    if max_cards <= 0:
-        return
-    for idx, row in enumerate(cards[:max_cards]):
+    st.markdown(
+        f'<div class="desk-section-title">Графики найденных акций · {len(cards)}</div>',
+        unsafe_allow_html=True,
+    )
+
+    minute_bars: dict[str, pd.DataFrame] = {}
+    minute_symbols = list(dict.fromkeys(str(row.get("Тикер", "")).upper().strip() for row in cards if row.get("Тикер")))
+    for batch in chunks(minute_symbols, 25):
+        minute_bars.update(fetch_alpaca_minute_bars_batch(tuple(batch), MINUTE_CHART_VISIBLE_CANDLES, alpaca_realtime))
+
+    for idx, row in enumerate(cards):
         ticker_raw = str(row.get("Тикер", ""))
+        ticker_key = ticker_raw.upper().strip()
         signal_raw = str(row.get("_sig", ""))
         scanner_raw = str(row.get("_scanner", ""))
         key_base = re.sub(r"[^A-Za-z0-9_]+", "_", f"{scanner_raw}_{ticker_raw}_{signal_raw}_{idx}")
         daily_payload = row.get("_chart_payload") or {}
-        if not pattern_chart_svg(daily_payload):
+        daily_svg = pattern_chart_svg(daily_payload)
+        if not daily_svg:
             continue
         ticker = html.escape(str(row.get("Тикер", "")))
         signal = html.escape(SIGNAL_SHORT_LABELS.get(str(row.get("_sig", "")), str(row.get("Сигнал", ""))))
@@ -2496,36 +2789,29 @@ def render_signal_gallery(rows: list[dict[str, Any]], max_cards: int) -> None:
         dollar_volume = html.escape(format_dollar_cell(row.get("Долларовый объём")))
         market_cap = html.escape(format_market_cap_cell(row.get("Капитализация")))
 
-        with st.container(border=True, key=f"chart_card_{key_base}"):
-            st.markdown(
-                f"""
-                <div class="pattern-chart-shell">
-                    <div class="pattern-chart-head">
-                        <div>
-                            <div class="pattern-chart-symbol">{ticker}</div>
-                            <div class="desk-muted">{signal}</div>
+        card_key_prefix = "chart_card_new" if row.get("_new_this_scan") else "chart_card"
+        with st.container(border=True, key=f"{card_key_prefix}_{key_base}"):
+            info_col, action_col = st.columns([0.86, 0.14], vertical_alignment="top")
+            with info_col:
+                st.markdown(
+                    f"""
+                    <div class="pattern-chart-shell">
+                        <div class="pattern-chart-head">
+                            <div>
+                                <div class="pattern-chart-symbol">{ticker}</div>
+                                <div class="desk-muted">{signal}</div>
+                            </div>
+                            <div class="pattern-chart-meta">{price}<br>{rw} · {move}</div>
                         </div>
-                        <div class="pattern-chart-meta">{price}<br>{rw} · {move}</div>
+                        <div class="pattern-chart-stats">
+                            <div class="pattern-chart-stat"><span>Объём</span><strong>{volume}</strong></div>
+                            <div class="pattern-chart-stat"><span>$ объём</span><strong>{dollar_volume}</strong></div>
+                            <div class="pattern-chart-stat"><span>Капитал</span><strong>{market_cap}</strong></div>
+                            <div class="pattern-chart-stat"><span>Время</span><strong>{html.escape(str(row.get("Время", "")))}</strong></div>
+                        </div>
                     </div>
-                    <div class="pattern-chart-stats">
-                        <div class="pattern-chart-stat"><span>Объём</span><strong>{volume}</strong></div>
-                        <div class="pattern-chart-stat"><span>$ объём</span><strong>{dollar_volume}</strong></div>
-                        <div class="pattern-chart-stat"><span>Капитал</span><strong>{market_cap}</strong></div>
-                        <div class="pattern-chart-stat"><span>Время</span><strong>{html.escape(str(row.get("Время", "")))}</strong></div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            timeframe_col, action_col = st.columns([0.84, 0.16], vertical_alignment="center")
-            with timeframe_col:
-                timeframe = st.radio(
-                    f"Таймфрейм {ticker_raw}",
-                    ["D", "M"],
-                    horizontal=True,
-                    key=f"chart_tf_{key_base}",
-                    label_visibility="collapsed",
+                    """,
+                    unsafe_allow_html=True,
                 )
             with action_col:
                 if st.button(
@@ -2539,22 +2825,39 @@ def render_signal_gallery(rows: list[dict[str, Any]], max_cards: int) -> None:
                         st.toast(f"Скрыто на {DISMISS_TTL_HOURS} часов: {hidden}")
                     rerun_app()
 
-            chart_payload = daily_payload
-            if timeframe == "M":
-                minute_df = fetch_alpaca_minute_bars(ticker_raw, CHART_VISIBLE_CANDLES)
-                if minute_df is not None:
-                    chart_payload = pattern_chart_payload(
+            minute_svg = ""
+            minute_df = minute_bars.get(ticker_key)
+            if minute_df is not None:
+                minute_svg = pattern_chart_svg(
+                    pattern_chart_payload(
                         minute_df,
-                        CHART_VISIBLE_CANDLES,
-                        visible_candles=CHART_VISIBLE_CANDLES,
+                        MINUTE_CHART_VISIBLE_CANDLES,
+                        visible_candles=MINUTE_CHART_VISIBLE_CANDLES,
                         timeframe="M",
                         band_days=0,
                         show_default_band=False,
                     )
+                )
 
-            chart_svg = pattern_chart_svg(chart_payload)
-            if chart_svg:
-                st.markdown(f'<div class="pattern-chart-svg">{chart_svg}</div>', unsafe_allow_html=True)
+            minute_block = (
+                f'<div class="pattern-chart-panel"><div class="pattern-chart-panel-title">Минутка · {MINUTE_CHART_VISIBLE_CANDLES} баров</div>'
+                f'<div class="pattern-chart-svg">{minute_svg}</div></div>'
+                if minute_svg
+                else '<div class="pattern-chart-panel"><div class="desk-muted">Минутные свечи Alpaca сейчас недоступны.</div></div>'
+            )
+            if daily_svg:
+                st.markdown(
+                    f"""
+                    <div class="pattern-chart-stack">
+                        <div class="pattern-chart-panel">
+                            <div class="pattern-chart-panel-title">Дневка · {CHART_VISIBLE_CANDLES} баров</div>
+                            <div class="pattern-chart-svg">{daily_svg}</div>
+                        </div>
+                        {minute_block}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
 
 # ── FORMAT HELPERS ──────────────────────────────────────────────────
@@ -2614,7 +2917,7 @@ with st.sidebar:
         """
         <div class="sidebar-brand">
             <div class="sidebar-brand-title">PR Screener</div>
-            <div class="sidebar-brand-subtitle">Взрыв базы · VCP · Spring</div>
+            <div class="sidebar-brand-subtitle">Взрыв базы · RW · VCP · Spring</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -2634,6 +2937,7 @@ with st.sidebar:
     )
     scanner_mode = {label: code for code, label in SCANNER_LABELS.items()}[scanner_label]
     base_impulse_only = scanner_mode == SCANNER_BASE
+    rvol_active = scanner_mode == SCANNER_RVOL
     vcp_active = scanner_mode == SCANNER_VCP
     spring_active = scanner_mode == SCANNER_SPRING
     st.caption(SCANNER_HELP[scanner_mode])
@@ -2647,15 +2951,34 @@ with st.sidebar:
         ],
         index=0,
         help=(
-            "По умолчанию используем только Alpaca SIP delayed. Резерв Yahoo можно включить вручную, "
+            "По умолчанию используем Alpaca SIP. Резерв Yahoo можно включить вручную, "
             "если Alpaca временно не отдаёт часть тикеров."
         ),
     )
     data_source = {label: code for code, label in DATA_SOURCE_LABELS.items()}[data_source_label]
+    alpaca_realtime = True
     if data_source in {DATA_SOURCE_AUTO, DATA_SOURCE_ALPACA_SIP}:
-        st.caption(f"Alpaca SIP delayed: полный рынок, задержка {ALPACA_SIP_DELAY_MINUTES} минут.")
+        alpaca_mode_choice = st.radio(
+            "Режим Alpaca",
+            ["Real-time", f"{ALPACA_SIP_DELAY_MINUTES} мин задержка"],
+            index=0,
+            horizontal=True,
+            help=(
+                "Real-time: новый режим, end=текущее время, нужен Algo Trader Plus/SIP real-time. "
+                f"{ALPACA_SIP_DELAY_MINUTES} мин задержка: старая резервная версия, если подписка или доступ слетит."
+            ),
+        )
+        alpaca_realtime = alpaca_mode_choice == "Real-time"
+        st.caption(
+            "Alpaca SIP: "
+            + (
+                "новая версия real-time без искусственной задержки."
+                if alpaca_realtime
+                else f"старая резервная версия с задержкой {ALPACA_SIP_DELAY_MINUTES} минут."
+            )
+        )
         if not (ALPACA_KEY and ALPACA_SECRET):
-            st.warning("Для Alpaca SIP delayed нужны ALPACA_KEY и ALPACA_SECRET в secrets.")
+            st.warning("Для Alpaca SIP нужны ALPACA_KEY и ALPACA_SECRET в secrets.")
     if data_source == DATA_SOURCE_AUTO and yf is None:
         st.warning("yfinance не установлен: Yahoo Finance недоступен как резерв.")
 
@@ -2697,7 +3020,7 @@ with st.sidebar:
         250_000,
         50_000,
         disabled=base_impulse_only,
-        help="Для VCP и Spring фильтрует слишком тонкие акции. Для Взрыва из базы выключено, чтобы старый режим работал как раньше.",
+        help="Для RW, VCP и Spring фильтрует слишком тонкие акции. Для Взрыва из базы выключено, чтобы старый режим работал как раньше.",
     )
     min_dollar_volume = 0 if base_impulse_only else int(min_dollar_volume_input)
 
@@ -2712,14 +3035,24 @@ with st.sidebar:
         disabled=not base_impulse_only,
         help=SCANNER_HELP[SCANNER_BASE],
     )
+    base_width_filter_enabled = st.toggle(
+        "Учитывать ширину базы",
+        value=True,
+        disabled=not base_impulse_only,
+        help=(
+            "По умолчанию включено: ищем именно накопление в узкой базе. "
+            "Если выключить, скринер не будет отсеивать широкие базы, но оставит остальные условия: "
+            "открытие внутри вчерашней свечи и объём выше максимума прошлых свечей."
+        ),
+    )
     base_max_width_pct = st.slider(
         "Макс. ширина базы (%)",
         2.0,
         80.0,
-        20.0,
+        40.0,
         1.0,
-        disabled=not base_impulse_only,
-        help="Ширина канала считается по выбранным предыдущим свечам: high базы против low базы. 20% значит, что база за выбранные дни должна быть не шире 20%.",
+        disabled=not base_impulse_only or not base_width_filter_enabled,
+        help="Ширина канала считается по выбранным предыдущим свечам: high базы против low базы. 40% значит, что база за выбранные дни должна быть не шире 40%.",
     )
     base_volume_mult = st.slider(
         "Сегодняшний объём выше каждой прошлой свечи ×",
@@ -2731,35 +3064,55 @@ with st.sidebar:
         help="1 означает: сегодняшний объём строго больше максимального объёма среди предыдущих свечей. 50 означает: больше максимума предыдущих свечей в 50 раз.",
     )
 
+    st.markdown('<div class="desk-section-title">Относительный объём RW</div>', unsafe_allow_html=True)
+    rvol_avg_days = st.slider(
+        "RW · средний объём за дней",
+        5,
+        60,
+        30,
+        1,
+        disabled=not rvol_active,
+        help="Сколько предыдущих дневных свечей берём для средней. Базовый рыночный пресет: 30 дней, чтобы сравнивать с месячной нормой.",
+    )
+    rvol_mult = st.slider(
+        "RW · объём сегодня выше средней ×",
+        1.5,
+        20.0,
+        2.0,
+        0.5,
+        disabled=not rvol_active,
+        help="Сигнал появляется, когда сегодняшний объём минимум во столько раз выше средней за выбранные дни. Базовый пресет: 2x как заметное отклонение от обычного объёма.",
+    )
+
     st.markdown('<div class="desk-section-title">VCP-сжатие</div>', unsafe_allow_html=True)
     vcp_days = st.slider(
         "Период VCP, дней",
         30,
         90,
-        45,
+        60,
         5,
         disabled=not vcp_active,
         help=SCANNER_HELP[SCANNER_VCP],
     )
-    vcp_max_base_width_pct = st.slider("Макс. ширина всей базы (%)", 15.0, 70.0, 35.0, 1.0, disabled=not vcp_active)
-    vcp_max_recent_width_pct = st.slider("Макс. ширина последней трети (%)", 3.0, 25.0, 12.0, 0.5, disabled=not vcp_active)
-    vcp_min_compression_pct = st.slider("Минимальное сжатие диапазона (%)", 10.0, 70.0, 25.0, 1.0, disabled=not vcp_active)
-    vcp_near_high_pct = st.slider("Цена не дальше от верха базы (%)", 2.0, 20.0, 8.0, 0.5, disabled=not vcp_active)
+    vcp_max_base_width_pct = st.slider("Макс. ширина всей базы (%)", 15.0, 70.0, 30.0, 1.0, disabled=not vcp_active)
+    vcp_max_recent_width_pct = st.slider("Макс. ширина последней трети (%)", 3.0, 25.0, 10.0, 0.5, disabled=not vcp_active)
+    vcp_min_compression_pct = st.slider("Минимальное сжатие диапазона (%)", 10.0, 70.0, 35.0, 1.0, disabled=not vcp_active)
+    vcp_near_high_pct = st.slider("Цена не дальше от верха базы (%)", 2.0, 20.0, 10.0, 0.5, disabled=not vcp_active)
     vcp_dry_volume_ratio = st.slider(
         "Сухой объём: последняя треть / первые две",
         0.30,
         1.20,
-        0.85,
+        0.80,
         0.05,
         disabled=not vcp_active,
-        help="0.85 значит: средний объём последней трети базы должен быть не выше 85% от среднего объёма первых двух третей.",
+        help="0.80 значит: средний объём последней трети базы должен быть не выше 80% от среднего объёма первых двух третей.",
     )
 
     st.markdown('<div class="desk-section-title">Spring-отскок</div>', unsafe_allow_html=True)
     spring_support_days = st.slider("Поддержка за дней", 30, 120, 60, 5, disabled=not spring_active, help=SCANNER_HELP[SCANNER_SPRING])
     spring_low_days = st.slider("Дно смотреть за дней", 60, 250, 120, 10, disabled=not spring_active)
-    spring_break_pct = st.slider("Минимальный прокол поддержки (%)", 0.1, 10.0, 1.0, 0.1, disabled=not spring_active)
-    spring_reclaim_pct = st.slider("Возврат выше поддержки (%)", 0.0, 5.0, 0.0, 0.1, disabled=not spring_active)
+    spring_break_pct = st.slider("Минимальный прокол поддержки (%)", 0.1, 10.0, 0.7, 0.1, disabled=not spring_active)
+    spring_reclaim_pct = st.slider("Возврат выше поддержки (%)", 0.0, 5.0, 0.2, 0.1, disabled=not spring_active)
     spring_close_position_pct = st.slider(
         "Закрытие в верхней части свечи (%)",
         40.0,
@@ -2770,7 +3123,7 @@ with st.sidebar:
         help="60% значит: закрытие должно быть выше середины дневного диапазона и ближе к high.",
     )
     spring_volume_mult = st.slider("Объём выше среднего ×", 1.0, 5.0, 1.2, 0.1, disabled=not spring_active)
-    spring_max_from_low_pct = st.slider("Цена не дальше от дна периода (%)", 5.0, 80.0, 35.0, 1.0, disabled=not spring_active)
+    spring_max_from_low_pct = st.slider("Цена не дальше от дна периода (%)", 5.0, 80.0, 30.0, 1.0, disabled=not spring_active)
 
     st.markdown('<div class="desk-section-title">Цена</div>', unsafe_allow_html=True)
     price_col_1, price_col_2 = st.columns(2)
@@ -2779,8 +3132,8 @@ with st.sidebar:
             "Мин. цена",
             0.01,
             500.0,
-            0.10 if base_impulse_only else 0.50,
-            0.01 if base_impulse_only else 0.10,
+            0.10 if base_impulse_only or rvol_active else 0.50,
+            0.01 if base_impulse_only or rvol_active else 0.10,
         )
     with price_col_2:
         max_price = st.number_input("Макс. цена", 0.01, 500.0, 20.0, 1.0)
@@ -2807,15 +3160,6 @@ with st.sidebar:
         st.session_state.notified_signals = set()
         st.success("Повторы сброшены.")
 
-    st.markdown('<div class="desk-section-title">Отображение</div>', unsafe_allow_html=True)
-    chart_limit = st.select_slider(
-        "Графиков показывать",
-        options=[5, 10, 15, 20, 30],
-        value=10,
-        help="Для телефона лучше 5-10. Таблица результатов остаётся полной, ограничивается только лента графиков.",
-    )
-
-
 # ── AUTO REFRESH ──────────────────────────────────────────────────
 if auto_scan and st_autorefresh is not None:
     st_autorefresh(interval=auto_interval * 60 * 1000, key="accumulation_autorefresh")
@@ -2832,12 +3176,15 @@ cfg = ScanConfig(
     min_dollar_volume=int(min_dollar_volume),
     base_impulse_enabled=base_impulse_enabled,
     base_impulse_days=base_impulse_days,
+    base_width_filter_enabled=base_width_filter_enabled,
     base_max_width_pct=base_max_width_pct,
     base_volume_mult=base_volume_mult,
     base_impulse_only=base_impulse_only,
     max_stale_days=max_stale_days,
     min_price=min_price,
     max_price=max_price,
+    rvol_avg_days=rvol_avg_days,
+    rvol_mult=rvol_mult,
     vcp_days=vcp_days,
     vcp_max_base_width_pct=vcp_max_base_width_pct,
     vcp_max_recent_width_pct=vcp_max_recent_width_pct,
@@ -2858,6 +3205,8 @@ telegram_tone = "green" if send_alerts and telegram_ready else ("red" if send_al
 telegram_label = "готов" if send_alerts and telegram_ready else ("нет секрета" if send_alerts else "выкл")
 mode_subtitle = SCANNER_SUBTITLES.get(cfg.scanner_mode, "")
 mode_label = SCANNER_LABELS.get(cfg.scanner_mode, "Скринер")
+alpaca_freshness_label = "real-time" if alpaca_realtime else f"{ALPACA_SIP_DELAY_MINUTES} мин"
+alpaca_freshness_tone = "green" if alpaca_realtime else "amber"
 
 st.markdown(
     f"""
@@ -2884,10 +3233,26 @@ if cfg.scanner_mode == SCANNER_BASE:
             chip("За прогон", format_int_cell(max_tickers)),
             chip("Цена", f"${min_price:g}-${max_price:g}"),
             chip("Открытие", "внутри вчерашней свечи", "blue"),
-            chip("База", f"{cfg.base_impulse_days} св. до {cfg.base_max_width_pct:g}%"),
+            chip("База", f"{cfg.base_impulse_days} св. до {cfg.base_max_width_pct:g}%" if cfg.base_width_filter_enabled else f"{cfg.base_impulse_days} св. · ширина выкл."),
             chip("RVOL", f">{cfg.base_volume_mult:g}x к макс. из {cfg.base_impulse_days}"),
             chip("Свежесть", f"{cfg.max_stale_days}д"),
             chip("Источник", DATA_SOURCE_LABELS.get(data_source, data_source), "green"),
+            chip("Alpaca", alpaca_freshness_label, alpaca_freshness_tone),
+        ]
+    )
+elif cfg.scanner_mode == SCANNER_RVOL:
+    setup_chips = "".join(
+        [
+            chip("Режим", mode_label, "amber"),
+            chip("Биржа", exchange),
+            chip("За прогон", format_int_cell(max_tickers)),
+            chip("Цена", f"${min_price:g}-${max_price:g}"),
+            chip("Средняя", f"{cfg.rvol_avg_days} дней"),
+            chip("RW", f"≥ {cfg.rvol_mult:g}x"),
+            chip("Свежесть", f"{cfg.max_stale_days}д"),
+            chip("Свечи/объём", DATA_SOURCE_LABELS.get(data_source, data_source), "green"),
+            chip("Alpaca", alpaca_freshness_label, alpaca_freshness_tone),
+            chip("Долларовый объём", format_dollar_cell(cfg.min_dollar_volume)),
         ]
     )
 elif cfg.scanner_mode == SCANNER_VCP:
@@ -2905,6 +3270,7 @@ elif cfg.scanner_mode == SCANNER_VCP:
             chip("Сухой объём", f"≤ {cfg.vcp_dry_volume_ratio:g}x"),
             chip("Свежесть", f"{cfg.max_stale_days}д"),
             chip("Свечи/объём", DATA_SOURCE_LABELS.get(data_source, data_source), "green"),
+            chip("Alpaca", alpaca_freshness_label, alpaca_freshness_tone),
             chip("Долларовый объём", format_dollar_cell(cfg.min_dollar_volume)),
         ]
     )
@@ -2923,6 +3289,7 @@ else:
             chip("Объём", f"×{cfg.spring_volume_mult:g}"),
             chip("От дна", f"до {cfg.spring_max_from_low_pct:g}%"),
             chip("Свечи/объём", DATA_SOURCE_LABELS.get(data_source, data_source), "green"),
+            chip("Alpaca", alpaca_freshness_label, alpaca_freshness_tone),
             chip("Долларовый объём", format_dollar_cell(cfg.min_dollar_volume)),
         ]
     )
@@ -2936,7 +3303,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-render_market_overview(data_source)
+render_market_overview(data_source, alpaca_realtime)
 
 if data_source == DATA_SOURCE_AUTO and yf is None:
     st.warning("yfinance не установлен. Резерв Yahoo недоступен; текущий скан пойдёт через Alpaca.")
@@ -3016,7 +3383,7 @@ if start_scan or (auto_scan and should_auto_run):
 
     if is_auto_batch:
         all_tickers = all_tickers_full[:AUTO_SCAN_MARKET_LIMIT]
-        auto_signature = f"{exchange}:{max_scan_price:g}:{AUTO_SCAN_MARKET_LIMIT}:{len(all_tickers)}"
+        auto_signature = f"{exchange}:{max_scan_price:g}:{AUTO_SCAN_MARKET_LIMIT}:{len(all_tickers)}:{data_source}:{int(alpaca_realtime)}"
         if st.session_state.auto_scan_signature != auto_signature:
             st.session_state.auto_scan_signature = auto_signature
             st.session_state.auto_scan_offset = 0
@@ -3045,17 +3412,23 @@ if start_scan or (auto_scan and should_auto_run):
         status_box = st.empty()
         table_box = st.empty()
 
+        active_old_results = clear_new_scan_flags(
+            filter_results_for_config(st.session_state.results, cfg, data_source, alpaca_realtime)
+        )
+        remember_seen_results(active_old_results)
+
         hits = scan_market(
             ticker_infos=ticker_infos,
             cfg=cfg,
             data_source=data_source,
+            alpaca_realtime=alpaca_realtime,
             progress_box=progress_box,
             status_box=status_box,
             table_box=table_box,
             send_alerts=send_alerts,
         )
+        hits = mark_new_scan_results(hits)
 
-        active_old_results = filter_results_for_config(st.session_state.results, cfg)
         st.session_state.results = merge_results(hits, active_old_results, cfg.base_impulse_only)
 
         st.session_state.auto_last_run = now_et()
@@ -3093,12 +3466,15 @@ if start_scan or (auto_scan and should_auto_run):
             with st.expander("Диагностика"):
                 st.write("\n".join(st.session_state.scan_errors))
 
-st.session_state.results = sort_results(filter_results_for_config(st.session_state.results, cfg), cfg.base_impulse_only)
+st.session_state.results = sort_results(
+    filter_results_for_config(st.session_state.results, cfg, data_source, alpaca_realtime),
+    cfg.base_impulse_only,
+)
 
 if st.session_state.results:
     render_results_summary(st.session_state.results)
     render_results_table(st.session_state.results, cfg)
-    render_signal_gallery(st.session_state.results, chart_limit)
+    render_signal_gallery(st.session_state.results, alpaca_realtime)
 
     csv = display_frame(st.session_state.results, cfg.base_impulse_only, include_chart=False).to_csv(index=False).encode("utf-8")
     st.download_button(
