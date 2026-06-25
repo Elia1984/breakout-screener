@@ -731,17 +731,29 @@ SIG_BASE = "BASE_VOLUME_EXPLOSION"
 SIG_RVOL = "RELATIVE_VOLUME"
 SIG_VCP = "VCP_SQUEEZE"
 SIG_SPRING = "SPRING_REVERSAL"
+SIG_MOMENTUM = "MOMENTUM_PULSE"
 
 SCANNER_BASE = "BASE_VOLUME"
 SCANNER_RVOL = "RELATIVE_VOLUME"
 SCANNER_VCP = "VCP_SQUEEZE"
 SCANNER_SPRING = "SPRING_REVERSAL"
+SCANNER_MOMENTUM = "MOMENTUM_PULSE"
+
+MOMENTUM_DIR_BOTH = "BOTH"
+MOMENTUM_DIR_UP = "UP"
+MOMENTUM_DIR_DOWN = "DOWN"
+MOMENTUM_DIRECTION_LABELS = {
+    "Вверх и вниз": MOMENTUM_DIR_BOTH,
+    "Только вверх": MOMENTUM_DIR_UP,
+    "Только вниз": MOMENTUM_DIR_DOWN,
+}
 
 SCANNER_LABELS = {
     SCANNER_BASE: "Взрыв из базы",
     SCANNER_RVOL: "Относительный объём RW",
     SCANNER_VCP: "VCP-сжатие",
     SCANNER_SPRING: "Spring-отскок",
+    SCANNER_MOMENTUM: "Импульс + объём",
 }
 SCANNER_HELP = {
     SCANNER_BASE: (
@@ -760,12 +772,17 @@ SCANNER_HELP = {
         "Ищет ложный прокол поддержки: цена сходила ниже важного минимума, "
         "но закрылась обратно выше поддержки на повышенном объёме."
     ),
+    SCANNER_MOMENTUM: (
+        "Интрадей-скринер для day trading: ищет акции, где прямо сейчас появился "
+        "быстрый рост или падение на повышенном минутном объёме."
+    ),
 }
 SCANNER_SUBTITLES = {
     SCANNER_BASE: "Полный рынок · открытие внутри вчерашней свечи · объём выше всей базы",
     SCANNER_RVOL: "Полный рынок · сегодняшний объём против средней за N дней",
     SCANNER_VCP: "Полный рынок · сжатие диапазона · сухой объём · цена рядом с верхом базы",
     SCANNER_SPRING: "Полный рынок · прокол поддержки · возврат над уровень · объёмный отскок",
+    SCANNER_MOMENTUM: "Полный рынок · 1Min Alpaca · быстрый импульс 5/15 мин · объёмный всплеск",
 }
 
 SIGNAL_LABELS = {
@@ -773,12 +790,14 @@ SIGNAL_LABELS = {
     SIG_RVOL: "ОТНОСИТЕЛЬНЫЙ ОБЪЁМ RW",
     SIG_VCP: "VCP-СЖАТИЕ",
     SIG_SPRING: "SPRING ОТ ДНА",
+    SIG_MOMENTUM: "ИМПУЛЬС + ОБЪЁМ",
 }
 SIGNAL_SHORT_LABELS = {
     SIG_BASE: "Взрыв базы",
     SIG_RVOL: "RW объём",
     SIG_VCP: "VCP-сжатие",
     SIG_SPRING: "Spring от дна",
+    SIG_MOMENTUM: "Импульс",
 }
 
 DISPLAY_COLS = [
@@ -881,6 +900,31 @@ class ScanConfig:
     spring_close_position_pct: float = 60.0
     spring_volume_mult: float = 1.2
     spring_max_from_low_pct: float = 30.0
+
+    momentum_direction: str = MOMENTUM_DIR_BOTH
+    momentum_fast_minutes: int = 3
+    momentum_confirm_minutes: int = 10
+    momentum_volume_baseline_minutes: int = 60
+    momentum_min_fast_move_pct: float = 0.7
+    momentum_min_confirm_move_pct: float = 1.2
+    momentum_volume_mult: float = 6.0
+    momentum_confirm_volume_mult: float = 3.0
+    momentum_min_5m_dollar_volume: int = 500_000
+    momentum_min_15m_dollar_volume: int = 1_250_000
+    momentum_min_day_dollar_volume: int = 3_000_000
+    momentum_max_bar_age_minutes: int = 2
+    momentum_max_vwap_distance_pct: float = 5.0
+    momentum_require_vwap_side: bool = True
+    momentum_require_ema_trend: bool = True
+    momentum_include_extended_hours: bool = False
+    momentum_min_score: int = 85
+    momentum_min_quality_checks: int = 3
+    momentum_require_new_volume_wave: bool = True
+    momentum_min_volume_acceleration: float = 2.0
+    momentum_max_prior_fast_rvol: float = 2.5
+    momentum_max_recent_prior_rvol: float = 4.0
+    momentum_min_fast_volume_share_pct: float = 40.0
+    momentum_max_confirm_move_pct: float = 8.0
 
 
 def now_et() -> datetime:
@@ -1427,6 +1471,127 @@ def fetch_alpaca_minute_bars(
     return fetch_alpaca_minute_bars_batch((symbol,), count, realtime).get(symbol)
 
 
+@st.cache_data(ttl=ALPACA_CACHE_TTL_SEC, show_spinner=False)
+def fetch_alpaca_intraday_bars_batch(
+    symbols: tuple[str, ...],
+    start_iso: str,
+    end_iso: str,
+    realtime: bool = True,
+) -> dict[str, pd.DataFrame]:
+    clean_symbols = tuple(dict.fromkeys(str(symbol or "").upper().strip() for symbol in symbols if str(symbol or "").strip()))
+    if not clean_symbols or not ALPACA_KEY or not ALPACA_SECRET:
+        return {}
+
+    params = {
+        "symbols": ",".join(clean_symbols),
+        "timeframe": "1Min",
+        "start": start_iso,
+        "end": end_iso,
+        "limit": 10000,
+        "adjustment": "split",
+        "feed": "sip",
+        "sort": "asc",
+    }
+
+    bars_by_symbol: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in clean_symbols}
+    page_token = None
+    try:
+        for _ in range(MAX_BARS_PAGES):
+            request_params = params.copy()
+            if page_token:
+                request_params["page_token"] = page_token
+            resp = requests.get(
+                f"{ALPACA_BASE}/v2/stocks/bars",
+                headers=ALPACA_HEADERS,
+                params=request_params,
+                timeout=DATA_TIMEOUT_SEC,
+            )
+            if resp.status_code in {401, 403}:
+                LOGGER.info("Alpaca intraday auth/permission failed: %s", resp.status_code)
+                return {}
+            resp.raise_for_status()
+            payload = resp.json()
+            raw_bars = payload.get("bars") or {}
+            if isinstance(raw_bars, dict):
+                for symbol, rows in raw_bars.items():
+                    symbol_key = str(symbol).upper()
+                    if isinstance(rows, list):
+                        bars_by_symbol.setdefault(symbol_key, []).extend(rows)
+            page_token = payload.get("next_page_token")
+            if not page_token:
+                break
+        if page_token:
+            LOGGER.info("Alpaca intraday pagination stopped after %s pages.", MAX_BARS_PAGES)
+    except Exception as exc:
+        LOGGER.info("Alpaca intraday batch failed: %s", exc)
+        return {}
+
+    out: dict[str, pd.DataFrame] = {}
+    source_label = f"{alpaca_mode_label(realtime)} 1Min"
+    for symbol, rows in bars_by_symbol.items():
+        if not rows:
+            continue
+        normalized = normalize_ohlcv(pd.DataFrame(rows), source_label)
+        if normalized is not None and len(normalized) >= 2:
+            out[symbol] = normalized
+    return out
+
+
+def intraday_scan_window(cfg: ScanConfig, alpaca_realtime: bool) -> tuple[datetime, datetime]:
+    end_utc = alpaca_sip_end_utc(alpaca_realtime)
+    end_et = end_utc.astimezone(MARKET_TZ)
+    open_hour = 4 if cfg.momentum_include_extended_hours else 9
+    open_minute = 0 if cfg.momentum_include_extended_hours else 30
+    session_start_et = end_et.replace(hour=open_hour, minute=open_minute, second=0, microsecond=0)
+    if end_et < session_start_et:
+        lookback = max(
+            90,
+            int(cfg.momentum_volume_baseline_minutes)
+            + int(cfg.momentum_confirm_minutes)
+            + int(cfg.momentum_fast_minutes)
+            + 30,
+        )
+        session_start_et = end_et - timedelta(minutes=lookback)
+    return session_start_et.astimezone(timezone.utc), end_utc
+
+
+def load_momentum_bars(
+    ticker_infos: list[dict[str, Any]],
+    cfg: ScanConfig,
+    data_source: str,
+    alpaca_realtime: bool,
+    progress_box: Any,
+    status_box: Any,
+    scan_started_at: datetime | None = None,
+) -> dict[str, pd.DataFrame]:
+    bars: dict[str, pd.DataFrame] = {}
+    if data_source not in {DATA_SOURCE_ALPACA_SIP, DATA_SOURCE_AUTO}:
+        status_box.caption(f"Импульс + объём работает только через Alpaca SIP 1Min.{elapsed_scan_suffix(scan_started_at)}")
+        progress_box.progress(0.7)
+        return bars
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        status_box.caption(f"Alpaca SIP 1Min недоступен: нет ALPACA_KEY / ALPACA_SECRET.{elapsed_scan_suffix(scan_started_at)}")
+        progress_box.progress(0.7)
+        return bars
+
+    symbols = [str(item["ticker"]).upper() for item in ticker_infos]
+    start_utc, end_utc = intraday_scan_window(cfg, alpaca_realtime)
+    start_iso = rfc3339_utc(start_utc)
+    end_iso = rfc3339_utc(end_utc)
+    batches = list(chunks(symbols, 25))
+    alpaca_label = alpaca_mode_label(alpaca_realtime)
+    for idx, batch in enumerate(batches, start=1):
+        status_box.caption(
+            f"Загружаю {alpaca_label} 1Min · пачка {idx}/{len(batches)} · готово: {len(bars)}"
+            f"{elapsed_scan_suffix(scan_started_at)}"
+        )
+        bars.update(fetch_alpaca_intraday_bars_batch(tuple(batch), start_iso, end_iso, alpaca_realtime))
+        progress_box.progress(0.7 * idx / max(len(batches), 1))
+
+    progress_box.progress(0.7)
+    return bars
+
+
 # ── SIGNAL LOGIC ──────────────────────────────────────────────────
 @dataclass(frozen=True)
 class BaseImpulse:
@@ -1476,6 +1641,39 @@ class SpringSetup:
     volume_mult: float
     from_low_pct: float
     move_pct: float
+
+
+@dataclass(frozen=True)
+class MomentumPulse:
+    direction: str
+    price: float
+    move_5m_pct: float
+    move_15m_pct: float
+    rvol_5m: float
+    rvol_15m: float
+    volume_5m: float
+    volume_15m: float
+    baseline_5m: float
+    baseline_15m: float
+    dollar_5m: float
+    dollar_15m: float
+    dollar_day: float
+    vwap: float
+    vwap_distance_pct: float
+    ema9: float
+    ema20: float
+    bar_age_minutes: float
+    breakout_confirmed: bool
+    vwap_aligned: bool
+    ema_aligned: bool
+    directional_bars_confirmed: bool
+    early_volume_wave: bool
+    volume_acceleration: float
+    prior_fast_rvol: float
+    recent_prior_max_rvol: float
+    fast_volume_share_pct: float
+    multi_minute_volume_confirmed: bool
+    quality_checks: int
 
 
 def build_base_impulse(df: pd.DataFrame, cfg: ScanConfig) -> BaseImpulse | None:
@@ -1732,6 +1930,302 @@ def build_spring_setup(df: pd.DataFrame, cfg: ScanConfig) -> SpringSetup | None:
         volume_mult=volume_mult,
         from_low_pct=from_low_pct,
         move_pct=move_pct,
+    )
+
+
+def momentum_intraday_frame(df: pd.DataFrame, cfg: ScanConfig, reference_time: datetime) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    data = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"]).copy()
+    if data.empty or not isinstance(data.index, pd.DatetimeIndex):
+        return pd.DataFrame()
+
+    index = pd.DatetimeIndex(data.index)
+    if index.tz is None:
+        index = index.tz_localize(timezone.utc)
+    index = index.tz_convert(MARKET_TZ)
+    data.index = index
+
+    ref_ts = pd.Timestamp(reference_time)
+    if ref_ts.tzinfo is None:
+        ref_ts = ref_ts.tz_localize(MARKET_TZ)
+    else:
+        ref_ts = ref_ts.tz_convert(MARKET_TZ)
+    data = data[data.index <= ref_ts + pd.Timedelta(minutes=1)]
+
+    if not cfg.momentum_include_extended_hours:
+        minute_of_day = data.index.hour * 60 + data.index.minute
+        data = data[(minute_of_day >= 9 * 60 + 30) & (minute_of_day < 16 * 60)]
+
+    return data.sort_index()
+
+
+def recent_intraday_window(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
+    if df.empty:
+        return df
+    latest_ts = df.index[-1]
+    cutoff = latest_ts - pd.Timedelta(minutes=max(1, int(minutes)))
+    return df[df.index >= cutoff]
+
+
+def rolling_volume_baseline(prior: pd.DataFrame, window_minutes: int) -> float:
+    if prior.empty:
+        return 0.0
+    volume = pd.to_numeric(prior["Volume"], errors="coerce").fillna(0)
+    volume = volume[volume >= 0]
+    if volume.empty:
+        return 0.0
+
+    window = max(1, int(window_minutes))
+    min_periods = max(2, min(window, max(2, window // 2)))
+    rolling = volume.rolling(window, min_periods=min_periods).sum().dropna()
+    if not rolling.empty:
+        return max(float(rolling.tail(30).median()), 1.0)
+
+    positive = volume[volume > 0]
+    if positive.empty:
+        return 0.0
+    return max(float(positive.tail(max(5, window)).median()) * window, 1.0)
+
+
+def dollar_volume(frame: pd.DataFrame) -> float:
+    if frame.empty:
+        return 0.0
+    close = pd.to_numeric(frame["Close"], errors="coerce").fillna(0)
+    volume = pd.to_numeric(frame["Volume"], errors="coerce").fillna(0)
+    return float((close * volume).sum())
+
+
+def intraday_vwap(df: pd.DataFrame) -> float:
+    if df.empty:
+        return 0.0
+    volume = pd.to_numeric(df["Volume"], errors="coerce").fillna(0)
+    total_volume = float(volume.sum())
+    if total_volume <= 0:
+        return 0.0
+    typical = (
+        pd.to_numeric(df["High"], errors="coerce").fillna(0)
+        + pd.to_numeric(df["Low"], errors="coerce").fillna(0)
+        + pd.to_numeric(df["Close"], errors="coerce").fillna(0)
+    ) / 3
+    return float((typical * volume).sum() / total_volume)
+
+
+def intraday_move_pct(frame: pd.DataFrame, latest_close: float) -> float:
+    if frame.empty:
+        return 0.0
+    start_open = float(frame.iloc[0]["Open"])
+    if start_open <= 0:
+        return 0.0
+    return (latest_close - start_open) / start_open * 100
+
+
+def build_momentum_pulse(
+    df: pd.DataFrame,
+    cfg: ScanConfig,
+    reference_time: datetime,
+) -> MomentumPulse | None:
+    data = momentum_intraday_frame(df, cfg, reference_time)
+    min_bars = max(12, int(cfg.momentum_confirm_minutes))
+    if len(data) < min_bars:
+        return None
+
+    latest_ts = data.index[-1]
+    ref_ts = pd.Timestamp(reference_time)
+    if ref_ts.tzinfo is None:
+        ref_ts = ref_ts.tz_localize(MARKET_TZ)
+    else:
+        ref_ts = ref_ts.tz_convert(MARKET_TZ)
+    bar_age_minutes = max(0.0, (ref_ts - latest_ts).total_seconds() / 60)
+    if bar_age_minutes > cfg.momentum_max_bar_age_minutes:
+        return None
+
+    latest = data.iloc[-1]
+    price = float(latest["Close"])
+    if price <= 0:
+        return None
+
+    fast_window = recent_intraday_window(data, cfg.momentum_fast_minutes)
+    confirm_window = recent_intraday_window(data, cfg.momentum_confirm_minutes)
+    if len(fast_window) < max(3, min(int(cfg.momentum_fast_minutes), 4)):
+        return None
+    if len(confirm_window) < max(8, int(cfg.momentum_confirm_minutes * 0.55)):
+        return None
+
+    last_five = data.tail(5)
+    if (pd.to_numeric(last_five["Volume"], errors="coerce").fillna(0) > 0).sum() < 3:
+        return None
+
+    baseline_start = fast_window.index[0]
+    baseline_minutes = max(int(cfg.momentum_volume_baseline_minutes), int(cfg.momentum_confirm_minutes) * 2)
+    prior = data[data.index < baseline_start].tail(baseline_minutes)
+    if len(prior) < max(8, int(cfg.momentum_fast_minutes) * 2):
+        return None
+
+    volume_5m = float(pd.to_numeric(fast_window["Volume"], errors="coerce").fillna(0).sum())
+    volume_15m = float(pd.to_numeric(confirm_window["Volume"], errors="coerce").fillna(0).sum())
+    if volume_5m <= 0 or volume_15m <= 0:
+        return None
+
+    baseline_5m = rolling_volume_baseline(prior, cfg.momentum_fast_minutes)
+    baseline_15m = rolling_volume_baseline(prior, cfg.momentum_confirm_minutes)
+    if baseline_5m <= 0 or baseline_15m <= 0:
+        return None
+
+    rvol_5m = volume_5m / baseline_5m
+    rvol_15m = volume_15m / baseline_15m
+    if rvol_5m < cfg.momentum_volume_mult or rvol_15m < cfg.momentum_confirm_volume_mult:
+        return None
+
+    previous_fast_start = fast_window.index[0] - pd.Timedelta(minutes=max(1, int(cfg.momentum_fast_minutes)))
+    previous_fast = data[(data.index < fast_window.index[0]) & (data.index >= previous_fast_start)]
+    previous_fast_volume = float(pd.to_numeric(previous_fast["Volume"], errors="coerce").fillna(0).sum()) if not previous_fast.empty else 0.0
+    prior_fast_rvol = previous_fast_volume / baseline_5m if baseline_5m > 0 else 0.0
+    volume_acceleration_base = max(previous_fast_volume, baseline_5m / max(cfg.momentum_volume_mult, 1.0), 1.0)
+    volume_acceleration = volume_5m / volume_acceleration_base
+    recent_prior_start = fast_window.index[0] - pd.Timedelta(minutes=20)
+    recent_prior = data[(data.index < fast_window.index[0]) & (data.index >= recent_prior_start)]
+    recent_prior_max_rvol = 0.0
+    if not recent_prior.empty:
+        prior_volume_series = pd.to_numeric(recent_prior["Volume"], errors="coerce").fillna(0)
+        prior_rolling = prior_volume_series.rolling(
+            max(1, int(cfg.momentum_fast_minutes)),
+            min_periods=max(1, min(2, int(cfg.momentum_fast_minutes))),
+        ).sum().dropna()
+        if not prior_rolling.empty and baseline_5m > 0:
+            recent_prior_max_rvol = float(prior_rolling.max()) / baseline_5m
+    fast_volume_share_pct = volume_5m / volume_15m * 100 if volume_15m > 0 else 0.0
+    baseline_1m = baseline_5m / max(1, int(cfg.momentum_fast_minutes))
+    last_three_volume = pd.to_numeric(data.tail(3)["Volume"], errors="coerce").fillna(0)
+    multi_minute_volume_confirmed = bool((last_three_volume >= baseline_1m * 1.5).sum() >= 2)
+    early_volume_wave = (
+        volume_acceleration >= cfg.momentum_min_volume_acceleration
+        and prior_fast_rvol <= cfg.momentum_max_prior_fast_rvol
+        and recent_prior_max_rvol <= cfg.momentum_max_recent_prior_rvol
+        and fast_volume_share_pct >= cfg.momentum_min_fast_volume_share_pct
+        and multi_minute_volume_confirmed
+    )
+    if cfg.momentum_require_new_volume_wave and not early_volume_wave:
+        return None
+
+    move_5m = intraday_move_pct(fast_window, price)
+    move_15m = intraday_move_pct(confirm_window, price)
+    if cfg.momentum_max_confirm_move_pct > 0 and abs(move_15m) > cfg.momentum_max_confirm_move_pct:
+        return None
+    long_hit = move_5m >= cfg.momentum_min_fast_move_pct and move_15m >= cfg.momentum_min_confirm_move_pct
+    short_hit = move_5m <= -cfg.momentum_min_fast_move_pct and move_15m <= -cfg.momentum_min_confirm_move_pct
+    if cfg.momentum_direction == MOMENTUM_DIR_UP:
+        short_hit = False
+    elif cfg.momentum_direction == MOMENTUM_DIR_DOWN:
+        long_hit = False
+    if not (long_hit or short_hit):
+        return None
+
+    direction = MOMENTUM_DIR_UP if long_hit and abs(move_5m) >= abs(move_15m) * 0.35 else MOMENTUM_DIR_DOWN
+    if long_hit and not short_hit:
+        direction = MOMENTUM_DIR_UP
+    elif short_hit and not long_hit:
+        direction = MOMENTUM_DIR_DOWN
+
+    dollar_5m = dollar_volume(fast_window)
+    dollar_15m = dollar_volume(confirm_window)
+    dollar_day = dollar_volume(data)
+    if dollar_5m < cfg.momentum_min_5m_dollar_volume:
+        return None
+    if dollar_15m < cfg.momentum_min_15m_dollar_volume:
+        return None
+    if dollar_day < cfg.momentum_min_day_dollar_volume:
+        return None
+
+    vwap = intraday_vwap(data)
+    if vwap <= 0:
+        return None
+    vwap_distance_pct = (price - vwap) / vwap * 100
+    if cfg.momentum_max_vwap_distance_pct > 0 and abs(vwap_distance_pct) > cfg.momentum_max_vwap_distance_pct:
+        return None
+
+    close_series = pd.to_numeric(data["Close"], errors="coerce").dropna()
+    if close_series.empty:
+        return None
+    ema9 = float(close_series.ewm(span=9, adjust=False).mean().iloc[-1])
+    ema20 = float(close_series.ewm(span=20, adjust=False).mean().iloc[-1])
+    vwap_aligned = price >= vwap if direction == MOMENTUM_DIR_UP else price <= vwap
+    ema_aligned = ema9 >= ema20 if direction == MOMENTUM_DIR_UP else ema9 <= ema20
+    if cfg.momentum_require_vwap_side and not vwap_aligned:
+        return None
+    if cfg.momentum_require_ema_trend and not ema_aligned:
+        return None
+
+    recent_directional = data.tail(5)
+    green_count = int((pd.to_numeric(recent_directional["Close"], errors="coerce") > pd.to_numeric(recent_directional["Open"], errors="coerce")).sum())
+    red_count = int((pd.to_numeric(recent_directional["Close"], errors="coerce") < pd.to_numeric(recent_directional["Open"], errors="coerce")).sum())
+    fast_low = float(pd.to_numeric(fast_window["Low"], errors="coerce").min())
+    fast_high = float(pd.to_numeric(fast_window["High"], errors="coerce").max())
+    fast_span = fast_high - fast_low
+    if fast_span <= 0:
+        return None
+    close_position = (price - fast_low) / fast_span * 100
+    if direction == MOMENTUM_DIR_UP:
+        directional_bars_confirmed = green_count >= 3 and close_position >= 60
+    else:
+        directional_bars_confirmed = red_count >= 3 and close_position <= 40
+
+    prior_20 = data.iloc[:-1].tail(20)
+    breakout_confirmed = False
+    if not prior_20.empty:
+        prior_high = float(pd.to_numeric(prior_20["High"], errors="coerce").max())
+        prior_low = float(pd.to_numeric(prior_20["Low"], errors="coerce").min())
+        if direction == MOMENTUM_DIR_UP and prior_high > 0:
+            breakout_confirmed = price >= prior_high * 1.002
+        elif direction == MOMENTUM_DIR_DOWN and prior_low > 0:
+            breakout_confirmed = price <= prior_low * 0.998
+
+    quality_checks = sum(
+        1
+        for passed in (
+            vwap_aligned,
+            ema_aligned,
+            breakout_confirmed,
+            directional_bars_confirmed,
+            early_volume_wave,
+            abs(vwap_distance_pct) <= 4.0,
+        )
+        if passed
+    )
+    if quality_checks < cfg.momentum_min_quality_checks:
+        return None
+
+    return MomentumPulse(
+        direction=direction,
+        price=price,
+        move_5m_pct=move_5m,
+        move_15m_pct=move_15m,
+        rvol_5m=rvol_5m,
+        rvol_15m=rvol_15m,
+        volume_5m=volume_5m,
+        volume_15m=volume_15m,
+        baseline_5m=baseline_5m,
+        baseline_15m=baseline_15m,
+        dollar_5m=dollar_5m,
+        dollar_15m=dollar_15m,
+        dollar_day=dollar_day,
+        vwap=vwap,
+        vwap_distance_pct=vwap_distance_pct,
+        ema9=ema9,
+        ema20=ema20,
+        bar_age_minutes=bar_age_minutes,
+        breakout_confirmed=breakout_confirmed,
+        vwap_aligned=vwap_aligned,
+        ema_aligned=ema_aligned,
+        directional_bars_confirmed=directional_bars_confirmed,
+        early_volume_wave=early_volume_wave,
+        volume_acceleration=volume_acceleration,
+        prior_fast_rvol=prior_fast_rvol,
+        recent_prior_max_rvol=recent_prior_max_rvol,
+        fast_volume_share_pct=fast_volume_share_pct,
+        multi_minute_volume_confirmed=multi_minute_volume_confirmed,
+        quality_checks=quality_checks,
     )
 
 
@@ -2036,6 +2530,113 @@ def score_spring(setup: SpringSetup, cfg: ScanConfig) -> int:
     return int(round(break_score + reclaim_score + close_score + volume_score + low_score))
 
 
+def score_momentum_pulse(setup: MomentumPulse, cfg: ScanConfig) -> int:
+    volume_score = min(
+        50.0,
+        setup.rvol_5m / max(cfg.momentum_volume_mult, 0.1) * 30.0
+        + setup.rvol_15m / max(cfg.momentum_confirm_volume_mult, 0.1) * 14.0
+        + setup.volume_acceleration / max(cfg.momentum_min_volume_acceleration, 0.1) * 6.0,
+    )
+    move_score = min(
+        12.0,
+        abs(setup.move_5m_pct) / max(cfg.momentum_min_fast_move_pct, 0.1) * 5.0
+        + abs(setup.move_15m_pct) / max(cfg.momentum_min_confirm_move_pct, 0.1) * 7.0,
+    )
+    liquidity_score = min(
+        20.0,
+        setup.dollar_5m / max(cfg.momentum_min_5m_dollar_volume, 1) * 7.0
+        + setup.dollar_15m / max(cfg.momentum_min_15m_dollar_volume, 1) * 8.0
+        + setup.dollar_day / max(cfg.momentum_min_day_dollar_volume, 1) * 5.0,
+    )
+    freshness_score = max(0.0, min(8.0, 8.0 - setup.bar_age_minutes / max(cfg.momentum_max_bar_age_minutes, 1) * 3.0))
+    quality_score = 0.0
+    if setup.vwap_aligned:
+        quality_score += 4.0
+    if setup.ema_aligned:
+        quality_score += 4.0
+    if setup.breakout_confirmed:
+        quality_score += 4.0
+    if setup.directional_bars_confirmed:
+        quality_score += 3.0
+    if setup.early_volume_wave:
+        quality_score += 3.0
+    if abs(setup.vwap_distance_pct) <= 6.0:
+        quality_score += 1.0
+    quality_score = min(15.0, quality_score)
+    return int(round(max(0.0, min(100.0, volume_score + liquidity_score + move_score + freshness_score + quality_score))))
+
+
+def detect_momentum_signal(
+    ticker_info: dict[str, Any],
+    df: pd.DataFrame,
+    cfg: ScanConfig,
+    reference_time: datetime,
+) -> dict[str, Any] | None:
+    setup = build_momentum_pulse(df, cfg, reference_time)
+    if setup is None:
+        return None
+
+    price = setup.price
+    if price < cfg.min_price or price > cfg.max_price:
+        return None
+
+    score = score_momentum_pulse(setup, cfg)
+    if score < cfg.momentum_min_score:
+        return None
+
+    chart_df = momentum_intraday_frame(df, cfg, reference_time)
+    direction_word = "ВВЕРХ" if setup.direction == MOMENTUM_DIR_UP else "ВНИЗ"
+    direction_arrow = "↑" if setup.direction == MOMENTUM_DIR_UP else "↓"
+    source = df.attrs.get("source", "")
+
+    return {
+        "_sig": SIG_MOMENTUM,
+        "_rvol": setup.rvol_5m,
+        "_score": score,
+        "_width": abs(setup.move_15m_pct),
+        "_gap": setup.vwap_distance_pct,
+        "_move_pct": setup.move_5m_pct,
+        "_momentum_direction": setup.direction,
+        "_momentum_rvol_15m": setup.rvol_15m,
+        "_momentum_move_15m": setup.move_15m_pct,
+        "_momentum_bar_age": setup.bar_age_minutes,
+        "_momentum_volume_acceleration": setup.volume_acceleration,
+        "_momentum_prior_fast_rvol": setup.prior_fast_rvol,
+        "_momentum_recent_prior_max_rvol": setup.recent_prior_max_rvol,
+        "_momentum_fast_volume_share_pct": setup.fast_volume_share_pct,
+        "_momentum_multi_minute_volume": setup.multi_minute_volume_confirmed,
+        "_momentum_quality_checks": setup.quality_checks,
+        "_chart_payload": pattern_chart_payload(
+            chart_df,
+            cfg.momentum_confirm_minutes,
+            visible_candles=MINUTE_CHART_VISIBLE_CANDLES,
+            band_days=0,
+            timeframe="M",
+            show_default_band=False,
+        ),
+        "_scanner": cfg.scanner_mode,
+        "Тикер": ticker_info["ticker"],
+        "Название": (ticker_info.get("name") or "")[:34],
+        "Биржа": ticker_info.get("exchange", ""),
+        "Сигнал": f"{SIGNAL_LABELS[SIG_MOMENTUM]} {direction_word}",
+        "Цена": round(price, 4),
+        "Выход %": f"{setup.move_5m_pct:+.1f}%",
+        "Гэп сегодня": f"VWAP {setup.vwap_distance_pct:+.1f}%",
+        "Объём ×": round(setup.rvol_5m, 2),
+        "RVOL 15м": round(setup.rvol_15m, 2),
+        "Объём": int(setup.volume_5m),
+        "Объём 15м": int(setup.volume_15m),
+        "Движение 15м": f"{setup.move_15m_pct:+.1f}%",
+        "$ 5м": int(setup.dollar_5m),
+        "$ 15м": int(setup.dollar_15m),
+        "Долларовый объём": int(setup.dollar_5m),
+        "Капитализация": ticker_info.get("market_cap") or 0,
+        "Балл": score,
+        "Источник": source,
+        "Время": f"{now_et_str()} {direction_arrow}",
+    }
+
+
 def detect_signal(
     ticker_info: dict[str, Any],
     df: pd.DataFrame,
@@ -2279,7 +2880,10 @@ def scan_market(
         status_box.caption(f"В этой пачке все тикеры скрыты на 7 часов.{elapsed_scan_suffix(scan_started_at)}")
         return []
 
-    bars = load_bars(ticker_infos, cfg, data_source, alpaca_realtime, progress_box, status_box, scan_started_at)
+    if cfg.scanner_mode == SCANNER_MOMENTUM:
+        bars = load_momentum_bars(ticker_infos, cfg, data_source, alpaca_realtime, progress_box, status_box, scan_started_at)
+    else:
+        bars = load_bars(ticker_infos, cfg, data_source, alpaca_realtime, progress_box, status_box, scan_started_at)
     today = now_et().date()
 
     for idx, ticker_info in enumerate(ticker_infos, start=1):
@@ -2296,7 +2900,10 @@ def scan_market(
             if history is None:
                 st.session_state.stats["checked"] = idx
                 continue
-            row = detect_signal(ticker_info, history, cfg, today)
+            if cfg.scanner_mode == SCANNER_MOMENTUM:
+                row = detect_momentum_signal(ticker_info, history, cfg, scan_started_at)
+            else:
+                row = detect_signal(ticker_info, history, cfg, today)
         except Exception as exc:
             LOGGER.exception("Scan failed for %s", ticker)
             remember_error(f"{ticker}: {exc}")
@@ -2344,7 +2951,8 @@ def send_telegram(message: str) -> bool:
 
 
 def notification_key(row: dict[str, Any]) -> str:
-    return f"{now_et().date().isoformat()}:{row.get('_scanner', '')}:{row['Тикер']}:{row.get('_sig') or row.get('Сигнал', '')}"
+    direction = row.get("_momentum_direction", "")
+    return f"{now_et().date().isoformat()}:{row.get('_scanner', '')}:{row['Тикер']}:{row.get('_sig') or row.get('Сигнал', '')}:{direction}"
 
 
 def notify_signal(row: dict[str, Any]) -> None:
@@ -2532,6 +3140,8 @@ def result_matches_active_patterns(row: dict[str, Any], cfg: ScanConfig) -> bool
         return signal_code == SIG_VCP
     if cfg.scanner_mode == SCANNER_SPRING:
         return signal_code == SIG_SPRING
+    if cfg.scanner_mode == SCANNER_MOMENTUM:
+        return signal_code == SIG_MOMENTUM
     return False
 
 
@@ -2624,6 +3234,13 @@ def format_market_cap_cell(value: Any) -> str:
 
 def format_signal_cell(row: pd.Series) -> str:
     sig = str(row.get("_sig", ""))
+    if sig == SIG_MOMENTUM:
+        direction = str(row.get("_momentum_direction", ""))
+        if direction == MOMENTUM_DIR_UP:
+            return "Импульс ↑"
+        if direction == MOMENTUM_DIR_DOWN:
+            return "Импульс ↓"
+        return "Импульс"
     if sig in SIGNAL_SHORT_LABELS:
         return SIGNAL_SHORT_LABELS[sig]
     raw = str(row.get("Сигнал", ""))
@@ -2642,7 +3259,7 @@ def display_column_config(base_pattern: bool = False) -> dict[str, Any]:
             "RVOL",
             width="small",
             format="%.2fx",
-            help="Сегодняшний объём / выбранная база сравнения. В режиме RW это средний объём за N дней; во Взрыве базы это максимум прошлых свечей.",
+            help="Объём / выбранная база сравнения. В RW это средний дневной объём; во Взрыве базы это максимум прошлых свечей; в Pulse это объём последних минут против внутридневной нормы.",
         ),
         "Движение %": st.column_config.NumberColumn("Движение %", width="small", format="%.1f%%"),
         "Объём": st.column_config.NumberColumn("Объём", width="medium"),
@@ -2712,7 +3329,7 @@ def render_results_summary(rows: list[dict[str, Any]]) -> None:
     total_dollar_volume = sum(safe_float(row.get("Долларовый объём")) for row in rows)
     latest_time = str(rows[0].get("Время", now_et_str())) if rows else now_et_str()
     count_parts = []
-    for code in (SIG_BASE, SIG_RVOL, SIG_VCP, SIG_SPRING):
+    for code in (SIG_BASE, SIG_RVOL, SIG_VCP, SIG_SPRING, SIG_MOMENTUM):
         signal_count = sum(1 for row in rows if str(row.get("_sig", "")) == code)
         if signal_count:
             count_parts.append(f"{SIGNAL_SHORT_LABELS.get(code, code)} {signal_count}")
@@ -2766,7 +3383,13 @@ def render_signal_gallery(rows: list[dict[str, Any]], alpaca_realtime: bool = Tr
     )
 
     minute_bars: dict[str, pd.DataFrame] = {}
-    minute_symbols = list(dict.fromkeys(str(row.get("Тикер", "")).upper().strip() for row in cards if row.get("Тикер")))
+    minute_symbols = list(
+        dict.fromkeys(
+            str(row.get("Тикер", "")).upper().strip()
+            for row in cards
+            if row.get("Тикер") and row.get("_scanner") != SCANNER_MOMENTUM
+        )
+    )
     for batch in chunks(minute_symbols, 25):
         minute_bars.update(fetch_alpaca_minute_bars_batch(tuple(batch), MINUTE_CHART_VISIBLE_CANDLES, alpaca_realtime))
 
@@ -2775,13 +3398,18 @@ def render_signal_gallery(rows: list[dict[str, Any]], alpaca_realtime: bool = Tr
         ticker_key = ticker_raw.upper().strip()
         signal_raw = str(row.get("_sig", ""))
         scanner_raw = str(row.get("_scanner", ""))
+        is_momentum = scanner_raw == SCANNER_MOMENTUM
         key_base = re.sub(r"[^A-Za-z0-9_]+", "_", f"{scanner_raw}_{ticker_raw}_{signal_raw}_{idx}")
         daily_payload = row.get("_chart_payload") or {}
         daily_svg = pattern_chart_svg(daily_payload)
         if not daily_svg:
             continue
         ticker = html.escape(str(row.get("Тикер", "")))
-        signal = html.escape(SIGNAL_SHORT_LABELS.get(str(row.get("_sig", "")), str(row.get("Сигнал", ""))))
+        if is_momentum:
+            signal_text = "Импульс ↑" if row.get("_momentum_direction") == MOMENTUM_DIR_UP else "Импульс ↓"
+        else:
+            signal_text = SIGNAL_SHORT_LABELS.get(str(row.get("_sig", "")), str(row.get("Сигнал", "")))
+        signal = html.escape(signal_text)
         price = html.escape(format_price_cell(row.get("Цена")))
         rw = html.escape(format_rw_cell(row.get("_rvol")))
         move = html.escape(format_percent_cell(row.get("_move_pct")))
@@ -2825,35 +3453,43 @@ def render_signal_gallery(rows: list[dict[str, Any]], alpaca_realtime: bool = Tr
                         st.toast(f"Скрыто на {DISMISS_TTL_HOURS} часов: {hidden}")
                     rerun_app()
 
-            minute_svg = ""
-            minute_df = minute_bars.get(ticker_key)
-            if minute_df is not None:
-                minute_svg = pattern_chart_svg(
-                    pattern_chart_payload(
-                        minute_df,
-                        MINUTE_CHART_VISIBLE_CANDLES,
-                        visible_candles=MINUTE_CHART_VISIBLE_CANDLES,
-                        timeframe="M",
-                        band_days=0,
-                        show_default_band=False,
+            minute_block = ""
+            if not is_momentum:
+                minute_svg = ""
+                minute_df = minute_bars.get(ticker_key)
+                if minute_df is not None:
+                    minute_svg = pattern_chart_svg(
+                        pattern_chart_payload(
+                            minute_df,
+                            MINUTE_CHART_VISIBLE_CANDLES,
+                            visible_candles=MINUTE_CHART_VISIBLE_CANDLES,
+                            timeframe="M",
+                            band_days=0,
+                            show_default_band=False,
+                        )
                     )
-                )
 
-            minute_block = (
-                f'<div class="pattern-chart-panel"><div class="pattern-chart-panel-title">Минутка · {MINUTE_CHART_VISIBLE_CANDLES} баров</div>'
-                f'<div class="pattern-chart-svg">{minute_svg}</div></div>'
-                if minute_svg
-                else '<div class="pattern-chart-panel"><div class="desk-muted">Минутные свечи Alpaca сейчас недоступны.</div></div>'
+                minute_block = (
+                    f'<div class="pattern-chart-panel"><div class="pattern-chart-panel-title">Минутка · {MINUTE_CHART_VISIBLE_CANDLES} баров</div>'
+                    f'<div class="pattern-chart-svg">{minute_svg}</div></div>'
+                    if minute_svg
+                    else '<div class="pattern-chart-panel"><div class="desk-muted">Минутные свечи Alpaca сейчас недоступны.</div></div>'
+                )
+            chart_title = (
+                f"Pulse 1Min · до {MINUTE_CHART_VISIBLE_CANDLES} баров"
+                if is_momentum
+                else f"Дневка · {CHART_VISIBLE_CANDLES} баров"
             )
             if daily_svg:
+                extra_panel = minute_block if minute_block else ""
                 st.markdown(
                     f"""
                     <div class="pattern-chart-stack">
                         <div class="pattern-chart-panel">
-                            <div class="pattern-chart-panel-title">Дневка · {CHART_VISIBLE_CANDLES} баров</div>
+                            <div class="pattern-chart-panel-title">{html.escape(chart_title)}</div>
                             <div class="pattern-chart-svg">{daily_svg}</div>
                         </div>
-                        {minute_block}
+                        {extra_panel}
                     </div>
                     """,
                     unsafe_allow_html=True,
@@ -2917,7 +3553,7 @@ with st.sidebar:
         """
         <div class="sidebar-brand">
             <div class="sidebar-brand-title">PR Screener</div>
-            <div class="sidebar-brand-subtitle">Взрыв базы · RW · VCP · Spring</div>
+            <div class="sidebar-brand-subtitle">Взрыв базы · RW · VCP · Spring · Pulse</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -2940,6 +3576,7 @@ with st.sidebar:
     rvol_active = scanner_mode == SCANNER_RVOL
     vcp_active = scanner_mode == SCANNER_VCP
     spring_active = scanner_mode == SCANNER_SPRING
+    momentum_active = scanner_mode == SCANNER_MOMENTUM
     st.caption(SCANNER_HELP[scanner_mode])
 
     st.markdown('<div class="desk-section-title">Данные</div>', unsafe_allow_html=True)
@@ -2979,6 +3616,8 @@ with st.sidebar:
         )
         if not (ALPACA_KEY and ALPACA_SECRET):
             st.warning("Для Alpaca SIP нужны ALPACA_KEY и ALPACA_SECRET в secrets.")
+    if momentum_active:
+        st.caption("Pulse использует только Alpaca SIP 1Min. Yahoo в этом режиме не нужен.")
     if data_source == DATA_SOURCE_AUTO and yf is None:
         st.warning("yfinance не установлен: Yahoo Finance недоступен как резерв.")
 
@@ -2988,7 +3627,7 @@ with st.sidebar:
         "Макс. цена для списка рынка",
         min_value=0.1,
         max_value=500.0,
-        value=20.0,
+        value=50.0 if momentum_active else 20.0,
         step=1.0,
         help="Фильтр цены применяется ещё на этапе списка рынка.",
     )
@@ -3019,10 +3658,10 @@ with st.sidebar:
         100_000_000,
         250_000,
         50_000,
-        disabled=base_impulse_only,
-        help="Для RW, VCP и Spring фильтрует слишком тонкие акции. Для Взрыва из базы выключено, чтобы старый режим работал как раньше.",
+        disabled=base_impulse_only or momentum_active,
+        help="Для RW, VCP и Spring фильтрует слишком тонкие акции. Для Взрыва из базы выключено, чтобы старый режим работал как раньше. Для Pulse есть отдельные 5м/15м фильтры.",
     )
-    min_dollar_volume = 0 if base_impulse_only else int(min_dollar_volume_input)
+    min_dollar_volume = 0 if base_impulse_only or momentum_active else int(min_dollar_volume_input)
 
     st.markdown('<div class="desk-section-title">Взрыв из базы</div>', unsafe_allow_html=True)
     base_impulse_enabled = base_impulse_only
@@ -3125,6 +3764,203 @@ with st.sidebar:
     spring_volume_mult = st.slider("Объём выше среднего ×", 1.0, 5.0, 1.2, 0.1, disabled=not spring_active)
     spring_max_from_low_pct = st.slider("Цена не дальше от дна периода (%)", 5.0, 80.0, 30.0, 1.0, disabled=not spring_active)
 
+    st.markdown('<div class="desk-section-title">Pulse · что-то произошло</div>', unsafe_allow_html=True)
+    momentum_direction_label = st.selectbox(
+        "Направление импульса",
+        list(MOMENTUM_DIRECTION_LABELS.keys()),
+        index=0,
+        disabled=not momentum_active,
+        help="По умолчанию ищем и резкий рост, и резкое падение. Это режим события: сначала поймать интерес, дальше ты сам решаешь направление.",
+    )
+    momentum_direction = MOMENTUM_DIRECTION_LABELS[momentum_direction_label]
+    momentum_col_1, momentum_col_2 = st.columns(2)
+    with momentum_col_1:
+        momentum_fast_minutes = st.slider(
+            "Быстрый импульс, минут",
+            3,
+            10,
+            3,
+            1,
+            disabled=not momentum_active,
+            help="Короткое окно старта: здесь Pulse ищет самый первый всплеск объёма.",
+        )
+        momentum_min_fast_move_pct = st.slider(
+            "Мин. движение за быстрое окно (%)",
+            0.3,
+            10.0,
+            0.7,
+            0.1,
+            disabled=not momentum_active,
+            help="Движение не главное, но оно должно подтверждать, что повышенный объём реально двигает цену.",
+        )
+        momentum_volume_mult = st.slider(
+            "Объём быстрого окна выше нормы ×",
+            1.5,
+            20.0,
+            6.0,
+            0.5,
+            disabled=not momentum_active,
+            help="Главный фильтр Pulse. 6x значит: текущий объём должен быть минимум в шесть раз выше внутридневной нормы.",
+        )
+        momentum_min_5m_dollar_volume = st.number_input(
+            "Мин. $ объём быстрого окна",
+            0,
+            50_000_000,
+            500_000,
+            50_000,
+            disabled=not momentum_active,
+        )
+    with momentum_col_2:
+        momentum_confirm_minutes = st.slider(
+            "Подтверждение, минут",
+            10,
+            30,
+            10,
+            1,
+            disabled=not momentum_active,
+            help="Короткое подтверждение старта, чтобы не ловить одиночный случайный принт.",
+        )
+        momentum_min_confirm_move_pct = st.slider(
+            "Мин. движение за подтверждение (%)",
+            0.5,
+            15.0,
+            1.2,
+            0.1,
+            disabled=not momentum_active,
+        )
+        momentum_confirm_volume_mult = st.slider(
+            "Объём подтверждения выше нормы ×",
+            1.2,
+            15.0,
+            3.0,
+            0.2,
+            disabled=not momentum_active,
+        )
+        momentum_min_15m_dollar_volume = st.number_input(
+            "Мин. $ объём подтверждения",
+            0,
+            100_000_000,
+            1_250_000,
+            50_000,
+            disabled=not momentum_active,
+        )
+    momentum_volume_baseline_minutes = st.slider(
+        "Норму объёма считать по предыдущим минутам",
+        20,
+        120,
+        60,
+        5,
+        disabled=not momentum_active,
+        help="Берём предыдущий внутридневной участок и сравниваем с ним текущий всплеск. Чем больше окно, тем спокойнее фильтр.",
+    )
+    momentum_min_day_dollar_volume = st.number_input(
+        "Мин. $ объём с начала сессии",
+        0,
+        200_000_000,
+        3_000_000,
+        100_000,
+        disabled=not momentum_active,
+    )
+    momentum_quality_col_1, momentum_quality_col_2 = st.columns(2)
+    with momentum_quality_col_1:
+        momentum_max_bar_age_minutes = st.slider(
+            "Свежесть последней минутки, мин",
+            1,
+            15,
+            2,
+            1,
+            disabled=not momentum_active,
+            help="Если последняя минутная свеча старше этого значения, тикер не считается свежим.",
+        )
+        momentum_max_vwap_distance_pct = st.slider(
+            "Не дальше от VWAP (%)",
+            0.0,
+            30.0,
+            5.0,
+            0.5,
+            disabled=not momentum_active,
+            help="Защита от слишком позднего входа: если цена уже очень далеко от VWAP, сигнал отбрасывается. 0 выключает фильтр.",
+        )
+        momentum_min_score = st.slider("Мин. балл Pulse", 50, 95, 85, 5, disabled=not momentum_active)
+        momentum_min_quality_checks = st.slider(
+            "Мин. подтверждений качества",
+            2,
+            6,
+            3,
+            1,
+            disabled=not momentum_active,
+            help="Дополнительный отсев мусора: VWAP, EMA 9/20, пробой 20 минут, направленные свечи, новая волна объёма, близость к VWAP.",
+        )
+    with momentum_quality_col_2:
+        momentum_require_new_volume_wave = st.toggle(
+            "Требовать новую волну объёма",
+            value=True,
+            disabled=not momentum_active,
+            help="Главная защита от поздних сигналов: текущие минуты должны быть заметно сильнее предыдущего такого же окна.",
+        )
+        momentum_min_volume_acceleration = st.slider(
+            "Ускорение объёма к прошлому окну ×",
+            1.0,
+            10.0,
+            2.0,
+            0.25,
+            disabled=not momentum_active or not momentum_require_new_volume_wave,
+        )
+        momentum_max_prior_fast_rvol = st.slider(
+            "Макс. RVOL прошлого окна ×",
+            0.5,
+            10.0,
+            2.5,
+            0.25,
+            disabled=not momentum_active or not momentum_require_new_volume_wave,
+            help="Если прошлое окно уже было горячим, это уже не начало движения, а продолжение.",
+        )
+        momentum_max_recent_prior_rvol = st.slider(
+            "Макс. RVOL прошлых 20 минут ×",
+            0.5,
+            12.0,
+            4.0,
+            0.25,
+            disabled=not momentum_active or not momentum_require_new_volume_wave,
+            help="Если за последние 20 минут уже был горячий объём, новый сигнал считается не первой волной.",
+        )
+        momentum_min_fast_volume_share_pct = st.slider(
+            "Доля быстрого объёма в подтверждении (%)",
+            10.0,
+            90.0,
+            40.0,
+            5.0,
+            disabled=not momentum_active or not momentum_require_new_volume_wave,
+            help="Показывает, что основной поток объёма происходит прямо сейчас, а не уже размазан по прошлым минутам.",
+        )
+        momentum_max_confirm_move_pct = st.slider(
+            "Макс. движение подтверждения (%)",
+            0.0,
+            30.0,
+            8.0,
+            0.5,
+            disabled=not momentum_active,
+            help="0 выключает фильтр. По умолчанию не даём Pulse ловить слишком поздний улёт.",
+        )
+        momentum_require_vwap_side = st.toggle(
+            "Требовать сторону VWAP",
+            value=True,
+            disabled=not momentum_active,
+            help="Рост должен быть выше VWAP, падение ниже VWAP. Это отсеивает слабые импульсы против внутридневного потока.",
+        )
+        momentum_require_ema_trend = st.toggle(
+            "Требовать EMA 9/20",
+            value=True,
+            disabled=not momentum_active,
+            help="Рост должен иметь EMA9 выше EMA20, падение EMA9 ниже EMA20. Это снижает шум.",
+        )
+        momentum_include_extended_hours = st.toggle(
+            "Pre/Post-market",
+            value=False,
+            disabled=not momentum_active,
+            help="Включает премаркет и постмаркет в Pulse. На графике эти зоны подсвечиваются серым.",
+        )
+
     st.markdown('<div class="desk-section-title">Цена</div>', unsafe_allow_html=True)
     price_col_1, price_col_2 = st.columns(2)
     with price_col_1:
@@ -3132,11 +3968,11 @@ with st.sidebar:
             "Мин. цена",
             0.01,
             500.0,
-            0.10 if base_impulse_only or rvol_active else 0.50,
+            0.10 if base_impulse_only or rvol_active else (1.50 if momentum_active else 0.50),
             0.01 if base_impulse_only or rvol_active else 0.10,
         )
     with price_col_2:
-        max_price = st.number_input("Макс. цена", 0.01, 500.0, 20.0, 1.0)
+        max_price = st.number_input("Макс. цена", 0.01, 500.0, 50.0 if momentum_active else 20.0, 1.0)
 
     st.markdown('<div class="desk-section-title">Автоматизация</div>', unsafe_allow_html=True)
     send_alerts = st.toggle("Telegram-уведомления", value=False)
@@ -3149,10 +3985,11 @@ with st.sidebar:
     if not telegram_configured:
         st.caption("Тест недоступен: нет TELEGRAM_TOKEN или TELEGRAM_CHAT_ID.")
     auto_scan = st.toggle("Авто-скан", value=False)
+    auto_interval_options = [1, 2, 3, 5, 10, 15, 30, 60] if momentum_active else [5, 10, 15, 30, 60]
     auto_interval = st.select_slider(
         "Интервал",
-        options=[5, 10, 15, 30, 60],
-        value=15,
+        options=auto_interval_options,
+        value=1 if momentum_active else 15,
         format_func=lambda value: f"{value} мин",
         disabled=not auto_scan,
     )
@@ -3198,6 +4035,30 @@ cfg = ScanConfig(
     spring_close_position_pct=spring_close_position_pct,
     spring_volume_mult=spring_volume_mult,
     spring_max_from_low_pct=spring_max_from_low_pct,
+    momentum_direction=momentum_direction,
+    momentum_fast_minutes=momentum_fast_minutes,
+    momentum_confirm_minutes=momentum_confirm_minutes,
+    momentum_volume_baseline_minutes=momentum_volume_baseline_minutes,
+    momentum_min_fast_move_pct=momentum_min_fast_move_pct,
+    momentum_min_confirm_move_pct=momentum_min_confirm_move_pct,
+    momentum_volume_mult=momentum_volume_mult,
+    momentum_confirm_volume_mult=momentum_confirm_volume_mult,
+    momentum_min_5m_dollar_volume=int(momentum_min_5m_dollar_volume),
+    momentum_min_15m_dollar_volume=int(momentum_min_15m_dollar_volume),
+    momentum_min_day_dollar_volume=int(momentum_min_day_dollar_volume),
+    momentum_max_bar_age_minutes=momentum_max_bar_age_minutes,
+    momentum_max_vwap_distance_pct=momentum_max_vwap_distance_pct,
+    momentum_require_vwap_side=momentum_require_vwap_side,
+    momentum_require_ema_trend=momentum_require_ema_trend,
+    momentum_include_extended_hours=momentum_include_extended_hours,
+    momentum_min_score=momentum_min_score,
+    momentum_min_quality_checks=momentum_min_quality_checks,
+    momentum_require_new_volume_wave=momentum_require_new_volume_wave,
+    momentum_min_volume_acceleration=momentum_min_volume_acceleration,
+    momentum_max_prior_fast_rvol=momentum_max_prior_fast_rvol,
+    momentum_max_recent_prior_rvol=momentum_max_recent_prior_rvol,
+    momentum_min_fast_volume_share_pct=momentum_min_fast_volume_share_pct,
+    momentum_max_confirm_move_pct=momentum_max_confirm_move_pct,
 )
 
 telegram_ready = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
@@ -3274,7 +4135,35 @@ elif cfg.scanner_mode == SCANNER_VCP:
             chip("Долларовый объём", format_dollar_cell(cfg.min_dollar_volume)),
         ]
     )
-else:
+elif cfg.scanner_mode == SCANNER_MOMENTUM:
+    direction_chip = {
+        MOMENTUM_DIR_BOTH: "вверх/вниз",
+        MOMENTUM_DIR_UP: "только вверх",
+        MOMENTUM_DIR_DOWN: "только вниз",
+    }.get(cfg.momentum_direction, "вверх/вниз")
+    setup_chips = "".join(
+        [
+            chip("Режим", mode_label, "red"),
+            chip("Биржа", exchange),
+            chip("За прогон", format_int_cell(max_tickers)),
+            chip("Цена", f"${min_price:g}-${max_price:g}"),
+            chip("Направление", direction_chip),
+            chip("Импульс", f"{cfg.momentum_fast_minutes}м · {cfg.momentum_min_fast_move_pct:g}%"),
+            chip("Подтверждение", f"{cfg.momentum_confirm_minutes}м · {cfg.momentum_min_confirm_move_pct:g}%"),
+            chip("RVOL", f"{cfg.momentum_volume_mult:g}x/{cfg.momentum_confirm_volume_mult:g}x"),
+            chip("Старт объёма", f"{cfg.momentum_min_volume_acceleration:g}x" if cfg.momentum_require_new_volume_wave else "выкл"),
+            chip("Доля", f"{cfg.momentum_min_fast_volume_share_pct:g}%"),
+            chip("$ быстро", format_dollar_cell(cfg.momentum_min_5m_dollar_volume)),
+            chip("$ подтв.", format_dollar_cell(cfg.momentum_min_15m_dollar_volume)),
+            chip("Балл", f"от {cfg.momentum_min_score}"),
+            chip("Качество", f"{cfg.momentum_min_quality_checks}/6"),
+            chip("Свежесть", f"до {cfg.momentum_max_bar_age_minutes}м"),
+            chip("Не поздно", f"до {cfg.momentum_max_confirm_move_pct:g}%" if cfg.momentum_max_confirm_move_pct else "выкл"),
+            chip("Сессия", "pre/post" if cfg.momentum_include_extended_hours else "regular"),
+            chip("Alpaca", alpaca_freshness_label, alpaca_freshness_tone),
+        ]
+    )
+elif cfg.scanner_mode == SCANNER_SPRING:
     setup_chips = "".join(
         [
             chip("Режим", mode_label, "green"),
@@ -3293,6 +4182,8 @@ else:
             chip("Долларовый объём", format_dollar_cell(cfg.min_dollar_volume)),
         ]
     )
+else:
+    setup_chips = chip("Режим", mode_label, "blue")
 st.markdown(
     f"""
     <div class="desk-filter-board">
@@ -3383,7 +4274,10 @@ if start_scan or (auto_scan and should_auto_run):
 
     if is_auto_batch:
         all_tickers = all_tickers_full[:AUTO_SCAN_MARKET_LIMIT]
-        auto_signature = f"{exchange}:{max_scan_price:g}:{AUTO_SCAN_MARKET_LIMIT}:{len(all_tickers)}:{data_source}:{int(alpaca_realtime)}"
+        auto_signature = (
+            f"{cfg.scanner_mode}:{exchange}:{max_scan_price:g}:{AUTO_SCAN_MARKET_LIMIT}:{len(all_tickers)}:"
+            f"{data_source}:{int(alpaca_realtime)}:{batch_size}"
+        )
         if st.session_state.auto_scan_signature != auto_signature:
             st.session_state.auto_scan_signature = auto_signature
             st.session_state.auto_scan_offset = 0
