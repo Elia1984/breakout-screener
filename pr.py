@@ -337,12 +337,12 @@ def apply_custom_theme() -> None:
                 border-color: var(--desk-blue) !important;
             }
 
-            div[class*="st-key-chart_card_new_"] {
+            div[class*="st-key-chart_card_"]:has(.pattern-card-new) {
                 border-color: var(--desk-red) !important;
                 box-shadow: 0 12px 32px rgba(180, 35, 24, 0.14) !important;
             }
 
-            div[data-testid="stVerticalBlock"][class*="st-key-chart_card_new_"] {
+            div[data-testid="stVerticalBlock"][class*="st-key-chart_card_"]:has(.pattern-card-new) {
                 border-color: var(--desk-red) !important;
             }
 
@@ -714,7 +714,7 @@ BATCH_SIZE = 120
 ALPACA_SIP_DELAY_MINUTES = 16
 MAX_BARS_PAGES = 25
 AUTO_SCAN_MARKET_LIMIT = 10_000
-CHART_VISIBLE_CANDLES = 100
+CHART_VISIBLE_CANDLES = 60
 MINUTE_CHART_VISIBLE_CANDLES = 500
 DISMISS_TTL_HOURS = 7
 
@@ -3082,11 +3082,7 @@ def dismiss_ticker(ticker: Any) -> str:
     dismissed = active_dismissed_tickers()
     dismissed[symbol] = now_et() + timedelta(hours=DISMISS_TTL_HOURS)
     st.session_state.dismissed_tickers = {key: value.isoformat() for key, value in dismissed.items()}
-    st.session_state.results = [
-        row
-        for row in st.session_state.get("results", [])
-        if normalize_ticker_id(row.get("Тикер")) != symbol
-    ]
+    st.session_state.last_dismissed_ticker = symbol
     return symbol
 
 
@@ -3161,10 +3157,11 @@ def filter_results_for_config(
     cfg: ScanConfig,
     data_source: str | None = None,
     alpaca_realtime: bool = True,
+    hide_dismissed: bool = True,
 ) -> list[dict[str, Any]]:
     active_rows = [row for row in rows if isinstance(row, dict) and result_matches_active_patterns(row, cfg)]
     active_rows = [row for row in active_rows if result_matches_data_mode(row, data_source, alpaca_realtime)]
-    return filter_dismissed_results(active_rows)
+    return filter_dismissed_results(active_rows) if hide_dismissed else active_rows
 
 
 def format_price_cell(value: Any) -> str:
@@ -3393,13 +3390,22 @@ def render_signal_gallery(rows: list[dict[str, Any]], alpaca_realtime: bool = Tr
     for batch in chunks(minute_symbols, 25):
         minute_bars.update(fetch_alpaca_minute_bars_batch(tuple(batch), MINUTE_CHART_VISIBLE_CANDLES, alpaca_realtime))
 
-    for idx, row in enumerate(cards):
+    used_card_keys: set[str] = set()
+    for row in cards:
         ticker_raw = str(row.get("Тикер", ""))
         ticker_key = ticker_raw.upper().strip()
         signal_raw = str(row.get("_sig", ""))
         scanner_raw = str(row.get("_scanner", ""))
         is_momentum = scanner_raw == SCANNER_MOMENTUM
-        key_base = re.sub(r"[^A-Za-z0-9_]+", "_", f"{scanner_raw}_{ticker_raw}_{signal_raw}_{idx}")
+        direction_raw = str(row.get("_momentum_direction", ""))
+        key_seed = f"{scanner_raw}_{ticker_key}_{signal_raw}_{direction_raw}"
+        key_base_root = re.sub(r"[^A-Za-z0-9_]+", "_", key_seed).strip("_") or "signal_card"
+        key_base = key_base_root
+        duplicate_idx = 2
+        while key_base in used_card_keys:
+            key_base = f"{key_base_root}_{duplicate_idx}"
+            duplicate_idx += 1
+        used_card_keys.add(key_base)
         daily_payload = row.get("_chart_payload") or {}
         daily_svg = pattern_chart_svg(daily_payload)
         if not daily_svg:
@@ -3416,14 +3422,14 @@ def render_signal_gallery(rows: list[dict[str, Any]], alpaca_realtime: bool = Tr
         volume = html.escape(format_int_cell(row.get("Объём")))
         dollar_volume = html.escape(format_dollar_cell(row.get("Долларовый объём")))
         market_cap = html.escape(format_market_cap_cell(row.get("Капитализация")))
+        card_state_class = " pattern-card-new" if row.get("_new_this_scan") else ""
 
-        card_key_prefix = "chart_card_new" if row.get("_new_this_scan") else "chart_card"
-        with st.container(border=True, key=f"{card_key_prefix}_{key_base}"):
+        with st.container(key=f"chart_card_{key_base}"):
             info_col, action_col = st.columns([0.86, 0.14], vertical_alignment="top")
             with info_col:
                 st.markdown(
                     f"""
-                    <div class="pattern-chart-shell">
+                    <div class="pattern-chart-shell{card_state_class}">
                         <div class="pattern-chart-head">
                             <div>
                                 <div class="pattern-chart-symbol">{ticker}</div>
@@ -3442,16 +3448,14 @@ def render_signal_gallery(rows: list[dict[str, Any]], alpaca_realtime: bool = Tr
                     unsafe_allow_html=True,
                 )
             with action_col:
-                if st.button(
+                st.button(
                     "×",
                     key=f"dismiss_chart_{key_base}",
                     help=f"Скрыть {ticker_raw} на {DISMISS_TTL_HOURS} часов",
+                    on_click=dismiss_ticker,
+                    args=(ticker_raw,),
                     use_container_width=True,
-                ):
-                    hidden = dismiss_ticker(ticker_raw)
-                    if hidden and hasattr(st, "toast"):
-                        st.toast(f"Скрыто на {DISMISS_TTL_HOURS} часов: {hidden}")
-                    rerun_app()
+                )
 
             minute_block = ""
             if not is_momentum:
@@ -3531,6 +3535,8 @@ if "notified_signals" not in st.session_state:
     st.session_state.notified_signals = set()
 if "dismissed_tickers" not in st.session_state:
     st.session_state.dismissed_tickers = {}
+if "last_dismissed_ticker" not in st.session_state:
+    st.session_state.last_dismissed_ticker = ""
 if "auto_last_run" not in st.session_state:
     st.session_state.auto_last_run = None
 elif isinstance(st.session_state.auto_last_run, datetime) and st.session_state.auto_last_run.tzinfo is None:
@@ -4251,6 +4257,11 @@ with clear_col:
 
 
 dismissed_now = active_dismissed_tickers()
+dismissed_flash = str(st.session_state.get("last_dismissed_ticker") or "")
+if dismissed_flash:
+    if hasattr(st, "toast"):
+        st.toast(f"Скрыто на {DISMISS_TTL_HOURS} часов: {dismissed_flash}")
+    st.session_state.last_dismissed_ticker = ""
 if dismissed_now:
     preview = ", ".join(
         f"{ticker} до {expiry.strftime('%H:%M')}"
@@ -4307,7 +4318,13 @@ if start_scan or (auto_scan and should_auto_run):
         table_box = st.empty()
 
         active_old_results = clear_new_scan_flags(
-            filter_results_for_config(st.session_state.results, cfg, data_source, alpaca_realtime)
+            filter_results_for_config(
+                st.session_state.results,
+                cfg,
+                data_source,
+                alpaca_realtime,
+                hide_dismissed=False,
+            )
         )
         remember_seen_results(active_old_results)
 
@@ -4360,17 +4377,17 @@ if start_scan or (auto_scan and should_auto_run):
             with st.expander("Диагностика"):
                 st.write("\n".join(st.session_state.scan_errors))
 
-st.session_state.results = sort_results(
+visible_results = sort_results(
     filter_results_for_config(st.session_state.results, cfg, data_source, alpaca_realtime),
     cfg.base_impulse_only,
 )
 
-if st.session_state.results:
-    render_results_summary(st.session_state.results)
-    render_results_table(st.session_state.results, cfg)
-    render_signal_gallery(st.session_state.results, alpaca_realtime)
+if visible_results:
+    render_results_summary(visible_results)
+    render_results_table(visible_results, cfg)
+    render_signal_gallery(visible_results, alpaca_realtime)
 
-    csv = display_frame(st.session_state.results, cfg.base_impulse_only, include_chart=False).to_csv(index=False).encode("utf-8")
+    csv = display_frame(visible_results, cfg.base_impulse_only, include_chart=False).to_csv(index=False).encode("utf-8")
     st.download_button(
         "Скачать CSV",
         data=csv,
