@@ -3991,21 +3991,33 @@ with st.sidebar:
     if not telegram_configured:
         st.caption("Тест недоступен: нет TELEGRAM_TOKEN или TELEGRAM_CHAT_ID.")
     auto_scan = st.toggle("Авто-скан", value=False)
-    auto_interval_options = [1, 2, 3, 5, 10, 15, 30, 60] if momentum_active else [5, 10, 15, 30, 60]
+    auto_continuous = st.toggle(
+        "Авто-скан непрерывно",
+        value=False,
+        disabled=not auto_scan or not momentum_active,
+        help=(
+            "Только для Импульс + объём: скан закончил пачку и почти сразу начинает следующую. "
+            "Telegram успевает отправить сигналы, потому что отправка идёт внутри завершённого скана."
+        ),
+    )
+    if not momentum_active:
+        auto_continuous = False
+    auto_interval_options = [1, 2, 3, 4, 5, 60]
     auto_interval = st.select_slider(
         "Интервал",
         options=auto_interval_options,
-        value=1 if momentum_active else 15,
+        value=1 if momentum_active else 5,
         format_func=lambda value: f"{value} мин",
-        disabled=not auto_scan,
+        disabled=not auto_scan or auto_continuous,
     )
     if st.button("Сбросить повторы Telegram", use_container_width=True):
         st.session_state.notified_signals = set()
         st.success("Повторы сброшены.")
 
 # ── AUTO REFRESH ──────────────────────────────────────────────────
+auto_refresh_interval_ms = 1000 if auto_continuous else auto_interval * 60 * 1000
 if auto_scan and st_autorefresh is not None:
-    st_autorefresh(interval=auto_interval * 60 * 1000, key="accumulation_autorefresh")
+    st_autorefresh(interval=auto_refresh_interval_ms, key=f"accumulation_autorefresh_{int(auto_continuous)}")
 elif auto_scan and st_autorefresh is None:
     st.warning("Для авто-обновления нужен пакет streamlit-autorefresh.")
 
@@ -4213,7 +4225,23 @@ if send_alerts and not telegram_ready:
 batch_size = int(max_tickers)
 if auto_scan:
     current = now_et()
-    if st.session_state.auto_last_run:
+    if auto_continuous:
+        should_auto_run = True
+        last_auto_total = int(st.session_state.last_auto_total or 0)
+        next_range_hint = ""
+        if last_auto_total > 0:
+            next_start = min(int(st.session_state.auto_scan_offset or 0), max(0, last_auto_total - 1))
+            next_end = min(next_start + batch_size, last_auto_total)
+            next_range_hint = (
+                f" · следующая пачка: {format_int_cell(next_start + 1)}-"
+                f"{format_int_cell(next_end)} из {format_int_cell(last_auto_total)}"
+            )
+        auto_text = (
+            f"Непрерывный авто-скан: после завершения пачки сразу идёт следующая · "
+            f"пачка {format_int_cell(batch_size)} акций · рынок до {format_int_cell(AUTO_SCAN_MARKET_LIMIT)}"
+            f"{next_range_hint}"
+        )
+    elif st.session_state.auto_last_run:
         elapsed_sec = int((current - st.session_state.auto_last_run).total_seconds())
         remaining = max(0, auto_interval * 60 - elapsed_sec)
         should_auto_run = elapsed_sec >= auto_interval * 60
@@ -4287,7 +4315,7 @@ if start_scan or (auto_scan and should_auto_run):
         all_tickers = all_tickers_full[:AUTO_SCAN_MARKET_LIMIT]
         auto_signature = (
             f"{cfg.scanner_mode}:{exchange}:{max_scan_price:g}:{AUTO_SCAN_MARKET_LIMIT}:{len(all_tickers)}:"
-            f"{data_source}:{int(alpaca_realtime)}:{batch_size}"
+            f"{data_source}:{int(alpaca_realtime)}:{batch_size}:{int(auto_continuous)}"
         )
         if st.session_state.auto_scan_signature != auto_signature:
             st.session_state.auto_scan_signature = auto_signature
