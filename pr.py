@@ -4,6 +4,7 @@ import html
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,10 +25,14 @@ try:
 except ImportError:
     yf = None
 
+AUTOREFRESH_IMPORT_ERROR = ""
 try:
     from streamlit_autorefresh import st_autorefresh
-except Exception:
+except ImportError:
     st_autorefresh = None
+except Exception as exc:
+    st_autorefresh = None
+    AUTOREFRESH_IMPORT_ERROR = str(exc)
 
 
 # ── APP CONFIG ─────────────────────────────────────────────────────
@@ -714,6 +719,8 @@ BATCH_SIZE = 120
 ALPACA_SIP_DELAY_MINUTES = 16
 MAX_BARS_PAGES = 25
 AUTO_SCAN_MARKET_LIMIT = 10_000
+CONTINUOUS_AUTO_REFRESH_SECONDS = 5
+AUTO_SCAN_STALE_RUNNING_MINUTES = 30
 CHART_VISIBLE_CANDLES = 60
 MINUTE_CHART_VISIBLE_CANDLES = 500
 DISMISS_TTL_HOURS = 7
@@ -940,8 +947,27 @@ def format_elapsed_since(started_at: datetime | None) -> str:
         return "0 сек"
     if started_at.tzinfo is None:
         started_at = started_at.replace(tzinfo=MARKET_TZ)
-    seconds = max(0, int((now_et() - started_at.astimezone(MARKET_TZ)).total_seconds()))
+    seconds = elapsed_seconds_since(started_at)
     minutes, seconds = divmod(seconds, 60)
+    if minutes:
+        return f"{minutes} мин {seconds:02d} сек"
+    return f"{seconds} сек"
+
+
+def elapsed_seconds_since(started_at: datetime | None) -> int:
+    if not started_at:
+        return 0
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=MARKET_TZ)
+    return max(0, int((now_et() - started_at.astimezone(MARKET_TZ)).total_seconds()))
+
+
+def format_seconds(seconds: Any) -> str:
+    try:
+        total = max(0, int(seconds))
+    except (TypeError, ValueError):
+        total = 0
+    minutes, seconds = divmod(total, 60)
     if minutes:
         return f"{minutes} мин {seconds:02d} сек"
     return f"{seconds} сек"
@@ -2877,6 +2903,7 @@ def scan_market(
 
     if total <= 0:
         st.session_state.last_scan_elapsed = format_elapsed_since(scan_started_at)
+        st.session_state.last_scan_seconds = elapsed_seconds_since(scan_started_at)
         status_box.caption(f"В этой пачке все тикеры скрыты на 7 часов.{elapsed_scan_suffix(scan_started_at)}")
         return []
 
@@ -2926,6 +2953,7 @@ def scan_market(
         st.session_state.stats["checked"] = idx
 
     st.session_state.last_scan_elapsed = format_elapsed_since(scan_started_at)
+    st.session_state.last_scan_seconds = elapsed_seconds_since(scan_started_at)
     return sort_results(hits, cfg.base_impulse_only)
 
 
@@ -3549,8 +3577,23 @@ if "auto_scan_signature" not in st.session_state:
     st.session_state.auto_scan_signature = ""
 if "last_auto_total" not in st.session_state:
     st.session_state.last_auto_total = None
+if "auto_scan_running" not in st.session_state:
+    st.session_state.auto_scan_running = False
+if "auto_scan_started_at" not in st.session_state:
+    st.session_state.auto_scan_started_at = None
+elif isinstance(st.session_state.auto_scan_started_at, datetime) and st.session_state.auto_scan_started_at.tzinfo is None:
+    st.session_state.auto_scan_started_at = st.session_state.auto_scan_started_at.replace(tzinfo=MARKET_TZ)
 if "last_scan_elapsed" not in st.session_state:
     st.session_state.last_scan_elapsed = ""
+if "last_scan_seconds" not in st.session_state:
+    st.session_state.last_scan_seconds = 0
+
+auto_started_at = st.session_state.get("auto_scan_started_at")
+if st.session_state.get("auto_scan_running") and isinstance(auto_started_at, datetime):
+    auto_age = (now_et() - auto_started_at.astimezone(MARKET_TZ)).total_seconds()
+    if auto_age > AUTO_SCAN_STALE_RUNNING_MINUTES * 60:
+        st.session_state.auto_scan_running = False
+        st.session_state.auto_scan_started_at = None
 
 
 # ── SIDEBAR ───────────────────────────────────────────────────────
@@ -3990,36 +4033,46 @@ with st.sidebar:
             st.error("Telegram не отправился. Проверь токен и chat_id.")
     if not telegram_configured:
         st.caption("Тест недоступен: нет TELEGRAM_TOKEN или TELEGRAM_CHAT_ID.")
-    auto_scan = st.toggle("Авто-скан", value=False)
+    auto_scan_requested = st.toggle("Авто-скан", value=False)
+    auto_scan_available = st_autorefresh is not None
     auto_continuous = st.toggle(
         "Авто-скан непрерывно",
         value=False,
-        disabled=not auto_scan or not momentum_active,
+        disabled=not auto_scan_requested or not momentum_active,
         help=(
             "Только для Импульс + объём: скан закончил пачку и почти сразу начинает следующую. "
             "Telegram успевает отправить сигналы, потому что отправка идёт внутри завершённого скана."
         ),
     )
-    if not momentum_active:
+    if not momentum_active or not auto_scan_requested:
         auto_continuous = False
+    auto_scan = auto_scan_requested and (auto_scan_available or auto_continuous)
+    if auto_scan_requested and not auto_scan_available and not auto_continuous:
+        st.caption("Интервальный авто-скан ждёт пакет streamlit-autorefresh. Непрерывный режим работает без него.")
+        if AUTOREFRESH_IMPORT_ERROR:
+            st.caption(f"Ошибка авто-обновления: {AUTOREFRESH_IMPORT_ERROR[:120]}")
+    elif auto_scan_requested and not momentum_active:
+        st.caption("Непрерывный режим доступен только для Импульс + объём.")
     auto_interval_options = [1, 2, 3, 4, 5, 60]
     auto_interval = st.select_slider(
         "Интервал",
         options=auto_interval_options,
         value=1 if momentum_active else 5,
         format_func=lambda value: f"{value} мин",
-        disabled=not auto_scan or auto_continuous,
+        disabled=not auto_scan_requested or auto_continuous,
     )
     if st.button("Сбросить повторы Telegram", use_container_width=True):
         st.session_state.notified_signals = set()
         st.success("Повторы сброшены.")
 
 # ── AUTO REFRESH ──────────────────────────────────────────────────
-auto_refresh_interval_ms = 1000 if auto_continuous else auto_interval * 60 * 1000
-if auto_scan and st_autorefresh is not None:
+auto_refresh_interval_ms = (
+    CONTINUOUS_AUTO_REFRESH_SECONDS * 1000 if auto_continuous else auto_interval * 60 * 1000
+)
+if auto_scan_requested and not auto_continuous and st_autorefresh is not None and not st.session_state.get("auto_scan_running"):
     st_autorefresh(interval=auto_refresh_interval_ms, key=f"accumulation_autorefresh_{int(auto_continuous)}")
-elif auto_scan and st_autorefresh is None:
-    st.warning("Для авто-обновления нужен пакет streamlit-autorefresh.")
+elif auto_scan_requested and not auto_continuous and st_autorefresh is None:
+    st.warning("Для интервального авто-обновления нужен пакет streamlit-autorefresh. Непрерывный режим работает без пакета.")
 
 
 # ── MAIN UI ───────────────────────────────────────────────────────
@@ -4223,9 +4276,16 @@ if send_alerts and not telegram_ready:
     )
 
 batch_size = int(max_tickers)
+auto_running = bool(st.session_state.get("auto_scan_running"))
 if auto_scan:
     current = now_et()
-    if auto_continuous:
+    if auto_running:
+        should_auto_run = False
+        auto_text = (
+            f"Авто-скан: текущая пачка уже выполняется · "
+            f"пачка {format_int_cell(batch_size)} акций · рынок до {format_int_cell(AUTO_SCAN_MARKET_LIMIT)}"
+        )
+    elif auto_continuous:
         should_auto_run = True
         last_auto_total = int(st.session_state.last_auto_total or 0)
         next_range_hint = ""
@@ -4238,6 +4298,7 @@ if auto_scan:
             )
         auto_text = (
             f"Непрерывный авто-скан: после завершения пачки сразу идёт следующая · "
+            f"пауза {CONTINUOUS_AUTO_REFRESH_SECONDS} сек · "
             f"пачка {format_int_cell(batch_size)} акций · рынок до {format_int_cell(AUTO_SCAN_MARKET_LIMIT)}"
             f"{next_range_hint}"
         )
@@ -4268,6 +4329,12 @@ if auto_scan:
 else:
     should_auto_run = False
     auto_text = f"Ручной запуск: проверит первые {format_int_cell(batch_size)} акций и остановится."
+
+last_scan_seconds = int(st.session_state.get("last_scan_seconds") or 0)
+if auto_scan_requested and last_scan_seconds > 0:
+    auto_text += f" · последний скан {format_seconds(last_scan_seconds)}"
+    if not auto_continuous and last_scan_seconds >= int(auto_interval) * 60:
+        auto_text += " · скан дольше интервала — выбери интервал больше или уменьши пачку"
 
 st.markdown(f'<div class="desk-muted" style="margin:-0.2rem 0 0.65rem;">{html.escape(auto_text)}</div>', unsafe_allow_html=True)
 
@@ -4306,16 +4373,19 @@ if dismissed_now:
             rerun_app()
 
 
-if start_scan or (auto_scan and should_auto_run):
-    is_auto_batch = bool(auto_scan and should_auto_run and not start_scan)
+if (start_scan and not auto_running) or (auto_scan and should_auto_run and not auto_running):
+    is_auto_batch = bool(auto_scan and should_auto_run and not start_scan and not auto_running)
+    if is_auto_batch:
+        st.session_state.auto_scan_running = True
+        st.session_state.auto_scan_started_at = now_et()
     all_tickers_full = get_nasdaq_tickers(exchange, max_scan_price)
     batch_size = max(1, int(max_tickers))
 
     if is_auto_batch:
         all_tickers = all_tickers_full[:AUTO_SCAN_MARKET_LIMIT]
         auto_signature = (
-            f"{cfg.scanner_mode}:{exchange}:{max_scan_price:g}:{AUTO_SCAN_MARKET_LIMIT}:{len(all_tickers)}:"
-            f"{data_source}:{int(alpaca_realtime)}:{batch_size}:{int(auto_continuous)}"
+            f"{cfg.scanner_mode}:{exchange}:{max_scan_price:g}:{AUTO_SCAN_MARKET_LIMIT}:"
+            f"{data_source}:{int(alpaca_realtime)}:{batch_size}:{int(auto_continuous)}:{int(send_alerts)}"
         )
         if st.session_state.auto_scan_signature != auto_signature:
             st.session_state.auto_scan_signature = auto_signature
@@ -4405,6 +4475,10 @@ if start_scan or (auto_scan and should_auto_run):
             with st.expander("Диагностика"):
                 st.write("\n".join(st.session_state.scan_errors))
 
+    if is_auto_batch:
+        st.session_state.auto_scan_running = False
+        st.session_state.auto_scan_started_at = None
+
 visible_results = sort_results(
     filter_results_for_config(st.session_state.results, cfg, data_source, alpaca_realtime),
     cfg.base_impulse_only,
@@ -4441,4 +4515,8 @@ else:
         """,
         unsafe_allow_html=True,
     )
+
+if auto_scan_requested and auto_continuous and not st.session_state.get("auto_scan_running"):
+    time.sleep(CONTINUOUS_AUTO_REFRESH_SECONDS)
+    rerun_app()
 
