@@ -330,6 +330,127 @@ def apply_custom_theme() -> None:
                 margin-top: 0.55rem;
             }
 
+            .ai-analysis-panel {
+                background: #ffffff;
+                border: 1.5px solid var(--desk-blue);
+                border-radius: 8px;
+                padding: 0.85rem 0.95rem;
+                margin: 0.85rem 0;
+                box-shadow: 0 10px 26px rgba(23, 92, 211, 0.08);
+            }
+
+            .ai-analysis-head {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: flex-start;
+                justify-content: space-between;
+                gap: 0.75rem;
+                margin-bottom: 0.55rem;
+            }
+
+            .ai-analysis-title {
+                color: var(--desk-navy);
+                font-size: 1rem;
+                font-weight: 820;
+                line-height: 1.15;
+            }
+
+            .ai-analysis-subtitle {
+                color: var(--desk-muted);
+                font-size: 0.82rem;
+                line-height: 1.35;
+                margin-top: 0.18rem;
+            }
+
+            .ai-ticker-card {
+                background: #ffffff;
+                border: 1px solid var(--desk-line);
+                border-left: 4px solid var(--desk-blue);
+                border-radius: 8px;
+                padding: 0.85rem 0.9rem;
+                margin: 0.65rem 0;
+                box-shadow: var(--desk-shadow-soft);
+            }
+
+            .ai-ticker-card.ai-yes { border-left-color: var(--desk-green); background: #f6fef9; }
+            .ai-ticker-card.ai-careful { border-left-color: var(--desk-amber); background: #fffbeb; }
+            .ai-ticker-card.ai-no { border-left-color: var(--desk-red); background: #fff5f5; }
+
+            .ai-ticker-head {
+                display: flex;
+                align-items: flex-start;
+                justify-content: space-between;
+                gap: 0.6rem;
+                margin-bottom: 0.55rem;
+            }
+
+            .ai-ticker-symbol {
+                color: var(--desk-navy);
+                font-size: 1.2rem;
+                font-weight: 850;
+                line-height: 1;
+            }
+
+            .ai-ticker-news {
+                color: #344054;
+                font-size: 0.84rem;
+                line-height: 1.35;
+                margin-top: 0.28rem;
+                overflow-wrap: anywhere;
+            }
+
+            .ai-badge {
+                border: 1px solid var(--desk-line);
+                border-radius: 999px;
+                padding: 0.28rem 0.5rem;
+                color: #344054;
+                background: #ffffff;
+                font-size: 0.75rem;
+                font-weight: 780;
+                white-space: nowrap;
+            }
+
+            .ai-badge.ai-yes { color: var(--desk-green); border-color: #a6f4c5; background: #ecfdf3; }
+            .ai-badge.ai-careful { color: var(--desk-amber); border-color: #fedf89; background: #fffaeb; }
+            .ai-badge.ai-no { color: var(--desk-red); border-color: #fecdca; background: #fff1f0; }
+
+            .ai-ticker-grid {
+                display: grid;
+                grid-template-columns: minmax(0, 0.32fr) minmax(0, 0.68fr);
+                gap: 0.55rem;
+                margin: 0.5rem 0;
+            }
+
+            .ai-ticker-grid > div {
+                background: #ffffff;
+                border: 1px solid rgba(208, 213, 221, 0.82);
+                border-radius: 8px;
+                padding: 0.55rem 0.62rem;
+                min-width: 0;
+            }
+
+            .ai-ticker-grid span {
+                display: block;
+                color: var(--desk-muted);
+                font-size: 0.66rem;
+                font-weight: 800;
+                letter-spacing: 0.04em;
+                text-transform: uppercase;
+                margin-bottom: 0.25rem;
+            }
+
+            .ai-ticker-grid strong,
+            .ai-verdict {
+                color: var(--desk-ink);
+                font-size: 0.84rem;
+                line-height: 1.35;
+                overflow-wrap: anywhere;
+            }
+
+            .ai-verdict {
+                margin-top: 0.52rem;
+            }
+
             div[class*="st-key-chart_card_"] {
                 border: 2px solid var(--desk-blue) !important;
                 border-radius: 8px !important;
@@ -628,6 +749,10 @@ def apply_custom_theme() -> None:
                     grid-template-columns: repeat(2, minmax(0, 1fr));
                 }
 
+                .ai-ticker-grid {
+                    grid-template-columns: 1fr;
+                }
+
                 .market-grid {
                     grid-template-columns: 1fr;
                 }
@@ -665,6 +790,15 @@ def apply_custom_theme() -> None:
 
                 .pattern-chart-stats {
                     grid-template-columns: repeat(2, minmax(0, 1fr));
+                }
+
+                .ai-analysis-head,
+                .ai-ticker-head {
+                    flex-direction: column;
+                }
+
+                .ai-badge {
+                    align-self: flex-start;
                 }
             }
 
@@ -872,6 +1006,134 @@ ALPACA_HEADERS = {
     "APCA-API-KEY-ID": ALPACA_KEY,
     "APCA-API-SECRET-KEY": ALPACA_SECRET,
 }
+
+AI_PLACEHOLDER_SECRETS = {
+    "",
+    "PASTE_CLAUDE_API_KEY_HERE",
+    "PASTE_GROK_XAI_API_KEY_HERE",
+    "YOUR_ANTHROPIC_API_KEY",
+    "YOUR_XAI_API_KEY",
+}
+AI_CLAUDE_KEY = secret_or_default("ANTHROPIC_API_KEY")
+AI_GROK_KEY = secret_or_default("XAI_API_KEY")
+AI_CLAUDE_MODEL_SETTING = secret_or_default("CLAUDE_MODEL", "auto")
+AI_GROK_MODEL_SETTING = secret_or_default("GROK_MODEL", "auto")
+AI_CLAUDE_FALLBACK_MODEL = secret_or_default("CLAUDE_FALLBACK_MODEL", "claude-fable-5")
+AI_GROK_FALLBACK_MODEL = secret_or_default("GROK_FALLBACK_MODEL", "grok-4.3")
+AI_CLAUDE_FAMILY_PRIORITY = [
+    part.strip().lower()
+    for part in secret_or_default("CLAUDE_FAMILY_PRIORITY", "hable,fable,opus,sonnet,haiku").split(",")
+    if part.strip()
+]
+AI_ALLOW_LIMITED_CLAUDE_MODELS = secret_or_default("AI_ALLOW_LIMITED_CLAUDE_MODELS", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+AI_GROK_WEB_SEARCH_DEFAULT = secret_or_default("GROK_WEB_SEARCH", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+AI_CLAUDE_MAX_TOKENS = 6000
+AI_GROK_MAX_TOKENS = 8000
+AI_SYNTHESIS_MAX_TOKENS = 6000
+AI_DEFAULT_TICKER_LIMIT = 10
+
+AI_CLAUDE_PROMPT = """
+Ты — строгий фундаментальный аналитик.
+Проанализируй каждый тикер, который пришёл из моего торгового скринера, с точки зрения:
+- качества бизнеса;
+- финансового состояния;
+- последней отчётности;
+- долгосрочных рисков;
+- вероятности dilution;
+- риска delisting;
+- риска reverse split;
+- проблем с compliance;
+- слабости баланса, долгов, cash runway, going concern;
+- истории разводнения акционеров.
+
+Не придумывай факты. Если данных недостаточно, так и напиши.
+
+Формат ответа:
+1. Сначала список тикеров из скринера.
+2. Затем по каждому тикеру:
+   - бизнес/сектор;
+   - фундаментальное качество;
+   - финансовое состояние;
+   - отчётность/SEC-риски;
+   - dilution/delisting/reverse split/compliance;
+   - фундаментальный риск: Низкий / Средний / Высокий / Критический;
+   - короткий вывод.
+"""
+
+AI_GROK_SENTIMENT_PROMPT = """
+Ты — эксперт по рыночному сентименту.
+Проанализируй каждый тикер, который пришёл из моего торгового скринера.
+
+Задача:
+- найти реальную причину резкого объёма по каждому тикеру;
+- указать точную дату новости/катализатора;
+- оценить силу катализатора;
+- оценить текущее настроение рынка;
+- дать рекомендацию по overnight.
+
+Особенно ищи:
+- новости FDA/clinical trial;
+- earnings/guidance;
+- offering/S-1/ATM/dilution;
+- reverse split;
+- delisting/compliance notice;
+- contract/partnership;
+- merger/acquisition;
+- short squeeze/social momentum;
+- sympathy move без реальной новости.
+
+Если точную причину найти нельзя, честно напиши:
+"точный катализатор не подтверждён".
+
+Формат ответа:
+1. Список тикеров из скринера.
+2. По каждому тикеру:
+   - главная новость/катализатор;
+   - дата новости;
+   - сила катализатора 1-5;
+   - настроение рынка;
+   - overnight: Да / Осторожно / Нет;
+   - почему.
+"""
+
+AI_FINAL_SYNTHESIS_PROMPT_TEMPLATE = """
+Ты — Grok. Ниже два анализа одного и того же списка тикеров из торгового скринера.
+
+Claude дал фундаментал и риски.
+Grok дал новости, сентимент и катализаторы.
+
+Твоя задача: сделать короткий итоговый анализ строго по каждому тикеру.
+Не пиши длинные объяснения. Не добавляй лишних разделов.
+Если данные противоречат друг другу, выбирай более осторожный вариант и явно отметь риск.
+Если дата новости не подтверждена, так и напиши.
+
+Строгий формат для каждого тикера:
+
+Тикер: <TICKER>
+Главная причина / новость (с датой): <текст>
+Сила катализатора: ★★★★★
+Overnight: <Да / Осторожно / Нет>
+Главные риски: <коротко>
+Короткий вердикт: <стоит ли входить / держать overnight>
+
+---
+
+ОТВЕТ CLAUDE:
+{claude_answer}
+
+ОТВЕТ GROK:
+{grok_answer}
+"""
 
 
 @dataclass(frozen=True)
@@ -3348,6 +3610,565 @@ def styled_display_frame(frame: pd.DataFrame) -> pd.io.formats.style.Styler:
     return frame.style.format(active_formatters)
 
 
+def ai_secret_ready(value: str | None) -> bool:
+    return bool(value and str(value).strip() not in AI_PLACEHOLDER_SECRETS)
+
+
+def ai_missing_secrets() -> list[str]:
+    missing = []
+    if not ai_secret_ready(AI_CLAUDE_KEY):
+        missing.append("ANTHROPIC_API_KEY")
+    if not ai_secret_ready(AI_GROK_KEY):
+        missing.append("XAI_API_KEY")
+    return missing
+
+
+def ai_tickers_from_results(rows: list[dict[str, Any]]) -> list[str]:
+    tickers: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        ticker = re.sub(r"[^A-Z.]", "", str(row.get("Тикер", "")).upper())
+        if not ticker or ticker in seen:
+            continue
+        seen.add(ticker)
+        tickers.append(ticker)
+    return tickers
+
+
+def ai_limit_options(total: int) -> list[int]:
+    base = [5, 10, 15, 20]
+    options = [value for value in base if value < total]
+    if total > 0:
+        options.append(total)
+    return options or [0]
+
+
+def ai_result_signature(tickers: list[str], cfg: ScanConfig, web_search: bool) -> str:
+    return "|".join(
+        [
+            cfg.scanner_mode,
+            ",".join(tickers),
+            AI_CLAUDE_MODEL_SETTING,
+            AI_GROK_MODEL_SETTING,
+            "web" if web_search else "no_web",
+        ]
+    )
+
+
+def ai_auto_model_requested(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"", "auto", "latest", "auto-latest", "best"}
+
+
+def ai_model_version_tuple(model_id: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", model_id)[:6])
+
+
+def ai_claude_family_score(model_id: str) -> int:
+    lowered = model_id.lower()
+    for index, family in enumerate(AI_CLAUDE_FAMILY_PRIORITY):
+        if family and family in lowered:
+            return len(AI_CLAUDE_FAMILY_PRIORITY) - index
+    return 0
+
+
+def ai_claude_model_score(model: dict[str, Any]) -> tuple[int, tuple[int, ...], str, str]:
+    model_id = str(model.get("id") or "")
+    created_at = str(model.get("created_at") or model.get("created") or "")
+    return (
+        ai_claude_family_score(model_id),
+        ai_model_version_tuple(model_id),
+        created_at,
+        model_id,
+    )
+
+
+def ai_fetch_claude_models() -> list[dict[str, Any]]:
+    if not ai_secret_ready(AI_CLAUDE_KEY):
+        return []
+    response = requests.get(
+        "https://api.anthropic.com/v1/models",
+        headers={
+            "x-api-key": AI_CLAUDE_KEY,
+            "anthropic-version": "2023-06-01",
+        },
+        params={"limit": 100},
+        timeout=12,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    data = payload.get("data", [])
+    return data if isinstance(data, list) else []
+
+
+def ai_pick_claude_model(models: list[dict[str, Any]]) -> str:
+    candidates: list[dict[str, Any]] = []
+    for model in models:
+        model_id = str(model.get("id") or "")
+        if not model_id.startswith("claude-"):
+            continue
+        if "mythos" in model_id.lower() and not AI_ALLOW_LIMITED_CLAUDE_MODELS:
+            continue
+        candidates.append(model)
+    if not candidates:
+        return AI_CLAUDE_FALLBACK_MODEL
+    return str(max(candidates, key=ai_claude_model_score).get("id") or AI_CLAUDE_FALLBACK_MODEL)
+
+
+def ai_resolve_claude_model() -> tuple[str, str]:
+    setting = str(AI_CLAUDE_MODEL_SETTING or "").strip()
+    if not ai_auto_model_requested(setting):
+        return setting, "manual"
+    try:
+        model = ai_pick_claude_model(ai_fetch_claude_models())
+        return model, "auto"
+    except Exception as exc:
+        LOGGER.warning("Claude model auto-selection failed: %s", exc)
+        return AI_CLAUDE_FALLBACK_MODEL, "fallback"
+
+
+def ai_grok_model_score(model_id: str) -> tuple[int, tuple[int, ...], str]:
+    lowered = model_id.lower()
+    if not lowered.startswith("grok-"):
+        return (-1, (), model_id)
+    if any(word in lowered for word in ("build", "image", "imagine", "voice", "audio", "tts", "stt")):
+        return (0, ai_model_version_tuple(model_id), model_id)
+    return (1, ai_model_version_tuple(model_id), model_id)
+
+
+def ai_fetch_grok_models() -> list[str]:
+    if not ai_secret_ready(AI_GROK_KEY):
+        return []
+    client = ai_make_grok_client()
+    response = client.models.list()
+    model_ids: list[str] = []
+    for model in getattr(response, "data", []) or []:
+        model_id = getattr(model, "id", None)
+        if model_id:
+            model_ids.append(str(model_id))
+    return model_ids
+
+
+def ai_resolve_grok_model() -> tuple[str, str]:
+    setting = str(AI_GROK_MODEL_SETTING or "").strip()
+    if not ai_auto_model_requested(setting):
+        return setting, "manual"
+    try:
+        candidates = [
+            model_id
+            for model_id in ai_fetch_grok_models()
+            if ai_grok_model_score(model_id)[0] > 0
+        ]
+        if candidates:
+            return max(candidates, key=ai_grok_model_score), "auto"
+    except Exception as exc:
+        LOGGER.warning("Grok model auto-selection failed: %s", exc)
+    return AI_GROK_FALLBACK_MODEL, "fallback"
+
+
+
+def ai_resolved_items_for_tickers(tickers: list[str]) -> list[dict[str, Any]]:
+    return [
+        {
+            "input": ticker,
+            "ticker": ticker,
+            "company": None,
+            "exchange": "unknown",
+            "status": "public_stock",
+            "confidence": "high",
+            "note": "ticker from screener result",
+        }
+        for ticker in tickers
+    ]
+
+
+def ai_ticker_prompt(base_prompt: str, raw_tickers: str, resolved_items: list[dict[str, Any]]) -> str:
+    public_tickers = [
+        str(item["ticker"]).upper()
+        for item in resolved_items
+        if item.get("ticker") and item.get("status") in {"public_stock", "ambiguous"}
+    ]
+    resolution_lines = []
+    for item in resolved_items:
+        ticker = item.get("ticker") or "нет публичного тикера"
+        company = item.get("company") or "не уточнено"
+        status = item.get("status") or "unknown"
+        confidence = item.get("confidence") or "low"
+        note = item.get("note") or ""
+        resolution_lines.append(
+            f'- "{item.get("input")}" -> {ticker} | {company} | {status} | {confidence} | {note}'
+        )
+
+    ticker_list = ", ".join(public_tickers) if public_tickers else raw_tickers
+    return f"""
+Источник данных: торговый Streamlit-скринер. Это уже очищенный список найденных тикеров.
+
+Сопоставление:
+{chr(10).join(resolution_lines)}
+
+Публичные тикеры для анализа: {ticker_list}
+
+Не анализируй слова из интерфейса, названия колонок, числа, проценты или случайные
+фрагменты текста. Если по тикеру нет подтверждённой новости или данных, не выдумывай.
+
+{base_prompt}
+"""
+
+
+def ai_claude_text(response: Any) -> str:
+    parts: list[str] = []
+    for block in getattr(response, "content", []) or []:
+        text = getattr(block, "text", None)
+        if text:
+            parts.append(text)
+    return "\n".join(parts).strip()
+
+
+def ai_grok_text(response: Any) -> str:
+    output_text = getattr(response, "output_text", None)
+    if output_text:
+        return str(output_text).strip()
+
+    parts: list[str] = []
+    for item in getattr(response, "output", []) or []:
+        for content in getattr(item, "content", []) or []:
+            text = getattr(content, "text", None)
+            if text:
+                parts.append(text)
+            elif isinstance(content, dict) and content.get("text"):
+                parts.append(str(content["text"]))
+    return "\n".join(parts).strip()
+
+
+def ai_grok_tools(web_search: bool) -> list[dict[str, Any]]:
+    return [{"type": "web_search"}] if web_search else []
+
+
+def ai_call_claude_with_tickers(raw_tickers: str, resolved_items: list[dict[str, Any]], model: str) -> str:
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=AI_CLAUDE_KEY)
+    response = client.messages.create(
+        model=model,
+        max_tokens=AI_CLAUDE_MAX_TOKENS,
+        temperature=0.1,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": ai_ticker_prompt(AI_CLAUDE_PROMPT, raw_tickers, resolved_items)}
+                ],
+            }
+        ],
+    )
+    return ai_claude_text(response)
+
+
+def ai_make_grok_client() -> Any:
+    import httpx
+    from openai import OpenAI
+
+    return OpenAI(
+        api_key=AI_GROK_KEY,
+        base_url="https://api.x.ai/v1",
+        timeout=httpx.Timeout(3600.0),
+    )
+
+
+def ai_call_grok_with_tickers(
+    raw_tickers: str,
+    resolved_items: list[dict[str, Any]],
+    web_search: bool,
+    model: str,
+) -> str:
+    client = ai_make_grok_client()
+    request: dict[str, Any] = {
+        "model": model,
+        "max_output_tokens": AI_GROK_MAX_TOKENS,
+        "temperature": 0.2,
+        "store": False,
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": ai_ticker_prompt(AI_GROK_SENTIMENT_PROMPT, raw_tickers, resolved_items)}
+                ],
+            }
+        ],
+    }
+    tools = ai_grok_tools(web_search)
+    if tools:
+        request["tools"] = tools
+    response = client.responses.create(**request)
+    return ai_grok_text(response)
+
+
+def ai_call_grok_synthesis(claude_answer: str, grok_answer: str, web_search: bool, model: str) -> str:
+    client = ai_make_grok_client()
+    prompt = AI_FINAL_SYNTHESIS_PROMPT_TEMPLATE.format(
+        claude_answer=claude_answer.strip(),
+        grok_answer=grok_answer.strip(),
+    )
+    request: dict[str, Any] = {
+        "model": model,
+        "max_output_tokens": AI_SYNTHESIS_MAX_TOKENS,
+        "temperature": 0.1,
+        "store": False,
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": prompt}],
+            }
+        ],
+    }
+    tools = ai_grok_tools(web_search)
+    if tools:
+        request["tools"] = tools
+    response = client.responses.create(**request)
+    return ai_grok_text(response)
+
+
+def ai_run_analysis_from_tickers(tickers: list[str], web_search: bool) -> dict[str, Any]:
+    raw_tickers = " ".join(tickers)
+    resolved_items = ai_resolved_items_for_tickers(tickers)
+    claude_model, claude_model_source = ai_resolve_claude_model()
+    grok_model, grok_model_source = ai_resolve_grok_model()
+    claude_answer = ai_call_claude_with_tickers(raw_tickers, resolved_items, claude_model)
+    try:
+        grok_answer = ai_call_grok_with_tickers(raw_tickers, resolved_items, web_search, grok_model)
+        final_answer = ai_call_grok_synthesis(claude_answer, grok_answer, web_search, grok_model)
+    except Exception as exc:
+        if grok_model == AI_GROK_FALLBACK_MODEL:
+            raise
+        LOGGER.warning("Grok model %s failed, retrying %s: %s", grok_model, AI_GROK_FALLBACK_MODEL, exc)
+        grok_model = AI_GROK_FALLBACK_MODEL
+        grok_model_source = "fallback"
+        grok_answer = ai_call_grok_with_tickers(raw_tickers, resolved_items, web_search, grok_model)
+        final_answer = ai_call_grok_synthesis(claude_answer, grok_answer, web_search, grok_model)
+    return {
+        "tickers": tickers,
+        "claude": claude_answer,
+        "grok": grok_answer,
+        "final": final_answer,
+        "created_at": now_et_str(),
+        "web_search": web_search,
+        "claude_model": claude_model,
+        "claude_model_source": claude_model_source,
+        "grok_model": grok_model,
+        "grok_model_source": grok_model_source,
+    }
+
+
+def ai_field_value(block: str, label: str) -> str:
+    pattern = rf"^{re.escape(label)}:\s*(.+)$"
+    match = re.search(pattern, block, flags=re.MULTILINE)
+    if not match:
+        return ""
+    return re.sub(r"\s+", " ", match.group(1)).strip()
+
+
+def ai_parse_final_rows(final_text: str) -> list[dict[str, str]]:
+    blocks = re.split(r"\n\s*---+\s*\n", final_text.strip())
+    rows: list[dict[str, str]] = []
+    for block in blocks:
+        ticker = ai_field_value(block, "Тикер")
+        if not ticker:
+            continue
+        rows.append(
+            {
+                "Тикер": ticker.upper(),
+                "Новость": ai_field_value(block, "Главная причина / новость (с датой)"),
+                "Сила": ai_field_value(block, "Сила катализатора"),
+                "Overnight": ai_field_value(block, "Overnight"),
+                "Риски": ai_field_value(block, "Главные риски"),
+                "Вердикт": ai_field_value(block, "Короткий вердикт"),
+            }
+        )
+    return rows
+
+
+def ai_overnight_class(value: str) -> tuple[str, str]:
+    normalized = value.strip().upper()
+    if "НЕТ" in normalized or normalized == "NO":
+        return "ai-no", "Нет"
+    if "ОСТОРОЖ" in normalized or "CAUTION" in normalized:
+        return "ai-careful", "Осторожно"
+    if "ДА" in normalized or normalized == "YES":
+        return "ai-yes", "Да"
+    return "ai-neutral", value or "Неясно"
+
+
+def render_ai_ticker_cards(rows: list[dict[str, str]]) -> None:
+    for row in rows:
+        badge_class, badge_text = ai_overnight_class(row["Overnight"])
+        st.markdown(
+            f"""
+            <div class="ai-ticker-card {badge_class}">
+                <div class="ai-ticker-head">
+                    <div>
+                        <div class="ai-ticker-symbol">{html.escape(row["Тикер"])}</div>
+                        <div class="ai-ticker-news">{html.escape(row["Новость"] or "Новость не подтверждена")}</div>
+                    </div>
+                    <div class="ai-badge {badge_class}">{html.escape(badge_text)}</div>
+                </div>
+                <div class="ai-ticker-grid">
+                    <div><span>Катализатор</span><strong>{html.escape(row["Сила"] or "неясно")}</strong></div>
+                    <div><span>Риски</span><strong>{html.escape(row["Риски"] or "нет данных")}</strong></div>
+                </div>
+                <div class="ai-verdict">{html.escape(row["Вердикт"] or "Нет короткого вердикта.")}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def render_ai_analysis_result(result: dict[str, Any]) -> None:
+    final_text = str(result.get("final") or "")
+    rows = ai_parse_final_rows(final_text)
+    if rows:
+        render_ai_ticker_cards(rows)
+        st.dataframe(
+            rows,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Тикер": st.column_config.TextColumn("Тикер", width="small"),
+                "Сила": st.column_config.TextColumn("Сила", width="small"),
+                "Overnight": st.column_config.TextColumn("Overnight", width="small"),
+                "Новость": st.column_config.TextColumn("Новость", width="large"),
+                "Риски": st.column_config.TextColumn("Риски", width="medium"),
+                "Вердикт": st.column_config.TextColumn("Вердикт", width="large"),
+            },
+        )
+    else:
+        st.markdown(final_text)
+
+    tab_final, tab_claude, tab_grok = st.tabs(["Итог", "Claude", "Grok"])
+    with tab_final:
+        st.markdown(final_text)
+    with tab_claude:
+        st.markdown(str(result.get("claude") or ""))
+    with tab_grok:
+        st.markdown(str(result.get("grok") or ""))
+
+    report_text = f"""# AI-разбор найденных тикеров
+
+Создано: {result.get("created_at", "")}
+Тикеры: {", ".join(result.get("tickers", []))}
+Claude model: {result.get("claude_model", AI_CLAUDE_MODEL_SETTING)} ({result.get("claude_model_source", "setting")})
+Grok model: {result.get("grok_model", AI_GROK_MODEL_SETTING)} ({result.get("grok_model_source", "setting")})
+Grok поиск новостей: {"on" if result.get("web_search") else "off"}
+
+## Итог
+
+{final_text}
+
+## Claude
+
+{result.get("claude", "")}
+
+## Grok
+
+{result.get("grok", "")}
+"""
+    st.download_button(
+        "Скачать AI-разбор",
+        data=report_text.encode("utf-8"),
+        file_name=f"ai_stock_analysis_{now_et().strftime('%Y%m%d_%H%M')}.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
+
+
+def render_ai_analysis_panel(rows: list[dict[str, Any]], cfg: ScanConfig) -> None:
+    tickers_all = ai_tickers_from_results(rows)
+    if not tickers_all:
+        return
+
+    st.markdown(
+        f"""
+        <div class="ai-analysis-panel">
+            <div class="ai-analysis-head">
+                <div>
+                    <div class="ai-analysis-title">AI-разбор Claude + Grok</div>
+                    <div class="ai-analysis-subtitle">
+                        Берёт тикеры прямо из найденных результатов. Claude проверяет фундаментал и риски,
+                        Grok ищет новости, катализатор и overnight.
+                    </div>
+                </div>
+                <div class="base-results-stats">
+                    {chip("Доступно", len(tickers_all), "blue")}
+                    {chip("Источник", SCANNER_LABELS.get(cfg.scanner_mode, "Скринер"))}
+                    {chip("Claude", AI_CLAUDE_MODEL_SETTING)}
+                    {chip("Grok", AI_GROK_MODEL_SETTING)}
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    limit_options = ai_limit_options(len(tickers_all))
+    default_limit = min(AI_DEFAULT_TICKER_LIMIT, len(tickers_all))
+    default_index = limit_options.index(default_limit) if default_limit in limit_options else 0
+    ctrl_col, web_col = st.columns([0.58, 0.42])
+    with ctrl_col:
+        ticker_limit = st.selectbox(
+            "Сколько тикеров разобрать",
+            options=limit_options,
+            index=default_index,
+            format_func=lambda value: f"Все ({value})" if value == len(tickers_all) else f"Топ-{value}",
+            key=f"ai_ticker_limit_{cfg.scanner_mode}",
+        )
+    with web_col:
+        web_search = st.toggle(
+            "Grok ищет новости",
+            value=AI_GROK_WEB_SEARCH_DEFAULT,
+            key=f"ai_web_search_{cfg.scanner_mode}",
+            help="Grok будет искать свежие новости и катализаторы. Это полезнее, но дороже и дольше.",
+        )
+
+    selected_tickers = tickers_all[: int(ticker_limit)]
+    st.caption(f"В AI-разбор уйдут: {', '.join(selected_tickers)}")
+
+    missing = ai_missing_secrets()
+    if missing:
+        st.warning(
+            "AI-разбор пока не включится: добавь в Streamlit Secrets "
+            + ", ".join(missing)
+            + ". В коде ключей нет и не должно быть."
+        )
+
+    analyze_clicked = st.button(
+        "Разобрать найденные тикеры Claude + Grok",
+        type="primary",
+        use_container_width=True,
+        disabled=bool(missing),
+    )
+    signature = ai_result_signature(selected_tickers, cfg, web_search)
+    if analyze_clicked:
+        try:
+            with st.spinner("AI-разбор: Claude проверяет риски, Grok ищет новости..."):
+                result = ai_run_analysis_from_tickers(selected_tickers, web_search)
+            result["signature"] = signature
+            st.session_state.ai_analysis_result = result
+            st.session_state.ai_analysis_error = ""
+            st.success("AI-разбор готов.")
+        except Exception as exc:
+            st.session_state.ai_analysis_error = str(exc)
+            st.error(f"AI-разбор не выполнен: {exc}")
+
+    error_text = str(st.session_state.get("ai_analysis_error") or "")
+    if error_text:
+        with st.expander("Ошибка AI-разбора"):
+            st.write(error_text)
+
+    result = st.session_state.get("ai_analysis_result")
+    if isinstance(result, dict) and result.get("final"):
+        if result.get("signature") != signature:
+            st.caption("Показан последний AI-разбор. Если список тикеров изменился, нажми кнопку заново.")
+        render_ai_analysis_result(result)
+
+
 def render_results_summary(rows: list[dict[str, Any]]) -> None:
     count = len(rows)
     best_rvol = max((safe_float(row.get("_rvol")) for row in rows), default=0.0)
@@ -3587,6 +4408,10 @@ if "last_scan_elapsed" not in st.session_state:
     st.session_state.last_scan_elapsed = ""
 if "last_scan_seconds" not in st.session_state:
     st.session_state.last_scan_seconds = 0
+if "ai_analysis_result" not in st.session_state:
+    st.session_state.ai_analysis_result = {}
+if "ai_analysis_error" not in st.session_state:
+    st.session_state.ai_analysis_error = ""
 
 auto_started_at = st.session_state.get("auto_scan_started_at")
 if st.session_state.get("auto_scan_running") and isinstance(auto_started_at, datetime):
@@ -4348,6 +5173,8 @@ with clear_col:
         st.session_state.auto_scan_offset = 0
         st.session_state.auto_scan_signature = ""
         st.session_state.last_auto_total = None
+        st.session_state.ai_analysis_result = {}
+        st.session_state.ai_analysis_error = ""
         st.rerun()
 
 
@@ -4487,6 +5314,7 @@ visible_results = sort_results(
 if visible_results:
     render_results_summary(visible_results)
     render_results_table(visible_results, cfg)
+    render_ai_analysis_panel(visible_results, cfg)
     render_signal_gallery(visible_results, alpaca_realtime)
 
     csv = display_frame(visible_results, cfg.base_impulse_only, include_chart=False).to_csv(index=False).encode("utf-8")
