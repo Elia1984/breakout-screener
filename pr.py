@@ -1079,7 +1079,7 @@ AI_GROK_SENTIMENT_PROMPT = """
 - указать точную дату новости/катализатора;
 - оценить силу катализатора;
 - оценить текущее настроение рынка;
-- дать рекомендацию по overnight.
+- дать короткую рекомендацию: стоит ли входить сейчас.
 
 Особенно ищи:
 - новости FDA/clinical trial;
@@ -1102,7 +1102,7 @@ AI_GROK_SENTIMENT_PROMPT = """
    - дата новости;
    - сила катализатора 1-5;
    - настроение рынка;
-   - overnight: Да / Осторожно / Нет;
+   - вход сейчас: Да / Осторожно / Нет;
    - почему.
 """
 
@@ -1112,19 +1112,25 @@ AI_FINAL_SYNTHESIS_PROMPT_TEMPLATE = """
 Claude дал фундаментал и риски.
 Grok дал новости, сентимент и катализаторы.
 
-Твоя задача: сделать короткий итоговый анализ строго по каждому тикеру.
+Твоя задача: сделать ультракороткий трейдерский итог строго по каждому тикеру.
 Не пиши длинные объяснения. Не добавляй лишних разделов.
+Цель: быстро понять, стоит ли входить сейчас.
 Если данные противоречат друг другу, выбирай более осторожный вариант и явно отметь риск.
 Если дата новости не подтверждена, так и напиши.
+Пиши максимально коротко:
+- причина/новость: 5-10 слов, только суть;
+- риск: 3-8 слов;
+- вердикт: 5-12 слов;
+- никаких абзацев, рассуждений и длинных новостей.
 
 Строгий формат для каждого тикера:
 
 Тикер: <TICKER>
-Главная причина / новость (с датой): <текст>
+Главная причина / новость (с датой): <5-10 слов>
 Сила катализатора: ★★★★★
-Overnight: <Да / Осторожно / Нет>
-Главные риски: <коротко>
-Короткий вердикт: <стоит ли входить / держать overnight>
+Вход сейчас: <Да / Осторожно / Нет>
+Главные риски: <3-8 слов>
+Короткий вердикт: <5-12 слов, входить или пропустить>
 
 ---
 
@@ -3850,7 +3856,6 @@ def ai_call_claude_with_tickers(raw_tickers: str, resolved_items: list[dict[str,
     response = client.messages.create(
         model=model,
         max_tokens=AI_CLAUDE_MAX_TOKENS,
-        temperature=0.1,
         messages=[
             {
                 "role": "user",
@@ -3884,7 +3889,6 @@ def ai_call_grok_with_tickers(
     request: dict[str, Any] = {
         "model": model,
         "max_output_tokens": AI_GROK_MAX_TOKENS,
-        "temperature": 0.2,
         "store": False,
         "input": [
             {
@@ -3911,7 +3915,6 @@ def ai_call_grok_synthesis(claude_answer: str, grok_answer: str, web_search: boo
     request: dict[str, Any] = {
         "model": model,
         "max_output_tokens": AI_SYNTHESIS_MAX_TOKENS,
-        "temperature": 0.1,
         "store": False,
         "input": [
             {
@@ -3978,7 +3981,7 @@ def ai_parse_final_rows(final_text: str) -> list[dict[str, str]]:
                 "Тикер": ticker.upper(),
                 "Новость": ai_field_value(block, "Главная причина / новость (с датой)"),
                 "Сила": ai_field_value(block, "Сила катализатора"),
-                "Overnight": ai_field_value(block, "Overnight"),
+                "Вход": ai_field_value(block, "Вход сейчас") or ai_field_value(block, "Overnight"),
                 "Риски": ai_field_value(block, "Главные риски"),
                 "Вердикт": ai_field_value(block, "Короткий вердикт"),
             }
@@ -3999,7 +4002,7 @@ def ai_overnight_class(value: str) -> tuple[str, str]:
 
 def render_ai_ticker_cards(rows: list[dict[str, str]]) -> None:
     for row in rows:
-        badge_class, badge_text = ai_overnight_class(row["Overnight"])
+        badge_class, badge_text = ai_overnight_class(row["Вход"])
         st.markdown(
             f"""
             <div class="ai-ticker-card {badge_class}">
@@ -4033,7 +4036,7 @@ def render_ai_analysis_result(result: dict[str, Any]) -> None:
             column_config={
                 "Тикер": st.column_config.TextColumn("Тикер", width="small"),
                 "Сила": st.column_config.TextColumn("Сила", width="small"),
-                "Overnight": st.column_config.TextColumn("Overnight", width="small"),
+                "Вход": st.column_config.TextColumn("Вход", width="small"),
                 "Новость": st.column_config.TextColumn("Новость", width="large"),
                 "Риски": st.column_config.TextColumn("Риски", width="medium"),
                 "Вердикт": st.column_config.TextColumn("Вердикт", width="large"),
