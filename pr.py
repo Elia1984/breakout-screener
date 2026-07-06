@@ -3649,13 +3649,10 @@ def ai_missing_secrets() -> list[str]:
 
 
 def ai_missing_secrets_message(missing: list[str]) -> str:
-    local_path = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
     return (
-        "AI-разбор пока выключен: не найдены ключи "
+        "AI-разбор пока выключен: добавь ключи "
         + ", ".join(missing)
-        + ". На MacBook добавь их в локальный файл "
-        + str(local_path)
-        + ". Для телефона через Streamlit Cloud добавь эти же ключи в Settings -> Secrets. "
+        + " в Streamlit Secrets. "
         + "В GitHub и в код ключи вставлять нельзя."
     )
 
