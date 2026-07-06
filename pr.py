@@ -1466,8 +1466,7 @@ def get_nasdaq_tickers(exchange: str, max_price: float) -> list[dict[str, Any]]:
     if tickers:
         return tickers
 
-    fallback = ["SBET", "PLTR", "SOUN", "QBTS", "OPEN", "SOFI", "HIMS", "PLUG", "RIVN", "LCID"]
-    return [{"ticker": ticker, "exchange": "US", "name": "", "price_api": 0.0} for ticker in fallback]
+    return []
 
 
 # ── DATA SOURCES ──────────────────────────────────────────────────
@@ -3397,6 +3396,8 @@ def dismiss_ticker(ticker: Any) -> str:
     dismissed[symbol] = now_et() + timedelta(hours=DISMISS_TTL_HOURS)
     st.session_state.dismissed_tickers = {key: value.isoformat() for key, value in dismissed.items()}
     st.session_state.last_dismissed_ticker = symbol
+    st.session_state.ai_analysis_result = {}
+    st.session_state.ai_analysis_error = ""
     return symbol
 
 
@@ -3645,6 +3646,34 @@ def ai_missing_secrets() -> list[str]:
     if not ai_secret_ready(AI_GROK_KEY):
         missing.append("XAI_API_KEY")
     return missing
+
+
+def ai_missing_secrets_message(missing: list[str]) -> str:
+    local_path = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
+    return (
+        "AI-разбор пока выключен: не найдены ключи "
+        + ", ".join(missing)
+        + ". На MacBook добавь их в локальный файл "
+        + str(local_path)
+        + ". Для телефона через Streamlit Cloud добавь эти же ключи в Settings -> Secrets. "
+        + "В GitHub и в код ключи вставлять нельзя."
+    )
+
+
+def ai_user_error_message(exc: Exception) -> str:
+    text = str(exc)
+    lowered = text.lower()
+    if "temperature is deprecated" in lowered:
+        return "AI API отклонил старый параметр модели. Обнови код и перезапусти приложение."
+    if "401" in text or "unauthorized" in lowered or "invalid api key" in lowered:
+        return "AI-разбор не выполнен: ключ Claude или Grok неверный либо не активен."
+    if "429" in text or "rate limit" in lowered:
+        return "AI-разбор не выполнен: API временно ограничил запросы. Подожди немного и повтори."
+    if "timeout" in lowered or "timed out" in lowered:
+        return "AI-разбор не выполнен: Claude или Grok слишком долго отвечал. Повтори запрос."
+    if "model" in lowered and ("not found" in lowered or "does not exist" in lowered):
+        return "AI-разбор не выполнен: выбранная модель недоступна. Поставь модель auto или обнови ключи."
+    return "AI-разбор не выполнен. Технические детали можно открыть ниже."
 
 
 def ai_tickers_from_results(rows: list[dict[str, Any]]) -> list[str]:
@@ -4116,9 +4145,9 @@ def render_ai_analysis_result(result: dict[str, Any]) -> None:
 
 Создано: {result.get("created_at", "")}
 Тикеры: {", ".join(result.get("tickers", []))}
-Claude model: {result.get("claude_model", AI_CLAUDE_MODEL_SETTING)} ({result.get("claude_model_source", "setting")})
-Grok model: {result.get("grok_model", AI_GROK_MODEL_SETTING)} ({result.get("grok_model_source", "setting")})
-Grok поиск новостей: {"on" if result.get("web_search") else "off"}
+Модель Claude: {result.get("claude_model", AI_CLAUDE_MODEL_SETTING)} ({result.get("claude_model_source", "setting")})
+Модель Grok: {result.get("grok_model", AI_GROK_MODEL_SETTING)} ({result.get("grok_model_source", "setting")})
+Поиск новостей Grok: {"включён" if result.get("web_search") else "выключен"}
 
 ## Итог
 
@@ -4134,6 +4163,7 @@ Grok поиск новостей: {"on" if result.get("web_search") else "off"}
 
 
 def render_ai_analysis_panel(rows: list[dict[str, Any]], cfg: ScanConfig) -> None:
+    rows = filter_dismissed_results(rows)
     tickers_all = ai_tickers_from_results(rows)
     if not tickers_all:
         return
@@ -4186,11 +4216,7 @@ def render_ai_analysis_panel(rows: list[dict[str, Any]], cfg: ScanConfig) -> Non
 
     missing = ai_missing_secrets()
     if missing:
-        st.warning(
-            "AI-разбор пока не включится: добавь в Streamlit Secrets "
-            + ", ".join(missing)
-            + ". В коде ключей нет и не должно быть."
-        )
+        st.warning(ai_missing_secrets_message(missing))
 
     analyze_clicked = st.button(
         "Разобрать найденные тикеры Claude + Grok",
@@ -4209,7 +4235,7 @@ def render_ai_analysis_panel(rows: list[dict[str, Any]], cfg: ScanConfig) -> Non
             st.success("AI-разбор готов.")
         except Exception as exc:
             st.session_state.ai_analysis_error = str(exc)
-            st.error(f"AI-разбор не выполнен: {exc}")
+            st.error(ai_user_error_message(exc))
 
     error_text = str(st.session_state.get("ai_analysis_error") or "")
     if error_text:
@@ -5256,6 +5282,8 @@ if dismissed_now:
 
 if (start_scan and not auto_running) or (auto_scan and should_auto_run and not auto_running):
     is_auto_batch = bool(auto_scan and should_auto_run and not start_scan and not auto_running)
+    st.session_state.ai_analysis_result = {}
+    st.session_state.ai_analysis_error = ""
     if is_auto_batch:
         st.session_state.auto_scan_running = True
         st.session_state.auto_scan_started_at = now_et()
@@ -5290,7 +5318,7 @@ if (start_scan and not auto_running) or (auto_scan and should_auto_run and not a
         scan_scope = f"ручной первые {format_int_cell(len(ticker_infos))} из {format_int_cell(len(all_tickers))}"
 
     if not ticker_infos:
-        st.error("Нет тикеров для сканирования.")
+        st.error("Нет тикеров для сканирования: список рынка не загрузился или фильтры слишком узкие.")
     else:
         progress_box = st.progress(0.0)
         status_box = st.empty()
