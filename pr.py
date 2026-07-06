@@ -5426,4 +5426,3 @@ else:
 if auto_scan_requested and auto_continuous and not st.session_state.get("auto_scan_running"):
     time.sleep(CONTINUOUS_AUTO_REFRESH_SECONDS)
     rerun_app()
-
