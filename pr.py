@@ -416,7 +416,7 @@ def apply_custom_theme() -> None:
 
             .ai-ticker-grid {
                 display: grid;
-                grid-template-columns: minmax(0, 0.32fr) minmax(0, 0.68fr);
+                grid-template-columns: repeat(4, minmax(0, 1fr));
                 gap: 0.55rem;
                 margin: 0.5rem 0;
             }
@@ -1037,49 +1037,42 @@ AI_GROK_WEB_SEARCH_DEFAULT = secret_or_default("GROK_WEB_SEARCH", "1").strip().l
     "no",
     "off",
 }
-AI_CLAUDE_MAX_TOKENS = 6000
-AI_GROK_MAX_TOKENS = 8000
-AI_SYNTHESIS_MAX_TOKENS = 6000
+AI_CLAUDE_MAX_TOKENS = 2500
+AI_GROK_MAX_TOKENS = 4000
+AI_SYNTHESIS_MAX_TOKENS = 2500
 AI_DEFAULT_TICKER_LIMIT = 10
 
 AI_CLAUDE_PROMPT = """
-Ты — строгий фундаментальный аналитик.
-Проанализируй каждый тикер, который пришёл из моего торгового скринера, с точки зрения:
-- качества бизнеса;
-- финансового состояния;
-- последней отчётности;
-- долгосрочных рисков;
-- вероятности dilution;
-- риска delisting;
-- риска reverse split;
-- проблем с compliance;
-- слабости баланса, долгов, cash runway, going concern;
-- истории разводнения акционеров.
+Ты — строгий риск-фильтр для day/swing трейдинга.
+Сначала проанализируй фундаментал полноценно, но ответ дай очень коротко.
+По каждому тикеру дай только то, что может помешать входу сейчас или overnight:
+- dilution / offering / ATM / S-1;
+- delisting / compliance / reverse split;
+- слабый cash runway / going concern;
+- плохая отчётность или критический долг;
+- если серьёзных красных флагов не видно, напиши "красных флагов нет".
 
-Не придумывай факты. Если данных недостаточно, так и напиши.
-
-Формат ответа:
-1. Сначала список тикеров из скринера.
-2. Затем по каждому тикеру:
-   - бизнес/сектор;
-   - фундаментальное качество;
-   - финансовое состояние;
-   - отчётность/SEC-риски;
-   - dilution/delisting/reverse split/compliance;
-   - фундаментальный риск: Низкий / Средний / Высокий / Критический;
-   - короткий вывод.
+Формат по каждому тикеру, очень коротко:
+Тикер: <TICKER>
+Риск-фильтр: <3-10 слов>
+Фундаментальный стоп: <Да / Нет / Неясно>
 """
 
 AI_GROK_SENTIMENT_PROMPT = """
-Ты — эксперт по рыночному сентименту.
+Ты — эксперт по новостному импульсу и рыночному сентименту.
 Проанализируй каждый тикер, который пришёл из моего торгового скринера.
 
 Задача:
+- сделать полный внутренний анализ новости, реакции цены, объёма и настроения рынка;
 - найти реальную причину резкого объёма по каждому тикеру;
 - указать точную дату новости/катализатора;
-- оценить силу катализатора;
-- оценить текущее настроение рынка;
-- дать короткую рекомендацию: стоит ли входить сейчас.
+- определить, новость хорошая или плохая для цены;
+- оценить, поддерживает ли новость текущий тренд;
+- оценить силу катализатора и реакцию рынка;
+- оценить настроение рынка прямо сейчас;
+- понять сторону сделки: Long / Short / Нет;
+- понять, есть ли смысл входить сейчас;
+- отдельно понять, можно ли держать overnight.
 
 Особенно ищи:
 - новости FDA/clinical trial;
@@ -1096,29 +1089,52 @@ AI_GROK_SENTIMENT_PROMPT = """
 "точный катализатор не подтверждён".
 
 Формат ответа:
-1. Список тикеров из скринера.
-2. По каждому тикеру:
-   - главная новость/катализатор;
-   - дата новости;
-   - сила катализатора 1-5;
-   - настроение рынка;
-   - вход сейчас: Да / Осторожно / Нет;
-   - почему.
+По каждому тикеру очень коротко:
+Тикер: <TICKER>
+Новость: <5-10 слов + дата если есть>
+Сила новости: <1-5>
+Моментум: <Сильный / Средний / Слабый>
+Настроение: <Бычье / Нейтральное / Медвежье>
+Сторона: <Long / Short / Нет>
+Вход сейчас: <Вход / Осторожно / Нет>
+Overnight: <Да / Осторожно / Нет>
 """
 
 AI_FINAL_SYNTHESIS_PROMPT_TEMPLATE = """
 Ты — Grok. Ниже два анализа одного и того же списка тикеров из торгового скринера.
 
-Claude дал фундаментал и риски.
-Grok дал новости, сентимент и катализаторы.
+ОБЯЗАТЕЛЬНЫЙ СПИСОК ТИКЕРОВ:
+{ticker_list}
+
+Claude дал короткий риск-фильтр.
+Grok дал новости, сентимент, моментум и катализаторы.
 
 Твоя задача: сделать ультракороткий трейдерский итог строго по каждому тикеру.
+Анализируй только тикеры из ОБЯЗАТЕЛЬНОГО СПИСКА.
+Не заменяй тикер похожей компанией.
+Не добавляй другие тикеры.
+Если Claude или Grok случайно написал про другой тикер, игнорируй этот фрагмент.
+Если по точному тикеру нет подтверждённой новости, так и напиши.
 Не пиши длинные объяснения. Не добавляй лишних разделов.
-Цель: быстро понять, стоит ли входить сейчас.
+Цель: быстро понять, что сегодня лучше всего по новостям и можно ли входить/держать overnight.
+Главный вес: реальная новость, сила катализатора, объёмная реакция, моментум, настроение рынка.
+Оценивай обе стороны:
+- Long = хорошая новость, рынок поддерживает рост, тренд может продолжиться вверх.
+- Short = плохая новость, рынок поддерживает падение, тренд может продолжиться вниз.
+- Нет = нет понятной новости, слабый моментум или высокий риск.
+Фундаментал Claude используй как риск-фильтр, а не как главный фактор.
+Сделай полный внутренний анализ, но наружу выведи только короткое решение.
 Если данные противоречат друг другу, выбирай более осторожный вариант и явно отметь риск.
 Если дата новости не подтверждена, так и напиши.
+Отсортируй все тикеры сверху вниз:
+1. Самые сильные actionable идеи Long или Short с подтверждённой новостью.
+2. Потом идеи, где новость есть, но риск/моментум хуже.
+3. Внизу слабые, сомнительные или без подтверждённой новости.
 Пиши максимально коротко:
 - причина/новость: 5-10 слов, только суть;
+- сторона: Long / Short / Нет;
+- вход сейчас: Вход / Осторожно / Нет;
+- overnight: Да / Осторожно / Нет;
 - риск: 3-8 слов;
 - вердикт: 5-12 слов;
 - никаких абзацев, рассуждений и длинных новостей.
@@ -1128,9 +1144,11 @@ Grok дал новости, сентимент и катализаторы.
 Тикер: <TICKER>
 Главная причина / новость (с датой): <5-10 слов>
 Сила катализатора: ★★★★★
-Вход сейчас: <Да / Осторожно / Нет>
+Сторона: <Long / Short / Нет>
+Вход сейчас: <Вход / Осторожно / Нет>
+Overnight: <Да / Осторожно / Нет>
 Главные риски: <3-8 слов>
-Короткий вердикт: <5-12 слов, входить или пропустить>
+Короткий вердикт: <5-12 слов, почему входить или пропустить>
 
 ---
 
@@ -3813,6 +3831,13 @@ def ai_ticker_prompt(base_prompt: str, raw_tickers: str, resolved_items: list[di
 
 Публичные тикеры для анализа: {ticker_list}
 
+Жёсткое правило:
+- анализируй только тикеры из строки "Публичные тикеры для анализа";
+- не заменяй тикер похожей компанией;
+- не добавляй другие тикеры;
+- если по точному тикеру нет данных или новости, напиши "нет подтверждённой новости";
+- итог по каждому тикеру должен относиться именно к этому тикеру.
+
 Не анализируй слова из интерфейса, названия колонок, числа, проценты или случайные
 фрагменты текста. Если по тикеру нет подтверждённой новости или данных, не выдумывай.
 
@@ -3906,9 +3931,16 @@ def ai_call_grok_with_tickers(
     return ai_grok_text(response)
 
 
-def ai_call_grok_synthesis(claude_answer: str, grok_answer: str, web_search: bool, model: str) -> str:
+def ai_call_grok_synthesis(
+    claude_answer: str,
+    grok_answer: str,
+    web_search: bool,
+    model: str,
+    tickers: list[str],
+) -> str:
     client = ai_make_grok_client()
     prompt = AI_FINAL_SYNTHESIS_PROMPT_TEMPLATE.format(
+        ticker_list=", ".join(tickers),
         claude_answer=claude_answer.strip(),
         grok_answer=grok_answer.strip(),
     )
@@ -3938,7 +3970,7 @@ def ai_run_analysis_from_tickers(tickers: list[str], web_search: bool) -> dict[s
     claude_answer = ai_call_claude_with_tickers(raw_tickers, resolved_items, claude_model)
     try:
         grok_answer = ai_call_grok_with_tickers(raw_tickers, resolved_items, web_search, grok_model)
-        final_answer = ai_call_grok_synthesis(claude_answer, grok_answer, web_search, grok_model)
+        final_answer = ai_call_grok_synthesis(claude_answer, grok_answer, web_search, grok_model, tickers)
     except Exception as exc:
         if grok_model == AI_GROK_FALLBACK_MODEL:
             raise
@@ -3946,7 +3978,7 @@ def ai_run_analysis_from_tickers(tickers: list[str], web_search: bool) -> dict[s
         grok_model = AI_GROK_FALLBACK_MODEL
         grok_model_source = "fallback"
         grok_answer = ai_call_grok_with_tickers(raw_tickers, resolved_items, web_search, grok_model)
-        final_answer = ai_call_grok_synthesis(claude_answer, grok_answer, web_search, grok_model)
+        final_answer = ai_call_grok_synthesis(claude_answer, grok_answer, web_search, grok_model, tickers)
     return {
         "tickers": tickers,
         "claude": claude_answer,
@@ -3981,12 +4013,39 @@ def ai_parse_final_rows(final_text: str) -> list[dict[str, str]]:
                 "Тикер": ticker.upper(),
                 "Новость": ai_field_value(block, "Главная причина / новость (с датой)"),
                 "Сила": ai_field_value(block, "Сила катализатора"),
-                "Вход": ai_field_value(block, "Вход сейчас") or ai_field_value(block, "Overnight"),
+                "Сторона": (
+                    ai_field_value(block, "Сторона")
+                    or ai_field_value(block, "Направление")
+                    or ai_field_value(block, "Сделка")
+                ),
+                "Вход": (
+                    ai_field_value(block, "Вход сейчас")
+                    or ai_field_value(block, "Решение")
+                    or ai_field_value(block, "Вход/overnight")
+                ),
+                "Overnight": (
+                    ai_field_value(block, "Overnight")
+                    or ai_field_value(block, "Овернайт")
+                ),
                 "Риски": ai_field_value(block, "Главные риски"),
                 "Вердикт": ai_field_value(block, "Короткий вердикт"),
             }
         )
     return rows
+
+
+def ai_filter_rows_to_requested_tickers(rows: list[dict[str, str]], tickers: list[str]) -> list[dict[str, str]]:
+    allowed = {normalize_ticker_id(ticker) for ticker in tickers}
+    if not allowed:
+        return rows
+    filtered: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in rows:
+        ticker = normalize_ticker_id(row.get("Тикер"))
+        if ticker and ticker in allowed and ticker not in seen:
+            filtered.append(row)
+            seen.add(ticker)
+    return filtered
 
 
 def ai_overnight_class(value: str) -> tuple[str, str]:
@@ -3995,28 +4054,31 @@ def ai_overnight_class(value: str) -> tuple[str, str]:
         return "ai-no", "Нет"
     if "ОСТОРОЖ" in normalized or "CAUTION" in normalized:
         return "ai-careful", "Осторожно"
-    if "ДА" in normalized or normalized == "YES":
-        return "ai-yes", "Да"
+    if "ВХОД" in normalized or "ДА" in normalized or normalized == "YES":
+        return "ai-yes", "Вход"
     return "ai-neutral", value or "Неясно"
 
 
 def render_ai_ticker_cards(rows: list[dict[str, str]]) -> None:
-    for row in rows:
+    for index, row in enumerate(rows, start=1):
         badge_class, badge_text = ai_overnight_class(row["Вход"])
         st.markdown(
             f"""
             <div class="ai-ticker-card {badge_class}">
                 <div class="ai-ticker-head">
                     <div>
-                        <div class="ai-ticker-symbol">{html.escape(row["Тикер"])}</div>
+                        <div class="ai-ticker-symbol">#{index} {html.escape(row["Тикер"])}</div>
                         <div class="ai-ticker-news">{html.escape(row["Новость"] or "Новость не подтверждена")}</div>
                     </div>
                     <div class="ai-badge {badge_class}">{html.escape(badge_text)}</div>
                 </div>
                 <div class="ai-ticker-grid">
+                    <div><span>Сторона</span><strong>{html.escape(row["Сторона"] or "неясно")}</strong></div>
+                    <div><span>Вход</span><strong>{html.escape(row["Вход"] or "неясно")}</strong></div>
+                    <div><span>Overnight</span><strong>{html.escape(row["Overnight"] or "неясно")}</strong></div>
                     <div><span>Катализатор</span><strong>{html.escape(row["Сила"] or "неясно")}</strong></div>
-                    <div><span>Риски</span><strong>{html.escape(row["Риски"] or "нет данных")}</strong></div>
                 </div>
+                <div class="ai-verdict"><strong>Риск:</strong> {html.escape(row["Риски"] or "нет данных")}</div>
                 <div class="ai-verdict">{html.escape(row["Вердикт"] or "Нет короткого вердикта.")}</div>
             </div>
             """,
@@ -4026,7 +4088,10 @@ def render_ai_ticker_cards(rows: list[dict[str, str]]) -> None:
 
 def render_ai_analysis_result(result: dict[str, Any]) -> None:
     final_text = str(result.get("final") or "")
-    rows = ai_parse_final_rows(final_text)
+    rows = ai_filter_rows_to_requested_tickers(
+        ai_parse_final_rows(final_text),
+        [str(ticker) for ticker in result.get("tickers", [])],
+    )
     if rows:
         render_ai_ticker_cards(rows)
         st.dataframe(
@@ -4035,8 +4100,10 @@ def render_ai_analysis_result(result: dict[str, Any]) -> None:
             hide_index=True,
             column_config={
                 "Тикер": st.column_config.TextColumn("Тикер", width="small"),
+                "Сторона": st.column_config.TextColumn("Сторона", width="small"),
                 "Сила": st.column_config.TextColumn("Сила", width="small"),
                 "Вход": st.column_config.TextColumn("Вход", width="small"),
+                "Overnight": st.column_config.TextColumn("Overnight", width="small"),
                 "Новость": st.column_config.TextColumn("Новость", width="large"),
                 "Риски": st.column_config.TextColumn("Риски", width="medium"),
                 "Вердикт": st.column_config.TextColumn("Вердикт", width="large"),
@@ -4044,14 +4111,6 @@ def render_ai_analysis_result(result: dict[str, Any]) -> None:
         )
     else:
         st.markdown(final_text)
-
-    tab_final, tab_claude, tab_grok = st.tabs(["Итог", "Claude", "Grok"])
-    with tab_final:
-        st.markdown(final_text)
-    with tab_claude:
-        st.markdown(str(result.get("claude") or ""))
-    with tab_grok:
-        st.markdown(str(result.get("grok") or ""))
 
     report_text = f"""# AI-разбор найденных тикеров
 
@@ -4064,14 +4123,6 @@ Grok поиск новостей: {"on" if result.get("web_search") else "off"}
 ## Итог
 
 {final_text}
-
-## Claude
-
-{result.get("claude", "")}
-
-## Grok
-
-{result.get("grok", "")}
 """
     st.download_button(
         "Скачать AI-разбор",
@@ -4094,8 +4145,8 @@ def render_ai_analysis_panel(rows: list[dict[str, Any]], cfg: ScanConfig) -> Non
                 <div>
                     <div class="ai-analysis-title">AI-разбор Claude + Grok</div>
                     <div class="ai-analysis-subtitle">
-                        Берёт тикеры прямо из найденных результатов. Claude проверяет фундаментал и риски,
-                        Grok ищет новости, катализатор и overnight.
+                        Сверху вниз: лучшие идеи Long/Short по новости, моментуму и шансам на вход/overnight.
+                        Claude отсекает фундаментальные красные флаги.
                     </div>
                 </div>
                 <div class="base-results-stats">
