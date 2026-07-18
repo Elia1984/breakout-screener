@@ -370,6 +370,7 @@ def apply_custom_theme() -> None:
                 padding: 0.85rem 0.9rem;
                 margin: 0.65rem 0;
                 box-shadow: var(--desk-shadow-soft);
+                min-width: 0;
             }
 
             .ai-ticker-card.ai-yes { border-left-color: var(--desk-green); background: #f6fef9; }
@@ -384,6 +385,11 @@ def apply_custom_theme() -> None:
                 justify-content: space-between;
                 gap: 0.6rem;
                 margin-bottom: 0.55rem;
+                min-width: 0;
+            }
+
+            .ai-ticker-head > div {
+                min-width: 0;
             }
 
             .ai-ticker-symbol {
@@ -410,6 +416,7 @@ def apply_custom_theme() -> None:
                 font-size: 0.75rem;
                 font-weight: 780;
                 white-space: nowrap;
+                max-width: 100%;
             }
 
             .ai-badge.ai-yes { color: var(--desk-green); border-color: #a6f4c5; background: #ecfdf3; }
@@ -799,10 +806,28 @@ def apply_custom_theme() -> None:
                 .ai-analysis-head,
                 .ai-ticker-head {
                     flex-direction: column;
+                    gap: 0.45rem;
                 }
 
                 .ai-badge {
                     align-self: flex-start;
+                    white-space: normal;
+                }
+
+                .ai-ticker-card {
+                    padding: 0.72rem 0.75rem;
+                }
+
+                .ai-ticker-symbol {
+                    font-size: 1.08rem;
+                }
+
+                .ai-ticker-grid {
+                    gap: 0.42rem;
+                }
+
+                .ai-ticker-grid > div {
+                    padding: 0.48rem 0.52rem;
                 }
             }
 
@@ -5026,6 +5051,24 @@ def render_ai_ticker_cards(rows: list[dict[str, str]], ai_mode: str = "general")
         )
 
 
+def render_ai_result_table(rows: list[dict[str, str]]) -> None:
+    st.dataframe(
+        rows,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Тикер": st.column_config.TextColumn("Тикер", width="small"),
+            "Сторона": st.column_config.TextColumn("Сторона", width="small"),
+            "Сила": st.column_config.TextColumn("Сила", width="small"),
+            "Вход": st.column_config.TextColumn("Вход", width="small"),
+            "Overnight": st.column_config.TextColumn("Overnight", width="small"),
+            "Новость": st.column_config.TextColumn("Новость", width="large"),
+            "Риски": st.column_config.TextColumn("Риски", width="medium"),
+            "Вердикт": st.column_config.TextColumn("Вердикт", width="large"),
+        },
+    )
+
+
 def render_ai_analysis_result(result: dict[str, Any]) -> None:
     final_text = str(result.get("final") or "")
     ai_mode = str(result.get("ai_mode") or "general")
@@ -5047,21 +5090,11 @@ def render_ai_analysis_result(result: dict[str, Any]) -> None:
         )
     if rows:
         render_ai_ticker_cards(rows, ai_mode)
-        st.dataframe(
-            rows,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Тикер": st.column_config.TextColumn("Тикер", width="small"),
-                "Сторона": st.column_config.TextColumn("Сторона", width="small"),
-                "Сила": st.column_config.TextColumn("Сила", width="small"),
-                "Вход": st.column_config.TextColumn("Вход", width="small"),
-                "Overnight": st.column_config.TextColumn("Overnight", width="small"),
-                "Новость": st.column_config.TextColumn("Новость", width="large"),
-                "Риски": st.column_config.TextColumn("Риски", width="medium"),
-                "Вердикт": st.column_config.TextColumn("Вердикт", width="large"),
-            },
-        )
+        if ai_mode == "short_put":
+            with st.expander("Подробная таблица AI", expanded=False):
+                render_ai_result_table(rows)
+        else:
+            render_ai_result_table(rows)
     else:
         st.markdown(final_text)
 
@@ -6488,3 +6521,4 @@ else:
 if auto_scan_requested and auto_continuous and not st.session_state.get("auto_scan_running"):
     time.sleep(CONTINUOUS_AUTO_REFRESH_SECONDS)
     rerun_app()
+
