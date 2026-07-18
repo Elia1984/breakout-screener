@@ -375,6 +375,8 @@ def apply_custom_theme() -> None:
             .ai-ticker-card.ai-yes { border-left-color: var(--desk-green); background: #f6fef9; }
             .ai-ticker-card.ai-careful { border-left-color: var(--desk-amber); background: #fffbeb; }
             .ai-ticker-card.ai-no { border-left-color: var(--desk-red); background: #fff5f5; }
+            .ai-ticker-card.ai-short-strong { border-left-color: var(--desk-red); background: #fff1f0; }
+            .ai-ticker-card.ai-short-watch { border-left-color: #f97066; background: #fff8f7; }
 
             .ai-ticker-head {
                 display: flex;
@@ -413,6 +415,8 @@ def apply_custom_theme() -> None:
             .ai-badge.ai-yes { color: var(--desk-green); border-color: #a6f4c5; background: #ecfdf3; }
             .ai-badge.ai-careful { color: var(--desk-amber); border-color: #fedf89; background: #fffaeb; }
             .ai-badge.ai-no { color: var(--desk-red); border-color: #fecdca; background: #fff1f0; }
+            .ai-badge.ai-short-strong { color: var(--desk-red); border-color: #fecdca; background: #fff1f0; }
+            .ai-badge.ai-short-watch { color: #b42318; border-color: #fecdca; background: #fff8f7; }
 
             .ai-ticker-grid {
                 display: grid;
@@ -845,9 +849,11 @@ LOGGER = logging.getLogger("accumulation_breakout")
 
 MARKET_TZ = ZoneInfo("America/New_York")
 ALPACA_BASE = "https://data.alpaca.markets"
+ALPACA_TRADING_BASE = os.environ.get("ALPACA_TRADING_BASE", "https://paper-api.alpaca.markets").rstrip("/")
 DATA_TIMEOUT_SEC = 15
 NASDAQ_TIMEOUT_SEC = 20
 ALPACA_CACHE_TTL_SEC = 10
+ALPACA_OPTIONS_CACHE_TTL_SEC = 120
 YAHOO_CACHE_TTL_SEC = 60
 BATCH_SIZE = 120
 ALPACA_SIP_DELAY_MINUTES = 16
@@ -873,12 +879,14 @@ SIG_RVOL = "RELATIVE_VOLUME"
 SIG_VCP = "VCP_SQUEEZE"
 SIG_SPRING = "SPRING_REVERSAL"
 SIG_MOMENTUM = "MOMENTUM_PULSE"
+SIG_SHORT_PUT = "SHORT_PUT_BREAKDOWN"
 
 SCANNER_BASE = "BASE_VOLUME"
 SCANNER_RVOL = "RELATIVE_VOLUME"
 SCANNER_VCP = "VCP_SQUEEZE"
 SCANNER_SPRING = "SPRING_REVERSAL"
 SCANNER_MOMENTUM = "MOMENTUM_PULSE"
+SCANNER_SHORT_PUT = "SHORT_PUT_BREAKDOWN"
 
 MOMENTUM_DIR_BOTH = "BOTH"
 MOMENTUM_DIR_UP = "UP"
@@ -895,6 +903,7 @@ SCANNER_LABELS = {
     SCANNER_VCP: "VCP-сжатие",
     SCANNER_SPRING: "Spring-отскок",
     SCANNER_MOMENTUM: "Импульс + объём",
+    SCANNER_SHORT_PUT: "Short / Put пробой вниз",
 }
 SCANNER_HELP = {
     SCANNER_BASE: (
@@ -917,6 +926,10 @@ SCANNER_HELP = {
         "Интрадей-скринер для day trading: ищет акции, где прямо сейчас появился "
         "быстрый рост или падение на повышенном минутном объёме."
     ),
+    SCANNER_SHORT_PUT: (
+        "Ищет медвежий взрыв объёма: акция падает, объём минимум 2x, при включённом "
+        "канале пробивает низ базы вниз. В результат попадают только тикеры с живыми put-опционами."
+    ),
 }
 SCANNER_SUBTITLES = {
     SCANNER_BASE: "Полный рынок · открытие внутри вчерашней свечи · объём выше всей базы",
@@ -924,6 +937,7 @@ SCANNER_SUBTITLES = {
     SCANNER_VCP: "Полный рынок · сжатие диапазона · сухой объём · цена рядом с верхом базы",
     SCANNER_SPRING: "Полный рынок · прокол поддержки · возврат над уровень · объёмный отскок",
     SCANNER_MOMENTUM: "Полный рынок · 1Min Alpaca · быстрый импульс 5/15 мин · объёмный всплеск",
+    SCANNER_SHORT_PUT: "Short/Put · пробой вниз · объёмный всплеск · только торгуемые put-опционы",
 }
 
 SIGNAL_LABELS = {
@@ -932,6 +946,7 @@ SIGNAL_LABELS = {
     SIG_VCP: "VCP-СЖАТИЕ",
     SIG_SPRING: "SPRING ОТ ДНА",
     SIG_MOMENTUM: "ИМПУЛЬС + ОБЪЁМ",
+    SIG_SHORT_PUT: "SHORT / PUT ПРОБОЙ ВНИЗ",
 }
 SIGNAL_SHORT_LABELS = {
     SIG_BASE: "Взрыв базы",
@@ -939,6 +954,7 @@ SIGNAL_SHORT_LABELS = {
     SIG_VCP: "VCP-сжатие",
     SIG_SPRING: "Spring от дна",
     SIG_MOMENTUM: "Импульс",
+    SIG_SHORT_PUT: "Short/Put",
 }
 
 DISPLAY_COLS = [
@@ -1018,11 +1034,11 @@ AI_CLAUDE_KEY = secret_or_default("ANTHROPIC_API_KEY")
 AI_GROK_KEY = secret_or_default("XAI_API_KEY")
 AI_CLAUDE_MODEL_SETTING = secret_or_default("CLAUDE_MODEL", "auto")
 AI_GROK_MODEL_SETTING = secret_or_default("GROK_MODEL", "auto")
-AI_CLAUDE_FALLBACK_MODEL = secret_or_default("CLAUDE_FALLBACK_MODEL", "claude-fable-5")
-AI_GROK_FALLBACK_MODEL = secret_or_default("GROK_FALLBACK_MODEL", "grok-4.3")
+AI_CLAUDE_FALLBACK_MODEL = secret_or_default("CLAUDE_FALLBACK_MODEL", "claude-opus-4-8")
+AI_GROK_FALLBACK_MODEL = secret_or_default("GROK_FALLBACK_MODEL", "grok-4.5")
 AI_CLAUDE_FAMILY_PRIORITY = [
     part.strip().lower()
-    for part in secret_or_default("CLAUDE_FAMILY_PRIORITY", "hable,fable,opus,sonnet,haiku").split(",")
+    for part in secret_or_default("CLAUDE_FAMILY_PRIORITY", "mythos,fable,hable,opus,sonnet,haiku").split(",")
     if part.strip()
 ]
 AI_ALLOW_LIMITED_CLAUDE_MODELS = secret_or_default("AI_ALLOW_LIMITED_CLAUDE_MODELS", "0").strip().lower() in {
@@ -1031,6 +1047,22 @@ AI_ALLOW_LIMITED_CLAUDE_MODELS = secret_or_default("AI_ALLOW_LIMITED_CLAUDE_MODE
     "yes",
     "on",
 }
+AI_CLAUDE_ECONOMY = secret_or_default("CLAUDE_ECONOMY", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+AI_CLAUDE_ECONOMY_SKIP_FAMILIES = tuple(
+    part.strip().lower()
+    for part in secret_or_default("CLAUDE_ECONOMY_SKIP_FAMILIES", "mythos,fable,hable").split(",")
+    if part.strip()
+)
+AI_CLAUDE_ECONOMY_TARGET_FAMILIES = tuple(
+    part.strip().lower()
+    for part in secret_or_default("CLAUDE_ECONOMY_TARGET_FAMILIES", "opus,sonnet").split(",")
+    if part.strip()
+)
 AI_GROK_WEB_SEARCH_DEFAULT = secret_or_default("GROK_WEB_SEARCH", "1").strip().lower() not in {
     "0",
     "false",
@@ -1159,6 +1191,101 @@ Overnight: <Да / Осторожно / Нет>
 {grok_answer}
 """
 
+AI_CLAUDE_SHORT_PUT_PROMPT = """
+Ты — строгий риск-фильтр для Short/Put трейдинга.
+Тикеры пришли из скринера: акция падает на повышенном объёме и имеет торгуемый put.
+Сначала проанализируй фундаментал и риски, но ответ дай очень коротко.
+
+Для Short/Put плохие новости и слабый фундаментал — это медвежий драйвер, а не стоп.
+Отдельно найди то, что может помешать шорту:
+- риск squeeze / low float / crowded short;
+- плохая новость уже полностью отыграна;
+- сильная поддержка или вероятность резкого отскока;
+- buyout, позитивный FDA/earnings, сильный cash runway;
+- слишком тонкая компания или странная корпоративная структура.
+
+Формат по каждому тикеру:
+Тикер: <TICKER>
+Медвежий драйвер: <3-10 слов>
+Short/Put блокер: <Да / Нет / Неясно>
+Риск отскока: <Низкий / Средний / Высокий>
+Фундаментальный вывод: <3-10 слов>
+"""
+
+AI_GROK_SHORT_PUT_PROMPT = """
+Ты — эксперт по плохим новостям, sell-off и put/short momentum.
+Проанализируй каждый тикер из моего Short/Put скринера.
+
+Главная задача: найти свежую реальную причину объёма и падения.
+Нас интересует не просто большое падение, а объём + плохой катализатор + продолжение давления.
+
+Ищи:
+- offering / S-1 / ATM / dilution;
+- FDA/clinical fail, CRL, safety issue;
+- earnings miss / guidance cut;
+- delisting/compliance/reverse split;
+- lawsuit/investigation/fraud/accounting;
+- downgrade/price target cut;
+- failed merger/contract loss;
+- bearish sector/sympathy move.
+
+Если точная плохая новость не подтверждена, честно напиши:
+"плохая новость не подтверждена".
+
+Формат по каждому тикеру очень коротко:
+Тикер: <TICKER>
+Плохая новость: <5-10 слов + дата если есть>
+Сила негатива: <1-5>
+Моментум вниз: <Сильный / Средний / Слабый>
+Сентимент: <Медвежий / Нейтральный / Бычий>
+Short/Put: <Да / Осторожно / Нет>
+Overnight put: <Да / Осторожно / Нет>
+"""
+
+AI_SHORT_PUT_SYNTHESIS_PROMPT_TEMPLATE = """
+Ты — Grok. Ниже два анализа одного и того же списка тикеров из Short/Put скринера.
+
+ОБЯЗАТЕЛЬНЫЙ СПИСОК ТИКЕРОВ:
+{ticker_list}
+
+Claude дал фундаментальные драйверы и блокеры Short/Put.
+Grok дал плохие новости, сентимент и медвежий моментум.
+
+Сделай ультракороткий итог строго по каждому тикеру.
+Анализируй только тикеры из ОБЯЗАТЕЛЬНОГО СПИСКА.
+Не заменяй тикер похожей компанией.
+Не добавляй другие тикеры.
+Если нет подтверждённой плохой новости, так и напиши.
+
+Главный вес: повышенный объём, свежая плохая новость, медвежий сентимент, возможность продолжения вниз.
+Сильное падение само по себе не причина для отказа, но отметь риск отскока/squeeze.
+5 красных звёзд = лучший Short/Put: плохая новость подтверждена, объём сильный, рынок продаёт, явного блокера нет.
+
+Отсортируй сверху вниз:
+1. Лучшие Short/Put идеи с подтверждённой плохой новостью.
+2. Идеи с объёмом и падением, но новость слабее/неясна.
+3. Тикеры без подтверждённой плохой новости или с высоким риском отскока.
+
+Строгий формат для каждого тикера:
+
+Тикер: <TICKER>
+Главная причина / новость (с датой): <5-10 слов>
+Сила катализатора: ★★★★★
+Сторона: <Short / Нет>
+Вход сейчас: <Вход / Осторожно / Нет>
+Overnight: <Да / Осторожно / Нет>
+Главные риски: <3-8 слов>
+Короткий вердикт: <5-12 слов>
+
+---
+
+ОТВЕТ CLAUDE:
+{claude_answer}
+
+ОТВЕТ GROK:
+{grok_answer}
+"""
+
 
 @dataclass(frozen=True)
 class ScanConfig:
@@ -1193,6 +1320,22 @@ class ScanConfig:
     spring_close_position_pct: float = 60.0
     spring_volume_mult: float = 1.2
     spring_max_from_low_pct: float = 30.0
+
+    short_base_days: int = 10
+    short_channel_enabled: bool = True
+    short_max_base_width_pct: float = 40.0
+    short_volume_mult: float = 2.0
+    short_min_drop_pct: float = 0.8
+    short_break_buffer_pct: float = 0.5
+    short_close_position_pct: float = 40.0
+    short_put_min_dte: int = 0
+    short_put_max_dte: int = 60
+    short_put_strike_range_pct: float = 25.0
+    short_put_min_open_interest: int = 0
+    short_put_max_spread_pct: float = 50.0
+    short_put_min_bid: float = 0.05
+    short_put_max_contracts: int = 12
+    short_put_feed: str = "auto"
 
     momentum_direction: str = MOMENTUM_DIR_BOTH
     momentum_fast_minutes: int = 3
@@ -1635,6 +1778,8 @@ def required_history_days(cfg: ScanConfig) -> int:
         return max(int(cfg.vcp_days), 30, CHART_VISIBLE_CANDLES)
     if cfg.scanner_mode == SCANNER_SPRING:
         return max(int(cfg.spring_support_days), int(cfg.spring_low_days), 60, CHART_VISIBLE_CANDLES)
+    if cfg.scanner_mode == SCANNER_SHORT_PUT:
+        return max(int(cfg.short_base_days), 20, CHART_VISIBLE_CANDLES)
     return max(int(cfg.base_impulse_days), 5, CHART_VISIBLE_CANDLES)
 
 
@@ -1702,6 +1847,319 @@ def load_bars(
 
     progress_box.progress(0.7)
     return bars
+
+
+def parse_iso_date(value: Any) -> datetime.date | None:
+    try:
+        return datetime.fromisoformat(str(value).split("T")[0]).date()
+    except Exception:
+        return None
+
+
+def option_float(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if pd.notna(number) else default
+
+
+def option_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def option_contract_symbol(contract: dict[str, Any]) -> str:
+    for key in ("symbol", "contract_symbol", "id"):
+        value = str(contract.get(key) or "").upper().strip()
+        if value:
+            return value
+    return ""
+
+
+def option_underlying_symbol(contract: dict[str, Any]) -> str:
+    for key in ("underlying_symbol", "underlying", "root_symbol"):
+        value = str(contract.get(key) or "").upper().strip()
+        if value:
+            return value
+    return ""
+
+
+def option_quote_bid_ask(quote: dict[str, Any]) -> tuple[float, float, str]:
+    if not isinstance(quote, dict):
+        return 0.0, 0.0, ""
+    bid = option_float(
+        quote.get("bp")
+        or quote.get("bid_price")
+        or quote.get("bidPrice")
+        or quote.get("bid"),
+        0.0,
+    )
+    ask = option_float(
+        quote.get("ap")
+        or quote.get("ask_price")
+        or quote.get("askPrice")
+        or quote.get("ask"),
+        0.0,
+    )
+    quote_time = str(quote.get("t") or quote.get("timestamp") or quote.get("time") or "")
+    return bid, ask, quote_time
+
+
+@st.cache_data(ttl=ALPACA_OPTIONS_CACHE_TTL_SEC * 30, show_spinner=False)
+def fetch_alpaca_put_contracts_for_underlying(
+    underlying: str,
+    exp_gte: str,
+    exp_lte: str,
+    strike_gte: float,
+    strike_lte: float,
+) -> list[dict[str, Any]]:
+    if not ALPACA_KEY or not ALPACA_SECRET or not underlying:
+        return []
+
+    params: dict[str, Any] = {
+        "underlying_symbols": underlying.upper(),
+        "status": "active",
+        "type": "put",
+        "expiration_date_gte": exp_gte,
+        "expiration_date_lte": exp_lte,
+        "strike_price_gte": f"{strike_gte:.2f}",
+        "strike_price_lte": f"{strike_lte:.2f}",
+        "limit": 1000,
+    }
+    contracts: list[dict[str, Any]] = []
+    page_token = None
+    try:
+        for _ in range(4):
+            request_params = params.copy()
+            if page_token:
+                request_params["page_token"] = page_token
+            resp = requests.get(
+                f"{ALPACA_TRADING_BASE}/v2/options/contracts",
+                headers=ALPACA_HEADERS,
+                params=request_params,
+                timeout=DATA_TIMEOUT_SEC,
+            )
+            if resp.status_code in {401, 403, 404}:
+                LOGGER.info("Alpaca option contracts unavailable for %s: %s", underlying, resp.status_code)
+                return []
+            resp.raise_for_status()
+            payload = resp.json()
+            raw_contracts = payload.get("option_contracts") or payload.get("contracts") or []
+            if isinstance(raw_contracts, list):
+                contracts.extend(item for item in raw_contracts if isinstance(item, dict))
+            page_token = payload.get("next_page_token")
+            if not page_token:
+                break
+    except Exception as exc:
+        LOGGER.info("Alpaca option contracts failed for %s: %s", underlying, exc)
+        return []
+    return contracts
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def fetch_alpaca_option_latest_quotes(contract_symbols: tuple[str, ...], feed: str) -> dict[str, dict[str, Any]]:
+    symbols = tuple(symbol.upper() for symbol in contract_symbols if symbol)
+    if not ALPACA_KEY or not ALPACA_SECRET or not symbols:
+        return {}
+
+    requested_feed = str(feed or "auto").lower().strip()
+    feeds = ("opra", "indicative") if requested_feed == "auto" else (requested_feed,)
+    quotes: dict[str, dict[str, Any]] = {}
+    for batch in chunks(list(symbols), 100):
+        batch_quotes: dict[str, dict[str, Any]] = {}
+        for feed_name in feeds:
+            try:
+                resp = requests.get(
+                    f"{ALPACA_BASE}/v1beta1/options/quotes/latest",
+                    headers=ALPACA_HEADERS,
+                    params={
+                        "symbols": ",".join(batch),
+                        "feed": feed_name,
+                    },
+                    timeout=DATA_TIMEOUT_SEC,
+                )
+                if resp.status_code in {401, 403, 404}:
+                    LOGGER.info("Alpaca option quotes unavailable on %s: %s", feed_name, resp.status_code)
+                    continue
+                resp.raise_for_status()
+                payload = resp.json()
+                raw_quotes = payload.get("quotes") or payload.get("latestQuotes") or {}
+                if isinstance(raw_quotes, dict):
+                    for symbol, quote in raw_quotes.items():
+                        if isinstance(quote, dict):
+                            batch_quotes[str(symbol).upper()] = quote
+                if batch_quotes:
+                    break
+            except Exception as exc:
+                LOGGER.info("Alpaca option quotes failed on %s: %s", feed_name, exc)
+                continue
+        quotes.update(batch_quotes)
+    return quotes
+
+
+def candidate_put_contracts(symbol: str, price: float, cfg: ScanConfig) -> list[dict[str, Any]]:
+    if price <= 0:
+        return []
+    today = now_et().date()
+    min_dte = max(0, int(cfg.short_put_min_dte))
+    max_dte = max(min_dte, int(cfg.short_put_max_dte))
+    exp_gte = (today + timedelta(days=min_dte)).isoformat()
+    exp_lte = (today + timedelta(days=max_dte)).isoformat()
+    strike_range = max(0.01, float(cfg.short_put_strike_range_pct)) / 100
+    strike_gte = max(0.01, price * (1 - strike_range))
+    strike_lte = max(strike_gte + 0.01, price * (1 + min(strike_range, 0.10)))
+    contracts = fetch_alpaca_put_contracts_for_underlying(symbol.upper(), exp_gte, exp_lte, strike_gte, strike_lte)
+    filtered: list[dict[str, Any]] = []
+    for contract in contracts:
+        if not bool(contract.get("tradable", True)):
+            continue
+        if str(contract.get("type") or contract.get("contract_type") or "put").lower() != "put":
+            continue
+        if option_underlying_symbol(contract) not in {"", symbol.upper()}:
+            continue
+        root_symbol = str(contract.get("root_symbol") or "").upper().strip()
+        if root_symbol and root_symbol != symbol.upper():
+            continue
+        size = str(contract.get("size") or contract.get("multiplier") or "100").strip()
+        if size and size not in {"100", "100.0"}:
+            continue
+        open_interest = option_int(contract.get("open_interest") or contract.get("openInterest"), 0)
+        if open_interest < int(cfg.short_put_min_open_interest):
+            continue
+        exp_date = parse_iso_date(contract.get("expiration_date") or contract.get("expirationDate"))
+        if exp_date is None:
+            continue
+        dte = (exp_date - today).days
+        if dte < min_dte or dte > max_dte:
+            continue
+        strike = option_float(contract.get("strike_price") or contract.get("strikePrice"), 0.0)
+        if strike <= 0:
+            continue
+        filtered.append(contract)
+
+    filtered.sort(
+        key=lambda contract: (
+            option_int(contract.get("open_interest") or contract.get("openInterest"), 0),
+            -abs(option_float(contract.get("strike_price") or contract.get("strikePrice"), 0.0) - price),
+            str(contract.get("expiration_date") or ""),
+        ),
+        reverse=True,
+    )
+    return filtered[: max(1, int(cfg.short_put_max_contracts))]
+
+
+def choose_best_put_contract(
+    symbol: str,
+    price: float,
+    contracts: list[dict[str, Any]],
+    quotes: dict[str, dict[str, Any]],
+    cfg: ScanConfig,
+) -> PutOptionMatch | None:
+    best: tuple[float, PutOptionMatch] | None = None
+    today = now_et().date()
+    for contract in contracts:
+        contract_symbol = option_contract_symbol(contract)
+        if not contract_symbol:
+            continue
+        quote = quotes.get(contract_symbol.upper(), {})
+        bid, ask, quote_time = option_quote_bid_ask(quote)
+        if bid < float(cfg.short_put_min_bid) or ask <= 0 or ask < bid:
+            continue
+        mid = (bid + ask) / 2
+        if mid <= 0:
+            continue
+        spread_pct = (ask - bid) / mid * 100
+        if spread_pct > float(cfg.short_put_max_spread_pct):
+            continue
+        exp_raw = str(contract.get("expiration_date") or contract.get("expirationDate") or "")
+        exp_date = parse_iso_date(exp_raw)
+        if exp_date is None:
+            continue
+        dte = (exp_date - today).days
+        strike = option_float(contract.get("strike_price") or contract.get("strikePrice"), 0.0)
+        open_interest = option_int(contract.get("open_interest") or contract.get("openInterest"), 0)
+        if strike <= 0 or open_interest < int(cfg.short_put_min_open_interest):
+            continue
+        distance_pct = abs(strike - price) / price * 100 if price > 0 else 100.0
+        score = open_interest * 1.0 - spread_pct * 8.0 - distance_pct * 5.0 - abs(dte - 21) * 0.2
+        match = PutOptionMatch(
+            contract_symbol=contract_symbol,
+            expiration_date=exp_date.isoformat(),
+            dte=dte,
+            strike=strike,
+            open_interest=open_interest,
+            bid=bid,
+            ask=ask,
+            spread_pct=spread_pct,
+            quote_time=quote_time,
+        )
+        if best is None or score > best[0]:
+            best = (score, match)
+    return best[1] if best else None
+
+
+def annotate_row_with_put(row: dict[str, Any], match: PutOptionMatch) -> dict[str, Any]:
+    next_row = row.copy()
+    next_row.update(
+        {
+            "_put_contract": match.contract_symbol,
+            "_put_expiration": match.expiration_date,
+            "_put_dte": match.dte,
+            "_put_strike": match.strike,
+            "_put_open_interest": match.open_interest,
+            "_put_bid": match.bid,
+            "_put_ask": match.ask,
+            "_put_spread_pct": match.spread_pct,
+            "_put_quote_time": match.quote_time,
+            "Put": f"{match.contract_symbol} · {match.dte}д · ${match.strike:g}",
+            "Put OI": match.open_interest,
+            "Put spread": round(match.spread_pct, 1),
+        }
+    )
+    return next_row
+
+
+def filter_rows_with_tradable_puts(
+    rows: list[dict[str, Any]],
+    cfg: ScanConfig,
+    status_box: Any | None = None,
+) -> list[dict[str, Any]]:
+    if cfg.scanner_mode != SCANNER_SHORT_PUT or not rows:
+        return rows
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        if status_box is not None:
+            status_box.caption("Short/Put: нет ALPACA_KEY / ALPACA_SECRET для проверки опционов.")
+        return []
+
+    contract_pool: dict[str, list[dict[str, Any]]] = {}
+    contract_symbols: list[str] = []
+    total = len(rows)
+    for idx, row in enumerate(rows, start=1):
+        symbol = normalize_ticker_id(row.get("Тикер"))
+        price = safe_float(row.get("Цена"))
+        if not symbol or price <= 0:
+            continue
+        if status_box is not None:
+            status_box.caption(f"Проверяю put-опционы {idx}/{total}: {symbol}")
+        contracts = candidate_put_contracts(symbol, price, cfg)
+        contract_pool[symbol] = contracts
+        contract_symbols.extend(option_contract_symbol(contract) for contract in contracts)
+
+    unique_contract_symbols = tuple(dict.fromkeys(symbol for symbol in contract_symbols if symbol))
+    quotes = fetch_alpaca_option_latest_quotes(unique_contract_symbols, cfg.short_put_feed)
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        symbol = normalize_ticker_id(row.get("Тикер"))
+        price = safe_float(row.get("Цена"))
+        match = choose_best_put_contract(symbol, price, contract_pool.get(symbol, []), quotes, cfg)
+        if match is not None:
+            filtered.append(annotate_row_with_put(row, match))
+    if status_box is not None:
+        status_box.caption(f"Short/Put: прошло опционы {len(filtered)}/{len(rows)}")
+    return filtered
 
 
 @st.cache_data(ttl=ALPACA_CACHE_TTL_SEC, show_spinner=False)
@@ -1952,6 +2410,35 @@ class SpringSetup:
     volume_mult: float
     from_low_pct: float
     move_pct: float
+
+
+@dataclass(frozen=True)
+class ShortPutSetup:
+    support: float
+    base_low: float
+    base_high: float
+    base_width_pct: float
+    break_pct: float
+    extension_pct: float
+    close_position_pct: float
+    volume_mult: float
+    vol_max: float
+    vol_avg: float
+    move_pct: float
+    body_pct: float
+
+
+@dataclass(frozen=True)
+class PutOptionMatch:
+    contract_symbol: str
+    expiration_date: str
+    dte: int
+    strike: float
+    open_interest: int
+    bid: float
+    ask: float
+    spread_pct: float
+    quote_time: str
 
 
 @dataclass(frozen=True)
@@ -2241,6 +2728,86 @@ def build_spring_setup(df: pd.DataFrame, cfg: ScanConfig) -> SpringSetup | None:
         volume_mult=volume_mult,
         from_low_pct=from_low_pct,
         move_pct=move_pct,
+    )
+
+
+def build_short_put_setup(df: pd.DataFrame, cfg: ScanConfig) -> ShortPutSetup | None:
+    lookback = int(cfg.short_base_days)
+    if lookback < 5 or len(df) < lookback + 2:
+        return None
+
+    window = df.iloc[-(lookback + 1) : -1].copy()
+    if len(window) < lookback:
+        return None
+
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+    prev_close = float(prev["Close"])
+    latest_open = float(latest["Open"])
+    latest_high = float(latest["High"])
+    latest_low = float(latest["Low"])
+    latest_close = float(latest["Close"])
+    latest_volume = float(latest["Volume"])
+    if min(prev_close, latest_open, latest_high, latest_low, latest_close) <= 0 or latest_volume <= 0:
+        return None
+    if latest_high <= latest_low:
+        return None
+
+    base_low = float(pd.to_numeric(window["Low"], errors="coerce").min())
+    base_high = float(pd.to_numeric(window["High"], errors="coerce").max())
+    if base_low <= 0 or base_high <= base_low:
+        return None
+
+    base_width_pct = (base_high - base_low) / base_low * 100
+    if cfg.short_channel_enabled and cfg.short_max_base_width_pct > 0 and base_width_pct > cfg.short_max_base_width_pct:
+        return None
+
+    volumes = pd.to_numeric(window["Volume"], errors="coerce")
+    volumes = volumes[volumes > 0]
+    if len(volumes) < lookback:
+        return None
+    vol_max = float(volumes.max())
+    vol_avg = float(volumes.mean())
+    if vol_max <= 0:
+        return None
+    volume_mult = latest_volume / vol_max
+    if volume_mult < cfg.short_volume_mult:
+        return None
+
+    move_pct = (latest_close - prev_close) / prev_close * 100
+    if move_pct > -abs(cfg.short_min_drop_pct):
+        return None
+
+    if latest_close >= latest_open:
+        return None
+
+    close_position = (latest_close - latest_low) / (latest_high - latest_low) * 100
+    if close_position > cfg.short_close_position_pct:
+        return None
+
+    support = base_low
+    break_pct = (support - latest_close) / support * 100 if support > 0 else 0.0
+    if cfg.short_channel_enabled:
+        if break_pct < cfg.short_break_buffer_pct:
+            return None
+    else:
+        break_pct = max(0.0, break_pct)
+
+    body_pct = abs(latest_close - latest_open) / latest_open * 100
+    extension_pct = (support - latest_close) / support * 100 if support > 0 else 0.0
+    return ShortPutSetup(
+        support=support,
+        base_low=base_low,
+        base_high=base_high,
+        base_width_pct=base_width_pct,
+        break_pct=break_pct,
+        extension_pct=max(0.0, extension_pct),
+        close_position_pct=close_position,
+        volume_mult=volume_mult,
+        vol_max=vol_max,
+        vol_avg=vol_avg,
+        move_pct=move_pct,
+        body_pct=body_pct,
     )
 
 
@@ -2841,6 +3408,17 @@ def score_spring(setup: SpringSetup, cfg: ScanConfig) -> int:
     return int(round(break_score + reclaim_score + close_score + volume_score + low_score))
 
 
+def score_short_put(setup: ShortPutSetup, cfg: ScanConfig) -> int:
+    volume_score = min(55.0, setup.volume_mult / max(cfg.short_volume_mult, 0.1) * 34.0)
+    drop_score = min(12.0, abs(setup.move_pct) / max(abs(cfg.short_min_drop_pct), 0.1) * 5.0)
+    close_score = max(0.0, min(18.0, (cfg.short_close_position_pct - setup.close_position_pct) / max(cfg.short_close_position_pct, 1.0) * 18.0))
+    break_score = min(10.0, setup.break_pct / max(cfg.short_break_buffer_pct, 0.1) * 4.0) if cfg.short_channel_enabled else 5.0
+    tight_score = 0.0
+    if cfg.short_channel_enabled and cfg.short_max_base_width_pct > 0:
+        tight_score = max(0.0, min(8.0, (cfg.short_max_base_width_pct - setup.base_width_pct) / cfg.short_max_base_width_pct * 8.0))
+    return max(0, int(round(volume_score + drop_score + close_score + break_score + tight_score)))
+
+
 def score_momentum_pulse(setup: MomentumPulse, cfg: ScanConfig) -> int:
     volume_score = min(
         50.0,
@@ -3116,6 +3694,50 @@ def detect_signal(
             "Время": now_et_str(),
         }
 
+    if cfg.scanner_mode == SCANNER_SHORT_PUT:
+        setup = build_short_put_setup(df, cfg)
+        if setup is None:
+            return None
+        score = score_short_put(setup, cfg)
+        return {
+            "_sig": SIG_SHORT_PUT,
+            "_rvol": setup.volume_mult,
+            "_score": score,
+            "_width": setup.base_width_pct,
+            "_gap": latest_gap_pct,
+            "_move_pct": setup.move_pct,
+            "_chart_payload": pattern_chart_payload(
+                df,
+                cfg.short_base_days,
+                setup.base_low,
+                setup.base_high,
+                "short-база",
+                visible_candles=CHART_VISIBLE_CANDLES,
+                band_days=cfg.short_base_days,
+                timeframe="D",
+            ),
+            "_scanner": cfg.scanner_mode,
+            "_requires_put_filter": True,
+            "Тикер": ticker_info["ticker"],
+            "Название": (ticker_info.get("name") or "")[:34],
+            "Биржа": ticker_info.get("exchange", ""),
+            "Сигнал": SIGNAL_LABELS[SIG_SHORT_PUT],
+            "Цена": round(price, 4),
+            "Выход %": f"{setup.move_pct:+.1f}%",
+            "Гэп сегодня": f"{latest_gap_pct:+.1f}%",
+            "Объём ×": round(setup.volume_mult, 2),
+            "Объём": int(latest_volume),
+            "Макс. объём периода": int(setup.vol_max),
+            "Тело свечи %": round(setup.body_pct, 1),
+            "Пробой": f"{setup.break_pct:.1f}%",
+            "Закрытие дня": f"{setup.close_position_pct:.0f}%",
+            "Долларовый объём": int(price * latest_volume),
+            "Капитализация": ticker_info.get("market_cap") or 0,
+            "Балл": score,
+            "Источник": df.attrs.get("source", ""),
+            "Время": now_et_str(),
+        }
+
     if cfg.scanner_mode == SCANNER_SPRING:
         setup = build_spring_setup(df, cfg)
         if setup is None:
@@ -3283,6 +3905,10 @@ def telegram_signal_message(row: dict[str, Any]) -> str:
     ticker = html.escape(ticker)
     rvol = safe_float(row.get("_rvol") or row.get("Объём ×"))
     move_pct = safe_float(row.get("_move_pct"))
+    if str(row.get("_sig", "")) == SIG_SHORT_PUT:
+        spread = safe_float(row.get("_put_spread_pct"))
+        spread_part = f" spread {spread:.0f}%" if spread > 0 else ""
+        return f"{ticker} {rvol:.2f}x {move_pct:+.1f}% PUT ok{spread_part}"
     if rvol <= 0:
         return f"{ticker} 0.00x +0%"
     return f"{ticker} {rvol:.2f}x {move_pct:+.1f}%"
@@ -3451,6 +4077,8 @@ def result_matches_active_patterns(row: dict[str, Any], cfg: ScanConfig) -> bool
         return signal_code == SIG_VCP
     if cfg.scanner_mode == SCANNER_SPRING:
         return signal_code == SIG_SPRING
+    if cfg.scanner_mode == SCANNER_SHORT_PUT:
+        return signal_code == SIG_SHORT_PUT
     if cfg.scanner_mode == SCANNER_MOMENTUM:
         return signal_code == SIG_MOMENTUM
     return False
@@ -3577,6 +4205,9 @@ def display_column_config(base_pattern: bool = False) -> dict[str, Any]:
         "Объём": st.column_config.NumberColumn("Объём", width="medium"),
         "Долларовый объём": st.column_config.NumberColumn("Долларовый объём", width="medium"),
         "Капитализация": st.column_config.NumberColumn("Капитализация", width="medium"),
+        "Put": st.column_config.TextColumn("Put", width="large", help="Лучший найденный put-контракт после фильтра ликвидности."),
+        "Put OI": st.column_config.NumberColumn("Put OI", width="small", help="Open interest выбранного put-контракта."),
+        "Put spread": st.column_config.NumberColumn("Put spread %", width="small", format="%.1f%%"),
         "Время": st.column_config.TextColumn("Время", width="small"),
     }
 
@@ -3620,6 +4251,11 @@ def display_frame(rows: list[dict[str, Any]], base_pattern: bool = False, includ
         frame["Капитализация"] = pd.to_numeric(frame["Капитализация"], errors="coerce").astype("Int64")
     if not include_chart and "График" in display_cols:
         display_cols = [col for col in display_cols if col != "График"]
+    option_cols = [col for col in ("Put", "Put OI", "Put spread") if col in frame.columns]
+    if option_cols:
+        display_cols = [col for col in display_cols if col not in option_cols]
+        insert_at = display_cols.index("Время") if "Время" in display_cols else len(display_cols)
+        display_cols = display_cols[:insert_at] + option_cols + display_cols[insert_at:]
 
     columns = [col for col in display_cols if col in frame.columns]
     return frame[columns]
@@ -3693,13 +4329,19 @@ def ai_limit_options(total: int) -> list[int]:
     return options or [0]
 
 
+def ai_analysis_mode_for_config(cfg: ScanConfig) -> str:
+    return "short_put" if cfg.scanner_mode == SCANNER_SHORT_PUT else "general"
+
+
 def ai_result_signature(tickers: list[str], cfg: ScanConfig, web_search: bool) -> str:
     return "|".join(
         [
             cfg.scanner_mode,
+            ai_analysis_mode_for_config(cfg),
             ",".join(tickers),
             AI_CLAUDE_MODEL_SETTING,
             AI_GROK_MODEL_SETTING,
+            "claude_economy" if AI_CLAUDE_ECONOMY else "claude_max",
             "web" if web_search else "no_web",
         ]
     )
@@ -3709,14 +4351,29 @@ def ai_auto_model_requested(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"", "auto", "latest", "auto-latest", "best"}
 
 
+def ai_claude_setting_label() -> str:
+    setting = str(AI_CLAUDE_MODEL_SETTING or "").strip()
+    if ai_auto_model_requested(setting) and AI_CLAUDE_ECONOMY:
+        return "auto economy"
+    return setting or "auto"
+
+
 def ai_model_version_tuple(model_id: str) -> tuple[int, ...]:
     return tuple(int(part) for part in re.findall(r"\d+", model_id)[:6])
 
 
-def ai_claude_family_score(model_id: str) -> int:
+def ai_claude_model_family(model_id: str) -> str:
     lowered = model_id.lower()
-    for index, family in enumerate(AI_CLAUDE_FAMILY_PRIORITY):
+    for family in AI_CLAUDE_FAMILY_PRIORITY:
         if family and family in lowered:
+            return family
+    return ""
+
+
+def ai_claude_family_score(model_id: str) -> int:
+    model_family = ai_claude_model_family(model_id)
+    for index, family in enumerate(AI_CLAUDE_FAMILY_PRIORITY):
+        if family == model_family:
             return len(AI_CLAUDE_FAMILY_PRIORITY) - index
     return 0
 
@@ -3756,12 +4413,22 @@ def ai_pick_claude_model(models: list[dict[str, Any]]) -> str:
         model_id = str(model.get("id") or "")
         if not model_id.startswith("claude-"):
             continue
-        if "mythos" in model_id.lower() and not AI_ALLOW_LIMITED_CLAUDE_MODELS:
+        family = ai_claude_model_family(model_id)
+        if family in {"mythos", "hable"} and not AI_ALLOW_LIMITED_CLAUDE_MODELS:
             continue
         candidates.append(model)
     if not candidates:
         return AI_CLAUDE_FALLBACK_MODEL
-    return str(max(candidates, key=ai_claude_model_score).get("id") or AI_CLAUDE_FALLBACK_MODEL)
+
+    ordered = sorted(candidates, key=ai_claude_model_score, reverse=True)
+    best_family = ai_claude_model_family(str(ordered[0].get("id") or ""))
+    if AI_CLAUDE_ECONOMY and best_family in AI_CLAUDE_ECONOMY_SKIP_FAMILIES:
+        for target_family in AI_CLAUDE_ECONOMY_TARGET_FAMILIES:
+            for model in ordered:
+                if ai_claude_model_family(str(model.get("id") or "")) == target_family:
+                    return str(model.get("id") or AI_CLAUDE_FALLBACK_MODEL)
+
+    return str(ordered[0].get("id") or AI_CLAUDE_FALLBACK_MODEL)
 
 
 def ai_resolve_claude_model() -> tuple[str, str]:
@@ -3770,7 +4437,7 @@ def ai_resolve_claude_model() -> tuple[str, str]:
         return setting, "manual"
     try:
         model = ai_pick_claude_model(ai_fetch_claude_models())
-        return model, "auto"
+        return model, "economy" if AI_CLAUDE_ECONOMY else "auto"
     except Exception as exc:
         LOGGER.warning("Claude model auto-selection failed: %s", exc)
         return AI_CLAUDE_FALLBACK_MODEL, "fallback"
@@ -3900,9 +4567,15 @@ def ai_grok_tools(web_search: bool) -> list[dict[str, Any]]:
     return [{"type": "web_search"}] if web_search else []
 
 
-def ai_call_claude_with_tickers(raw_tickers: str, resolved_items: list[dict[str, Any]], model: str) -> str:
+def ai_call_claude_with_tickers(
+    raw_tickers: str,
+    resolved_items: list[dict[str, Any]],
+    model: str,
+    ai_mode: str = "general",
+) -> str:
     import anthropic
 
+    prompt = AI_CLAUDE_SHORT_PUT_PROMPT if ai_mode == "short_put" else AI_CLAUDE_PROMPT
     client = anthropic.Anthropic(api_key=AI_CLAUDE_KEY)
     response = client.messages.create(
         model=model,
@@ -3911,7 +4584,7 @@ def ai_call_claude_with_tickers(raw_tickers: str, resolved_items: list[dict[str,
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": ai_ticker_prompt(AI_CLAUDE_PROMPT, raw_tickers, resolved_items)}
+                    {"type": "text", "text": ai_ticker_prompt(prompt, raw_tickers, resolved_items)}
                 ],
             }
         ],
@@ -3935,8 +4608,10 @@ def ai_call_grok_with_tickers(
     resolved_items: list[dict[str, Any]],
     web_search: bool,
     model: str,
+    ai_mode: str = "general",
 ) -> str:
     client = ai_make_grok_client()
+    prompt = AI_GROK_SHORT_PUT_PROMPT if ai_mode == "short_put" else AI_GROK_SENTIMENT_PROMPT
     request: dict[str, Any] = {
         "model": model,
         "max_output_tokens": AI_GROK_MAX_TOKENS,
@@ -3945,7 +4620,7 @@ def ai_call_grok_with_tickers(
             {
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": ai_ticker_prompt(AI_GROK_SENTIMENT_PROMPT, raw_tickers, resolved_items)}
+                    {"type": "input_text", "text": ai_ticker_prompt(prompt, raw_tickers, resolved_items)}
                 ],
             }
         ],
@@ -3963,9 +4638,11 @@ def ai_call_grok_synthesis(
     web_search: bool,
     model: str,
     tickers: list[str],
+    ai_mode: str = "general",
 ) -> str:
     client = ai_make_grok_client()
-    prompt = AI_FINAL_SYNTHESIS_PROMPT_TEMPLATE.format(
+    template = AI_SHORT_PUT_SYNTHESIS_PROMPT_TEMPLATE if ai_mode == "short_put" else AI_FINAL_SYNTHESIS_PROMPT_TEMPLATE
+    prompt = template.format(
         ticker_list=", ".join(tickers),
         claude_answer=claude_answer.strip(),
         grok_answer=grok_answer.strip(),
@@ -3988,25 +4665,26 @@ def ai_call_grok_synthesis(
     return ai_grok_text(response)
 
 
-def ai_run_analysis_from_tickers(tickers: list[str], web_search: bool) -> dict[str, Any]:
+def ai_run_analysis_from_tickers(tickers: list[str], web_search: bool, ai_mode: str = "general") -> dict[str, Any]:
     raw_tickers = " ".join(tickers)
     resolved_items = ai_resolved_items_for_tickers(tickers)
     claude_model, claude_model_source = ai_resolve_claude_model()
     grok_model, grok_model_source = ai_resolve_grok_model()
-    claude_answer = ai_call_claude_with_tickers(raw_tickers, resolved_items, claude_model)
+    claude_answer = ai_call_claude_with_tickers(raw_tickers, resolved_items, claude_model, ai_mode)
     try:
-        grok_answer = ai_call_grok_with_tickers(raw_tickers, resolved_items, web_search, grok_model)
-        final_answer = ai_call_grok_synthesis(claude_answer, grok_answer, web_search, grok_model, tickers)
+        grok_answer = ai_call_grok_with_tickers(raw_tickers, resolved_items, web_search, grok_model, ai_mode)
+        final_answer = ai_call_grok_synthesis(claude_answer, grok_answer, web_search, grok_model, tickers, ai_mode)
     except Exception as exc:
         if grok_model == AI_GROK_FALLBACK_MODEL:
             raise
         LOGGER.warning("Grok model %s failed, retrying %s: %s", grok_model, AI_GROK_FALLBACK_MODEL, exc)
         grok_model = AI_GROK_FALLBACK_MODEL
         grok_model_source = "fallback"
-        grok_answer = ai_call_grok_with_tickers(raw_tickers, resolved_items, web_search, grok_model)
-        final_answer = ai_call_grok_synthesis(claude_answer, grok_answer, web_search, grok_model, tickers)
+        grok_answer = ai_call_grok_with_tickers(raw_tickers, resolved_items, web_search, grok_model, ai_mode)
+        final_answer = ai_call_grok_synthesis(claude_answer, grok_answer, web_search, grok_model, tickers, ai_mode)
     return {
         "tickers": tickers,
+        "ai_mode": ai_mode,
         "claude": claude_answer,
         "grok": grok_answer,
         "final": final_answer,
@@ -4074,7 +4752,19 @@ def ai_filter_rows_to_requested_tickers(rows: list[dict[str, str]], tickers: lis
     return filtered
 
 
-def ai_overnight_class(value: str) -> tuple[str, str]:
+def ai_star_count(value: str) -> int:
+    text = str(value or "")
+    stars = text.count("★")
+    if stars:
+        return max(1, min(5, stars))
+    match = re.search(r"\b([1-5])\b", text)
+    return int(match.group(1)) if match else 0
+
+
+def ai_overnight_class(value: str, side: str = "", ai_mode: str = "general", stars: str = "") -> tuple[str, str]:
+    if ai_mode == "short_put" and "SHORT" in str(side or "").upper():
+        count = ai_star_count(stars)
+        return ("ai-short-strong" if count >= 4 else "ai-short-watch"), f"PUT {count or '?'}"
     normalized = value.strip().upper()
     if "НЕТ" in normalized or normalized == "NO":
         return "ai-no", "Нет"
@@ -4085,9 +4775,9 @@ def ai_overnight_class(value: str) -> tuple[str, str]:
     return "ai-neutral", value or "Неясно"
 
 
-def render_ai_ticker_cards(rows: list[dict[str, str]]) -> None:
+def render_ai_ticker_cards(rows: list[dict[str, str]], ai_mode: str = "general") -> None:
     for index, row in enumerate(rows, start=1):
-        badge_class, badge_text = ai_overnight_class(row["Вход"])
+        badge_class, badge_text = ai_overnight_class(row["Вход"], row.get("Сторона", ""), ai_mode, row.get("Сила", ""))
         st.markdown(
             f"""
             <div class="ai-ticker-card {badge_class}">
@@ -4114,12 +4804,24 @@ def render_ai_ticker_cards(rows: list[dict[str, str]]) -> None:
 
 def render_ai_analysis_result(result: dict[str, Any]) -> None:
     final_text = str(result.get("final") or "")
+    ai_mode = str(result.get("ai_mode") or "general")
     rows = ai_filter_rows_to_requested_tickers(
         ai_parse_final_rows(final_text),
         [str(ticker) for ticker in result.get("tickers", [])],
     )
+    if ai_mode == "short_put":
+        rows = sorted(
+            rows,
+            key=lambda row: (
+                "SHORT" in str(row.get("Сторона", "")).upper(),
+                ai_star_count(row.get("Сила", "")),
+                "ВХОД" in str(row.get("Вход", "")).upper(),
+                "ДА" in str(row.get("Overnight", "")).upper(),
+            ),
+            reverse=True,
+        )
     if rows:
-        render_ai_ticker_cards(rows)
+        render_ai_ticker_cards(rows, ai_mode)
         st.dataframe(
             rows,
             use_container_width=True,
@@ -4142,6 +4844,7 @@ def render_ai_analysis_result(result: dict[str, Any]) -> None:
 
 Создано: {result.get("created_at", "")}
 Тикеры: {", ".join(result.get("tickers", []))}
+Режим AI: {"Short/Put" if ai_mode == "short_put" else "Обычный"}
 Модель Claude: {result.get("claude_model", AI_CLAUDE_MODEL_SETTING)} ({result.get("claude_model_source", "setting")})
 Модель Grok: {result.get("grok_model", AI_GROK_MODEL_SETTING)} ({result.get("grok_model_source", "setting")})
 Поиск новостей Grok: {"включён" if result.get("web_search") else "выключен"}
@@ -4165,21 +4868,31 @@ def render_ai_analysis_panel(rows: list[dict[str, Any]], cfg: ScanConfig) -> Non
     if not tickers_all:
         return
 
+    ai_mode = ai_analysis_mode_for_config(cfg)
+    ai_subtitle = (
+        "Short/Put: сверху лучшие медвежьи идеи по плохой новости, объёму, put-ликвидности и риску отскока."
+        if ai_mode == "short_put"
+        else "Сверху вниз: лучшие идеи Long/Short по новости, моментуму и шансам на вход/overnight. Claude отсекает фундаментальные красные флаги."
+    )
+    button_label = "Разобрать Short/Put идеи Claude + Grok" if ai_mode == "short_put" else "Разобрать найденные тикеры Claude + Grok"
+    spinner_text = (
+        "AI-разбор Short/Put: Claude проверяет блокеры, Grok ищет плохие новости..."
+        if ai_mode == "short_put"
+        else "AI-разбор: Claude проверяет риски, Grok ищет новости..."
+    )
+
     st.markdown(
         f"""
         <div class="ai-analysis-panel">
             <div class="ai-analysis-head">
                 <div>
                     <div class="ai-analysis-title">AI-разбор Claude + Grok</div>
-                    <div class="ai-analysis-subtitle">
-                        Сверху вниз: лучшие идеи Long/Short по новости, моментуму и шансам на вход/overnight.
-                        Claude отсекает фундаментальные красные флаги.
-                    </div>
+                    <div class="ai-analysis-subtitle">{html.escape(ai_subtitle)}</div>
                 </div>
                 <div class="base-results-stats">
                     {chip("Доступно", len(tickers_all), "blue")}
                     {chip("Источник", SCANNER_LABELS.get(cfg.scanner_mode, "Скринер"))}
-                    {chip("Claude", AI_CLAUDE_MODEL_SETTING)}
+                    {chip("Claude", ai_claude_setting_label())}
                     {chip("Grok", AI_GROK_MODEL_SETTING)}
                 </div>
             </div>
@@ -4216,7 +4929,7 @@ def render_ai_analysis_panel(rows: list[dict[str, Any]], cfg: ScanConfig) -> Non
         st.warning(ai_missing_secrets_message(missing))
 
     analyze_clicked = st.button(
-        "Разобрать найденные тикеры Claude + Grok",
+        button_label,
         type="primary",
         use_container_width=True,
         disabled=bool(missing),
@@ -4224,8 +4937,8 @@ def render_ai_analysis_panel(rows: list[dict[str, Any]], cfg: ScanConfig) -> Non
     signature = ai_result_signature(selected_tickers, cfg, web_search)
     if analyze_clicked:
         try:
-            with st.spinner("AI-разбор: Claude проверяет риски, Grok ищет новости..."):
-                result = ai_run_analysis_from_tickers(selected_tickers, web_search)
+            with st.spinner(spinner_text):
+                result = ai_run_analysis_from_tickers(selected_tickers, web_search, ai_mode)
             result["signature"] = signature
             st.session_state.ai_analysis_result = result
             st.session_state.ai_analysis_error = ""
@@ -4252,7 +4965,7 @@ def render_results_summary(rows: list[dict[str, Any]]) -> None:
     total_dollar_volume = sum(safe_float(row.get("Долларовый объём")) for row in rows)
     latest_time = str(rows[0].get("Время", now_et_str())) if rows else now_et_str()
     count_parts = []
-    for code in (SIG_BASE, SIG_RVOL, SIG_VCP, SIG_SPRING, SIG_MOMENTUM):
+    for code in (SIG_BASE, SIG_RVOL, SIG_VCP, SIG_SPRING, SIG_SHORT_PUT, SIG_MOMENTUM):
         signal_count = sum(1 for row in rows if str(row.get("_sig", "")) == code)
         if signal_count:
             count_parts.append(f"{SIGNAL_SHORT_LABELS.get(code, code)} {signal_count}")
@@ -4504,7 +5217,7 @@ with st.sidebar:
         """
         <div class="sidebar-brand">
             <div class="sidebar-brand-title">PR Screener</div>
-            <div class="sidebar-brand-subtitle">Взрыв базы · RW · VCP · Spring · Pulse</div>
+            <div class="sidebar-brand-subtitle">Взрыв базы · RW · VCP · Spring · Short/Put · Pulse</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -4518,8 +5231,7 @@ with st.sidebar:
         index=0,
         horizontal=False,
         help=(
-            "Выбери один активный поиск. Настройки остальных режимов ниже останутся видны, "
-            "но будут серыми и не будут участвовать в скане."
+            "Выбери один активный поиск. Ниже будут показаны только настройки выбранного режима."
         ),
     )
     scanner_mode = {label: code for code, label in SCANNER_LABELS.items()}[scanner_label]
@@ -4527,6 +5239,7 @@ with st.sidebar:
     rvol_active = scanner_mode == SCANNER_RVOL
     vcp_active = scanner_mode == SCANNER_VCP
     spring_active = scanner_mode == SCANNER_SPRING
+    short_put_active = scanner_mode == SCANNER_SHORT_PUT
     momentum_active = scanner_mode == SCANNER_MOMENTUM
     st.caption(SCANNER_HELP[scanner_mode])
 
@@ -4578,7 +5291,7 @@ with st.sidebar:
         "Макс. цена для списка рынка",
         min_value=0.1,
         max_value=500.0,
-        value=50.0 if momentum_active else 20.0,
+        value=500.0 if short_put_active else (50.0 if momentum_active else 20.0),
         step=1.0,
         help="Фильтр цены применяется ещё на этапе списка рынка.",
     )
@@ -4603,314 +5316,392 @@ with st.sidebar:
         5,
         help="Отбрасывает тикеры, у которых последний дневной бар слишком старый.",
     )
-    min_dollar_volume_input = st.number_input(
-        "Мин. долларовый объём сегодня",
-        0,
-        100_000_000,
-        250_000,
-        50_000,
-        disabled=base_impulse_only or momentum_active,
-        help="Для RW, VCP и Spring фильтрует слишком тонкие акции. Для Взрыва из базы выключено, чтобы старый режим работал как раньше. Для Pulse есть отдельные 5м/15м фильтры.",
-    )
-    min_dollar_volume = 0 if base_impulse_only or momentum_active else int(min_dollar_volume_input)
-
-    st.markdown('<div class="desk-section-title">Взрыв из базы</div>', unsafe_allow_html=True)
-    base_impulse_enabled = base_impulse_only
-    base_impulse_days = st.slider(
-        "Предыдущих свечей для сравнения объёма",
-        5,
-        20,
-        10,
-        1,
-        disabled=not base_impulse_only,
-        help=SCANNER_HELP[SCANNER_BASE],
-    )
-    base_width_filter_enabled = st.toggle(
-        "Учитывать ширину базы",
-        value=True,
-        disabled=not base_impulse_only,
-        help=(
-            "По умолчанию включено: ищем именно накопление в узкой базе. "
-            "Если выключить, скринер не будет отсеивать широкие базы, но оставит остальные условия: "
-            "открытие внутри вчерашней свечи и объём выше максимума прошлых свечей."
-        ),
-    )
-    base_max_width_pct = st.slider(
-        "Макс. ширина базы (%)",
-        2.0,
-        80.0,
-        40.0,
-        1.0,
-        disabled=not base_impulse_only or not base_width_filter_enabled,
-        help="Ширина канала считается по выбранным предыдущим свечам: high базы против low базы. 40% значит, что база за выбранные дни должна быть не шире 40%.",
-    )
-    base_volume_mult = st.slider(
-        "Сегодняшний объём выше каждой прошлой свечи ×",
-        1,
-        50,
-        2,
-        1,
-        disabled=not base_impulse_only,
-        help="1 означает: сегодняшний объём строго больше максимального объёма среди предыдущих свечей. 50 означает: больше максимума предыдущих свечей в 50 раз.",
-    )
-
-    st.markdown('<div class="desk-section-title">Относительный объём RW</div>', unsafe_allow_html=True)
-    rvol_avg_days = st.slider(
-        "RW · средний объём за дней",
-        5,
-        60,
-        30,
-        1,
-        disabled=not rvol_active,
-        help="Сколько предыдущих дневных свечей берём для средней. Базовый рыночный пресет: 30 дней, чтобы сравнивать с месячной нормой.",
-    )
-    rvol_mult = st.slider(
-        "RW · объём сегодня выше средней ×",
-        1.5,
-        20.0,
-        2.0,
-        0.5,
-        disabled=not rvol_active,
-        help="Сигнал появляется, когда сегодняшний объём минимум во столько раз выше средней за выбранные дни. Базовый пресет: 2x как заметное отклонение от обычного объёма.",
-    )
-
-    st.markdown('<div class="desk-section-title">VCP-сжатие</div>', unsafe_allow_html=True)
-    vcp_days = st.slider(
-        "Период VCP, дней",
-        30,
-        90,
-        60,
-        5,
-        disabled=not vcp_active,
-        help=SCANNER_HELP[SCANNER_VCP],
-    )
-    vcp_max_base_width_pct = st.slider("Макс. ширина всей базы (%)", 15.0, 70.0, 30.0, 1.0, disabled=not vcp_active)
-    vcp_max_recent_width_pct = st.slider("Макс. ширина последней трети (%)", 3.0, 25.0, 10.0, 0.5, disabled=not vcp_active)
-    vcp_min_compression_pct = st.slider("Минимальное сжатие диапазона (%)", 10.0, 70.0, 35.0, 1.0, disabled=not vcp_active)
-    vcp_near_high_pct = st.slider("Цена не дальше от верха базы (%)", 2.0, 20.0, 10.0, 0.5, disabled=not vcp_active)
-    vcp_dry_volume_ratio = st.slider(
-        "Сухой объём: последняя треть / первые две",
-        0.30,
-        1.20,
-        0.80,
-        0.05,
-        disabled=not vcp_active,
-        help="0.80 значит: средний объём последней трети базы должен быть не выше 80% от среднего объёма первых двух третей.",
-    )
-
-    st.markdown('<div class="desk-section-title">Spring-отскок</div>', unsafe_allow_html=True)
-    spring_support_days = st.slider("Поддержка за дней", 30, 120, 60, 5, disabled=not spring_active, help=SCANNER_HELP[SCANNER_SPRING])
-    spring_low_days = st.slider("Дно смотреть за дней", 60, 250, 120, 10, disabled=not spring_active)
-    spring_break_pct = st.slider("Минимальный прокол поддержки (%)", 0.1, 10.0, 0.7, 0.1, disabled=not spring_active)
-    spring_reclaim_pct = st.slider("Возврат выше поддержки (%)", 0.0, 5.0, 0.2, 0.1, disabled=not spring_active)
-    spring_close_position_pct = st.slider(
-        "Закрытие в верхней части свечи (%)",
-        40.0,
-        90.0,
-        60.0,
-        1.0,
-        disabled=not spring_active,
-        help="60% значит: закрытие должно быть выше середины дневного диапазона и ближе к high.",
-    )
-    spring_volume_mult = st.slider("Объём выше среднего ×", 1.0, 5.0, 1.2, 0.1, disabled=not spring_active)
-    spring_max_from_low_pct = st.slider("Цена не дальше от дна периода (%)", 5.0, 80.0, 30.0, 1.0, disabled=not spring_active)
-
-    st.markdown('<div class="desk-section-title">Pulse · что-то произошло</div>', unsafe_allow_html=True)
-    momentum_direction_label = st.selectbox(
-        "Направление импульса",
-        list(MOMENTUM_DIRECTION_LABELS.keys()),
-        index=0,
-        disabled=not momentum_active,
-        help="По умолчанию ищем и резкий рост, и резкое падение. Это режим события: сначала поймать интерес, дальше ты сам решаешь направление.",
-    )
-    momentum_direction = MOMENTUM_DIRECTION_LABELS[momentum_direction_label]
-    momentum_col_1, momentum_col_2 = st.columns(2)
-    with momentum_col_1:
-        momentum_fast_minutes = st.slider(
-            "Быстрый импульс, минут",
-            3,
-            10,
-            3,
-            1,
-            disabled=not momentum_active,
-            help="Короткое окно старта: здесь Pulse ищет самый первый всплеск объёма.",
-        )
-        momentum_min_fast_move_pct = st.slider(
-            "Мин. движение за быстрое окно (%)",
-            0.3,
-            10.0,
-            0.7,
-            0.1,
-            disabled=not momentum_active,
-            help="Движение не главное, но оно должно подтверждать, что повышенный объём реально двигает цену.",
-        )
-        momentum_volume_mult = st.slider(
-            "Объём быстрого окна выше нормы ×",
-            1.5,
-            20.0,
-            6.0,
-            0.5,
-            disabled=not momentum_active,
-            help="Главный фильтр Pulse. 6x значит: текущий объём должен быть минимум в шесть раз выше внутридневной нормы.",
-        )
-        momentum_min_5m_dollar_volume = st.number_input(
-            "Мин. $ объём быстрого окна",
-            0,
-            50_000_000,
-            500_000,
-            50_000,
-            disabled=not momentum_active,
-        )
-    with momentum_col_2:
-        momentum_confirm_minutes = st.slider(
-            "Подтверждение, минут",
-            10,
-            30,
-            10,
-            1,
-            disabled=not momentum_active,
-            help="Короткое подтверждение старта, чтобы не ловить одиночный случайный принт.",
-        )
-        momentum_min_confirm_move_pct = st.slider(
-            "Мин. движение за подтверждение (%)",
-            0.5,
-            15.0,
-            1.2,
-            0.1,
-            disabled=not momentum_active,
-        )
-        momentum_confirm_volume_mult = st.slider(
-            "Объём подтверждения выше нормы ×",
-            1.2,
-            15.0,
-            3.0,
-            0.2,
-            disabled=not momentum_active,
-        )
-        momentum_min_15m_dollar_volume = st.number_input(
-            "Мин. $ объём подтверждения",
+    if base_impulse_only or momentum_active:
+        min_dollar_volume = 0
+    else:
+        min_dollar_volume_input = st.number_input(
+            "Мин. долларовый объём сегодня",
             0,
             100_000_000,
-            1_250_000,
-            50_000,
-            disabled=not momentum_active,
+            5_000_000 if short_put_active else 250_000,
+            250_000 if short_put_active else 50_000,
+            help="Для RW, VCP, Spring и Short/Put фильтрует слишком тонкие акции.",
         )
-    momentum_volume_baseline_minutes = st.slider(
-        "Норму объёма считать по предыдущим минутам",
-        20,
-        120,
-        60,
-        5,
-        disabled=not momentum_active,
-        help="Берём предыдущий внутридневной участок и сравниваем с ним текущий всплеск. Чем больше окно, тем спокойнее фильтр.",
-    )
-    momentum_min_day_dollar_volume = st.number_input(
-        "Мин. $ объём с начала сессии",
-        0,
-        200_000_000,
-        3_000_000,
-        100_000,
-        disabled=not momentum_active,
-    )
-    momentum_quality_col_1, momentum_quality_col_2 = st.columns(2)
-    with momentum_quality_col_1:
-        momentum_max_bar_age_minutes = st.slider(
-            "Свежесть последней минутки, мин",
+        min_dollar_volume = int(min_dollar_volume_input)
+
+    defaults = ScanConfig()
+    base_impulse_enabled = base_impulse_only
+    base_impulse_days = defaults.base_impulse_days
+    base_width_filter_enabled = defaults.base_width_filter_enabled
+    base_max_width_pct = defaults.base_max_width_pct
+    base_volume_mult = defaults.base_volume_mult
+    rvol_avg_days = defaults.rvol_avg_days
+    rvol_mult = defaults.rvol_mult
+    vcp_days = defaults.vcp_days
+    vcp_max_base_width_pct = defaults.vcp_max_base_width_pct
+    vcp_max_recent_width_pct = defaults.vcp_max_recent_width_pct
+    vcp_min_compression_pct = defaults.vcp_min_compression_pct
+    vcp_near_high_pct = defaults.vcp_near_high_pct
+    vcp_dry_volume_ratio = defaults.vcp_dry_volume_ratio
+    spring_support_days = defaults.spring_support_days
+    spring_low_days = defaults.spring_low_days
+    spring_break_pct = defaults.spring_break_pct
+    spring_reclaim_pct = defaults.spring_reclaim_pct
+    spring_close_position_pct = defaults.spring_close_position_pct
+    spring_volume_mult = defaults.spring_volume_mult
+    spring_max_from_low_pct = defaults.spring_max_from_low_pct
+    short_base_days = defaults.short_base_days
+    short_channel_enabled = defaults.short_channel_enabled
+    short_max_base_width_pct = defaults.short_max_base_width_pct
+    short_volume_mult = defaults.short_volume_mult
+    short_min_drop_pct = defaults.short_min_drop_pct
+    short_break_buffer_pct = defaults.short_break_buffer_pct
+    short_close_position_pct = defaults.short_close_position_pct
+    short_put_min_dte = defaults.short_put_min_dte
+    short_put_max_dte = defaults.short_put_max_dte
+    short_put_strike_range_pct = defaults.short_put_strike_range_pct
+    short_put_min_open_interest = defaults.short_put_min_open_interest
+    short_put_max_spread_pct = defaults.short_put_max_spread_pct
+    short_put_min_bid = defaults.short_put_min_bid
+    short_put_max_contracts = defaults.short_put_max_contracts
+    short_put_feed = defaults.short_put_feed
+    momentum_direction = defaults.momentum_direction
+    momentum_fast_minutes = defaults.momentum_fast_minutes
+    momentum_confirm_minutes = defaults.momentum_confirm_minutes
+    momentum_volume_baseline_minutes = defaults.momentum_volume_baseline_minutes
+    momentum_min_fast_move_pct = defaults.momentum_min_fast_move_pct
+    momentum_min_confirm_move_pct = defaults.momentum_min_confirm_move_pct
+    momentum_volume_mult = defaults.momentum_volume_mult
+    momentum_confirm_volume_mult = defaults.momentum_confirm_volume_mult
+    momentum_min_5m_dollar_volume = defaults.momentum_min_5m_dollar_volume
+    momentum_min_15m_dollar_volume = defaults.momentum_min_15m_dollar_volume
+    momentum_min_day_dollar_volume = defaults.momentum_min_day_dollar_volume
+    momentum_max_bar_age_minutes = defaults.momentum_max_bar_age_minutes
+    momentum_max_vwap_distance_pct = defaults.momentum_max_vwap_distance_pct
+    momentum_require_vwap_side = defaults.momentum_require_vwap_side
+    momentum_require_ema_trend = defaults.momentum_require_ema_trend
+    momentum_include_extended_hours = defaults.momentum_include_extended_hours
+    momentum_min_score = defaults.momentum_min_score
+    momentum_min_quality_checks = defaults.momentum_min_quality_checks
+    momentum_require_new_volume_wave = defaults.momentum_require_new_volume_wave
+    momentum_min_volume_acceleration = defaults.momentum_min_volume_acceleration
+    momentum_max_prior_fast_rvol = defaults.momentum_max_prior_fast_rvol
+    momentum_max_recent_prior_rvol = defaults.momentum_max_recent_prior_rvol
+    momentum_min_fast_volume_share_pct = defaults.momentum_min_fast_volume_share_pct
+    momentum_max_confirm_move_pct = defaults.momentum_max_confirm_move_pct
+
+    if base_impulse_only:
+        st.markdown('<div class="desk-section-title">Взрыв из базы</div>', unsafe_allow_html=True)
+        base_impulse_days = st.slider(
+            "Предыдущих свечей для сравнения объёма",
+            5,
+            20,
+            defaults.base_impulse_days,
             1,
-            15,
-            2,
+            help=SCANNER_HELP[SCANNER_BASE],
+        )
+        base_width_filter_enabled = st.toggle(
+            "Учитывать ширину базы",
+            value=defaults.base_width_filter_enabled,
+            help=(
+                "По умолчанию включено: ищем именно накопление в узкой базе. "
+                "Если выключить, скринер не будет отсеивать широкие базы, но оставит остальные условия: "
+                "открытие внутри вчерашней свечи и объём выше максимума прошлых свечей."
+            ),
+        )
+        if base_width_filter_enabled:
+            base_max_width_pct = st.slider(
+                "Макс. ширина базы (%)",
+                2.0,
+                80.0,
+                defaults.base_max_width_pct,
+                1.0,
+                help="Ширина канала считается по выбранным предыдущим свечам: high базы против low базы. 40% значит, что база за выбранные дни должна быть не шире 40%.",
+            )
+        base_volume_mult = st.slider(
+            "Сегодняшний объём выше каждой прошлой свечи ×",
             1,
-            disabled=not momentum_active,
-            help="Если последняя минутная свеча старше этого значения, тикер не считается свежим.",
-        )
-        momentum_max_vwap_distance_pct = st.slider(
-            "Не дальше от VWAP (%)",
-            0.0,
-            30.0,
-            5.0,
-            0.5,
-            disabled=not momentum_active,
-            help="Защита от слишком позднего входа: если цена уже очень далеко от VWAP, сигнал отбрасывается. 0 выключает фильтр.",
-        )
-        momentum_min_score = st.slider("Мин. балл Pulse", 50, 95, 85, 5, disabled=not momentum_active)
-        momentum_min_quality_checks = st.slider(
-            "Мин. подтверждений качества",
-            2,
-            6,
-            3,
+            50,
+            int(defaults.base_volume_mult),
             1,
-            disabled=not momentum_active,
-            help="Дополнительный отсев мусора: VWAP, EMA 9/20, пробой 20 минут, направленные свечи, новая волна объёма, близость к VWAP.",
+            help="1 означает: сегодняшний объём строго больше максимального объёма среди предыдущих свечей. 50 означает: больше максимума предыдущих свечей в 50 раз.",
         )
-    with momentum_quality_col_2:
-        momentum_require_new_volume_wave = st.toggle(
-            "Требовать новую волну объёма",
-            value=True,
-            disabled=not momentum_active,
-            help="Главная защита от поздних сигналов: текущие минуты должны быть заметно сильнее предыдущего такого же окна.",
+
+    if rvol_active:
+        st.markdown('<div class="desk-section-title">Относительный объём RW</div>', unsafe_allow_html=True)
+        rvol_avg_days = st.slider(
+            "RW · средний объём за дней",
+            5,
+            60,
+            defaults.rvol_avg_days,
+            1,
+            help="Сколько предыдущих дневных свечей берём для средней. Базовый рыночный пресет: 30 дней, чтобы сравнивать с месячной нормой.",
         )
-        momentum_min_volume_acceleration = st.slider(
-            "Ускорение объёма к прошлому окну ×",
-            1.0,
-            10.0,
-            2.0,
-            0.25,
-            disabled=not momentum_active or not momentum_require_new_volume_wave,
-        )
-        momentum_max_prior_fast_rvol = st.slider(
-            "Макс. RVOL прошлого окна ×",
+        rvol_mult = st.slider(
+            "RW · объём сегодня выше средней ×",
+            1.5,
+            20.0,
+            defaults.rvol_mult,
             0.5,
-            10.0,
-            2.5,
-            0.25,
-            disabled=not momentum_active or not momentum_require_new_volume_wave,
-            help="Если прошлое окно уже было горячим, это уже не начало движения, а продолжение.",
+            help="Сигнал появляется, когда сегодняшний объём минимум во столько раз выше средней за выбранные дни. Базовый пресет: 2x как заметное отклонение от обычного объёма.",
         )
-        momentum_max_recent_prior_rvol = st.slider(
-            "Макс. RVOL прошлых 20 минут ×",
-            0.5,
-            12.0,
-            4.0,
-            0.25,
-            disabled=not momentum_active or not momentum_require_new_volume_wave,
-            help="Если за последние 20 минут уже был горячий объём, новый сигнал считается не первой волной.",
+
+    if vcp_active:
+        st.markdown('<div class="desk-section-title">VCP-сжатие</div>', unsafe_allow_html=True)
+        vcp_days = st.slider("Период VCP, дней", 30, 90, defaults.vcp_days, 5, help=SCANNER_HELP[SCANNER_VCP])
+        vcp_max_base_width_pct = st.slider("Макс. ширина всей базы (%)", 15.0, 70.0, defaults.vcp_max_base_width_pct, 1.0)
+        vcp_max_recent_width_pct = st.slider("Макс. ширина последней трети (%)", 3.0, 25.0, defaults.vcp_max_recent_width_pct, 0.5)
+        vcp_min_compression_pct = st.slider("Минимальное сжатие диапазона (%)", 10.0, 70.0, defaults.vcp_min_compression_pct, 1.0)
+        vcp_near_high_pct = st.slider("Цена не дальше от верха базы (%)", 2.0, 20.0, defaults.vcp_near_high_pct, 0.5)
+        vcp_dry_volume_ratio = st.slider(
+            "Сухой объём: последняя треть / первые две",
+            0.30,
+            1.20,
+            defaults.vcp_dry_volume_ratio,
+            0.05,
+            help="0.80 значит: средний объём последней трети базы должен быть не выше 80% от среднего объёма первых двух третей.",
         )
-        momentum_min_fast_volume_share_pct = st.slider(
-            "Доля быстрого объёма в подтверждении (%)",
-            10.0,
-            90.0,
+
+    if spring_active:
+        st.markdown('<div class="desk-section-title">Spring-отскок</div>', unsafe_allow_html=True)
+        spring_support_days = st.slider("Поддержка за дней", 30, 120, defaults.spring_support_days, 5, help=SCANNER_HELP[SCANNER_SPRING])
+        spring_low_days = st.slider("Дно смотреть за дней", 60, 250, defaults.spring_low_days, 10)
+        spring_break_pct = st.slider("Минимальный прокол поддержки (%)", 0.1, 10.0, defaults.spring_break_pct, 0.1)
+        spring_reclaim_pct = st.slider("Возврат выше поддержки (%)", 0.0, 5.0, defaults.spring_reclaim_pct, 0.1)
+        spring_close_position_pct = st.slider(
+            "Закрытие в верхней части свечи (%)",
             40.0,
-            5.0,
-            disabled=not momentum_active or not momentum_require_new_volume_wave,
-            help="Показывает, что основной поток объёма происходит прямо сейчас, а не уже размазан по прошлым минутам.",
+            90.0,
+            defaults.spring_close_position_pct,
+            1.0,
+            help="60% значит: закрытие должно быть выше середины дневного диапазона и ближе к high.",
         )
-        momentum_max_confirm_move_pct = st.slider(
-            "Макс. движение подтверждения (%)",
-            0.0,
+        spring_volume_mult = st.slider("Объём выше среднего ×", 1.0, 5.0, defaults.spring_volume_mult, 0.1)
+        spring_max_from_low_pct = st.slider("Цена не дальше от дна периода (%)", 5.0, 80.0, defaults.spring_max_from_low_pct, 1.0)
+
+    if short_put_active:
+        st.markdown('<div class="desk-section-title">Short / Put пробой вниз</div>', unsafe_allow_html=True)
+        short_base_days = st.slider(
+            "База / сравнение объёма, свечей",
+            5,
+            30,
+            defaults.short_base_days,
+            1,
+            help="Сколько предыдущих дневных свечей берём для канала и максимального объёма.",
+        )
+        short_channel_enabled = st.toggle(
+            "Требовать пробой канала вниз",
+            value=defaults.short_channel_enabled,
+            help="Если включено, цена должна закрыться ниже нижней границы базы. Если выключить, ищем любое падение на объёме.",
+        )
+        if short_channel_enabled:
+            short_max_base_width_pct = st.slider(
+                "Макс. ширина канала (%)",
+                5.0,
+                100.0,
+                defaults.short_max_base_width_pct,
+                1.0,
+            )
+            short_break_buffer_pct = st.slider(
+                "Буфер пробоя вниз (%)",
+                0.0,
+                10.0,
+                defaults.short_break_buffer_pct,
+                0.1,
+                help="Насколько закрытие должно быть ниже низа базы.",
+            )
+        short_volume_mult = st.slider(
+            "Объём сегодня выше максимума базы ×",
+            2.0,
             30.0,
-            8.0,
+            defaults.short_volume_mult,
             0.5,
-            disabled=not momentum_active,
-            help="0 выключает фильтр. По умолчанию не даём Pulse ловить слишком поздний улёт.",
+            help="Главный фильтр режима. По умолчанию минимум 2x: сначала объём, потом движение.",
         )
-        momentum_require_vwap_side = st.toggle(
-            "Требовать сторону VWAP",
-            value=True,
-            disabled=not momentum_active,
-            help="Рост должен быть выше VWAP, падение ниже VWAP. Это отсеивает слабые импульсы против внутридневного потока.",
+        short_min_drop_pct = st.slider(
+            "Мин. падение сегодня (%)",
+            0.1,
+            20.0,
+            defaults.short_min_drop_pct,
+            0.1,
+            help="Минимальное красное движение. Сильные падения не отбрасываются: ты сам решаешь по графику.",
         )
-        momentum_require_ema_trend = st.toggle(
-            "Требовать EMA 9/20",
-            value=True,
-            disabled=not momentum_active,
-            help="Рост должен иметь EMA9 выше EMA20, падение EMA9 ниже EMA20. Это снижает шум.",
+        short_close_position_pct = st.slider(
+            "Закрытие не выше части свечи (%)",
+            5.0,
+            70.0,
+            defaults.short_close_position_pct,
+            1.0,
+            help="40% значит: закрытие ближе к low дневной свечи, а не откуплено вверх.",
         )
-        momentum_include_extended_hours = st.toggle(
-            "Pre/Post-market",
-            value=False,
-            disabled=not momentum_active,
-            help="Включает премаркет и постмаркет в Pulse. На графике эти зоны подсвечиваются серым.",
+        st.caption(
+            "Put-опционы проверяются автоматически: скринер оставляет только тикеры, "
+            "где есть торгуемый живой put с bid/ask. Дневные и завтрашние опционы не отбрасываются."
         )
+
+    if momentum_active:
+        st.markdown('<div class="desk-section-title">Pulse · что-то произошло</div>', unsafe_allow_html=True)
+        momentum_direction_label = st.selectbox(
+            "Направление импульса",
+            list(MOMENTUM_DIRECTION_LABELS.keys()),
+            index=0,
+            help="По умолчанию ищем и резкий рост, и резкое падение. Это режим события: сначала поймать интерес, дальше ты сам решаешь направление.",
+        )
+        momentum_direction = MOMENTUM_DIRECTION_LABELS[momentum_direction_label]
+        momentum_col_1, momentum_col_2 = st.columns(2)
+        with momentum_col_1:
+            momentum_fast_minutes = st.slider(
+                "Быстрый импульс, минут",
+                3,
+                10,
+                defaults.momentum_fast_minutes,
+                1,
+                help="Короткое окно старта: здесь Pulse ищет самый первый всплеск объёма.",
+            )
+            momentum_min_fast_move_pct = st.slider(
+                "Мин. движение за быстрое окно (%)",
+                0.3,
+                10.0,
+                defaults.momentum_min_fast_move_pct,
+                0.1,
+                help="Движение не главное, но оно должно подтверждать, что повышенный объём реально двигает цену.",
+            )
+            momentum_volume_mult = st.slider(
+                "Объём быстрого окна выше нормы ×",
+                1.5,
+                20.0,
+                defaults.momentum_volume_mult,
+                0.5,
+                help="Главный фильтр Pulse. 6x значит: текущий объём должен быть минимум в шесть раз выше внутридневной нормы.",
+            )
+            momentum_min_5m_dollar_volume = st.number_input(
+                "Мин. $ объём быстрого окна",
+                0,
+                50_000_000,
+                defaults.momentum_min_5m_dollar_volume,
+                50_000,
+            )
+        with momentum_col_2:
+            momentum_confirm_minutes = st.slider(
+                "Подтверждение, минут",
+                10,
+                30,
+                defaults.momentum_confirm_minutes,
+                1,
+                help="Короткое подтверждение старта, чтобы не ловить одиночный случайный принт.",
+            )
+            momentum_min_confirm_move_pct = st.slider("Мин. движение за подтверждение (%)", 0.5, 15.0, defaults.momentum_min_confirm_move_pct, 0.1)
+            momentum_confirm_volume_mult = st.slider("Объём подтверждения выше нормы ×", 1.2, 15.0, defaults.momentum_confirm_volume_mult, 0.2)
+            momentum_min_15m_dollar_volume = st.number_input(
+                "Мин. $ объём подтверждения",
+                0,
+                100_000_000,
+                defaults.momentum_min_15m_dollar_volume,
+                50_000,
+            )
+        momentum_volume_baseline_minutes = st.slider(
+            "Норму объёма считать по предыдущим минутам",
+            20,
+            120,
+            defaults.momentum_volume_baseline_minutes,
+            5,
+            help="Берём предыдущий внутридневной участок и сравниваем с ним текущий всплеск. Чем больше окно, тем спокойнее фильтр.",
+        )
+        momentum_min_day_dollar_volume = st.number_input(
+            "Мин. $ объём с начала сессии",
+            0,
+            200_000_000,
+            defaults.momentum_min_day_dollar_volume,
+            100_000,
+        )
+        momentum_quality_col_1, momentum_quality_col_2 = st.columns(2)
+        with momentum_quality_col_1:
+            momentum_max_bar_age_minutes = st.slider(
+                "Свежесть последней минутки, мин",
+                1,
+                15,
+                defaults.momentum_max_bar_age_minutes,
+                1,
+                help="Если последняя минутная свеча старше этого значения, тикер не считается свежим.",
+            )
+            momentum_max_vwap_distance_pct = st.slider(
+                "Не дальше от VWAP (%)",
+                0.0,
+                30.0,
+                defaults.momentum_max_vwap_distance_pct,
+                0.5,
+                help="Защита от слишком позднего входа: если цена уже очень далеко от VWAP, сигнал отбрасывается. 0 выключает фильтр.",
+            )
+            momentum_min_score = st.slider("Мин. балл Pulse", 50, 95, defaults.momentum_min_score, 5)
+            momentum_min_quality_checks = st.slider(
+                "Мин. подтверждений качества",
+                2,
+                6,
+                defaults.momentum_min_quality_checks,
+                1,
+                help="Дополнительный отсев мусора: VWAP, EMA 9/20, пробой 20 минут, направленные свечи, новая волна объёма, близость к VWAP.",
+            )
+        with momentum_quality_col_2:
+            momentum_require_new_volume_wave = st.toggle(
+                "Требовать новую волну объёма",
+                value=defaults.momentum_require_new_volume_wave,
+                help="Главная защита от поздних сигналов: текущие минуты должны быть заметно сильнее предыдущего такого же окна.",
+            )
+            if momentum_require_new_volume_wave:
+                momentum_min_volume_acceleration = st.slider(
+                    "Ускорение объёма к прошлому окну ×",
+                    1.0,
+                    10.0,
+                    defaults.momentum_min_volume_acceleration,
+                    0.25,
+                )
+                momentum_max_prior_fast_rvol = st.slider(
+                    "Макс. RVOL прошлого окна ×",
+                    0.5,
+                    10.0,
+                    defaults.momentum_max_prior_fast_rvol,
+                    0.25,
+                    help="Если прошлое окно уже было горячим, это уже не начало движения, а продолжение.",
+                )
+                momentum_max_recent_prior_rvol = st.slider(
+                    "Макс. RVOL прошлых 20 минут ×",
+                    0.5,
+                    12.0,
+                    defaults.momentum_max_recent_prior_rvol,
+                    0.25,
+                    help="Если за последние 20 минут уже был горячий объём, новый сигнал считается не первой волной.",
+                )
+                momentum_min_fast_volume_share_pct = st.slider(
+                    "Доля быстрого объёма в подтверждении (%)",
+                    10.0,
+                    90.0,
+                    defaults.momentum_min_fast_volume_share_pct,
+                    5.0,
+                    help="Показывает, что основной поток объёма происходит прямо сейчас, а не уже размазан по прошлым минутам.",
+                )
+            momentum_max_confirm_move_pct = st.slider(
+                "Макс. движение подтверждения (%)",
+                0.0,
+                30.0,
+                defaults.momentum_max_confirm_move_pct,
+                0.5,
+                help="0 выключает фильтр. По умолчанию не даём Pulse ловить слишком поздний улёт.",
+            )
+            momentum_require_vwap_side = st.toggle(
+                "Требовать сторону VWAP",
+                value=defaults.momentum_require_vwap_side,
+                help="Рост должен быть выше VWAP, падение ниже VWAP. Это отсеивает слабые импульсы против внутридневного потока.",
+            )
+            momentum_require_ema_trend = st.toggle(
+                "Требовать EMA 9/20",
+                value=defaults.momentum_require_ema_trend,
+                help="Рост должен иметь EMA9 выше EMA20, падение EMA9 ниже EMA20. Это снижает шум.",
+            )
+            momentum_include_extended_hours = st.toggle(
+                "Pre/Post-market",
+                value=defaults.momentum_include_extended_hours,
+                help="Включает премаркет и постмаркет в Pulse. На графике эти зоны подсвечиваются серым.",
+            )
 
     st.markdown('<div class="desk-section-title">Цена</div>', unsafe_allow_html=True)
     price_col_1, price_col_2 = st.columns(2)
@@ -4919,11 +5710,11 @@ with st.sidebar:
             "Мин. цена",
             0.01,
             500.0,
-            0.10 if base_impulse_only or rvol_active else (1.50 if momentum_active else 0.50),
+            5.00 if short_put_active else (0.10 if base_impulse_only or rvol_active else (1.50 if momentum_active else 0.50)),
             0.01 if base_impulse_only or rvol_active else 0.10,
         )
     with price_col_2:
-        max_price = st.number_input("Макс. цена", 0.01, 500.0, 50.0 if momentum_active else 20.0, 1.0)
+        max_price = st.number_input("Макс. цена", 0.01, 500.0, 500.0 if short_put_active else (50.0 if momentum_active else 20.0), 1.0)
 
     st.markdown('<div class="desk-section-title">Автоматизация</div>', unsafe_allow_html=True)
     send_alerts = st.toggle("Telegram-уведомления", value=False)
@@ -4937,32 +5728,35 @@ with st.sidebar:
         st.caption("Тест недоступен: нет TELEGRAM_TOKEN или TELEGRAM_CHAT_ID.")
     auto_scan_requested = st.toggle("Авто-скан", value=False)
     auto_scan_available = st_autorefresh is not None
-    auto_continuous = st.toggle(
-        "Авто-скан непрерывно",
-        value=False,
-        disabled=not auto_scan_requested or not momentum_active,
-        help=(
-            "Только для Импульс + объём: скан закончил пачку и почти сразу начинает следующую. "
-            "Telegram успевает отправить сигналы, потому что отправка идёт внутри завершённого скана."
-        ),
-    )
-    if not momentum_active or not auto_scan_requested:
-        auto_continuous = False
-    auto_scan = auto_scan_requested and (auto_scan_available or auto_continuous)
-    if auto_scan_requested and not auto_scan_available and not auto_continuous:
-        st.caption("Интервальный авто-скан ждёт пакет streamlit-autorefresh. Непрерывный режим работает без него.")
-        if AUTOREFRESH_IMPORT_ERROR:
-            st.caption(f"Ошибка авто-обновления: {AUTOREFRESH_IMPORT_ERROR[:120]}")
-    elif auto_scan_requested and not momentum_active:
-        st.caption("Непрерывный режим доступен только для Импульс + объём.")
     auto_interval_options = [1, 2, 3, 4, 5, 60]
-    auto_interval = st.select_slider(
-        "Интервал",
-        options=auto_interval_options,
-        value=1 if momentum_active else 5,
-        format_func=lambda value: f"{value} мин",
-        disabled=not auto_scan_requested or auto_continuous,
-    )
+    auto_interval = 1 if momentum_active else 5
+    auto_continuous = False
+    if auto_scan_requested:
+        if momentum_active:
+            auto_continuous = st.toggle(
+                "Авто-скан непрерывно",
+                value=False,
+                help=(
+                    "Только для Импульс + объём: скан закончил пачку и почти сразу начинает следующую. "
+                    "Telegram успевает отправить сигналы, потому что отправка идёт внутри завершённого скана."
+                ),
+            )
+        else:
+            st.caption("Непрерывный режим доступен только для Импульс + объём.")
+        auto_scan = auto_scan_available or auto_continuous
+        if not auto_scan_available and not auto_continuous:
+            st.caption("Интервальный авто-скан ждёт пакет streamlit-autorefresh. Непрерывный режим работает без него.")
+            if AUTOREFRESH_IMPORT_ERROR:
+                st.caption(f"Ошибка авто-обновления: {AUTOREFRESH_IMPORT_ERROR[:120]}")
+        if not auto_continuous:
+            auto_interval = st.select_slider(
+                "Интервал",
+                options=auto_interval_options,
+                value=auto_interval,
+                format_func=lambda value: f"{value} мин",
+            )
+    else:
+        auto_scan = False
     if st.button("Сбросить повторы Telegram", use_container_width=True):
         st.session_state.notified_signals = set()
         st.success("Повторы сброшены.")
@@ -5008,6 +5802,21 @@ cfg = ScanConfig(
     spring_close_position_pct=spring_close_position_pct,
     spring_volume_mult=spring_volume_mult,
     spring_max_from_low_pct=spring_max_from_low_pct,
+    short_base_days=short_base_days,
+    short_channel_enabled=short_channel_enabled,
+    short_max_base_width_pct=short_max_base_width_pct,
+    short_volume_mult=short_volume_mult,
+    short_min_drop_pct=short_min_drop_pct,
+    short_break_buffer_pct=short_break_buffer_pct,
+    short_close_position_pct=short_close_position_pct,
+    short_put_min_dte=short_put_min_dte,
+    short_put_max_dte=short_put_max_dte,
+    short_put_strike_range_pct=short_put_strike_range_pct,
+    short_put_min_open_interest=short_put_min_open_interest,
+    short_put_max_spread_pct=short_put_max_spread_pct,
+    short_put_min_bid=short_put_min_bid,
+    short_put_max_contracts=short_put_max_contracts,
+    short_put_feed=short_put_feed,
     momentum_direction=momentum_direction,
     momentum_fast_minutes=momentum_fast_minutes,
     momentum_confirm_minutes=momentum_confirm_minutes,
@@ -5104,6 +5913,28 @@ elif cfg.scanner_mode == SCANNER_VCP:
             chip("Сухой объём", f"≤ {cfg.vcp_dry_volume_ratio:g}x"),
             chip("Свежесть", f"{cfg.max_stale_days}д"),
             chip("Свечи/объём", DATA_SOURCE_LABELS.get(data_source, data_source), "green"),
+            chip("Alpaca", alpaca_freshness_label, alpaca_freshness_tone),
+            chip("Долларовый объём", format_dollar_cell(cfg.min_dollar_volume)),
+        ]
+    )
+elif cfg.scanner_mode == SCANNER_SHORT_PUT:
+    channel_chip = (
+        f"{cfg.short_base_days} св. · до {cfg.short_max_base_width_pct:g}% · пробой {cfg.short_break_buffer_pct:g}%"
+        if cfg.short_channel_enabled
+        else f"{cfg.short_base_days} св. · канал выкл."
+    )
+    setup_chips = "".join(
+        [
+            chip("Режим", mode_label, "red"),
+            chip("Биржа", exchange),
+            chip("За прогон", format_int_cell(max_tickers)),
+            chip("Цена", f"${min_price:g}-${max_price:g}"),
+            chip("Канал", channel_chip),
+            chip("Объём", f"≥ {cfg.short_volume_mult:g}x к макс."),
+            chip("Падение", f"от {cfg.short_min_drop_pct:g}%"),
+            chip("Закрытие", f"нижние {cfg.short_close_position_pct:g}%"),
+            chip("Put", "только живые", "red"),
+            chip("Свежесть", f"{cfg.max_stale_days}д"),
             chip("Alpaca", alpaca_freshness_label, alpaca_freshness_tone),
             chip("Долларовый объём", format_dollar_cell(cfg.min_dollar_volume)),
         ]
@@ -5340,8 +6171,13 @@ if (start_scan and not auto_running) or (auto_scan and should_auto_run and not a
             progress_box=progress_box,
             status_box=status_box,
             table_box=table_box,
-            send_alerts=send_alerts,
+            send_alerts=False if cfg.scanner_mode == SCANNER_SHORT_PUT else send_alerts,
         )
+        if cfg.scanner_mode == SCANNER_SHORT_PUT:
+            hits = filter_rows_with_tradable_puts(hits, cfg, status_box)
+            if send_alerts:
+                for row in hits:
+                    notify_signal(row)
         hits = mark_new_scan_results(hits)
 
         st.session_state.results = merge_results(hits, active_old_results, cfg.base_impulse_only)
