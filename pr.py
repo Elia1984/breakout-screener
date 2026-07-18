@@ -5936,7 +5936,7 @@ with st.sidebar:
             "Мин. цена",
             0.01,
             500.0,
-            5.00 if short_put_active else (0.10 if base_impulse_only or rvol_active else (1.50 if momentum_active else 0.50)),
+            20.00 if short_put_active else (0.10 if base_impulse_only or rvol_active else (1.50 if momentum_active else 0.50)),
             0.01 if base_impulse_only or rvol_active else 0.10,
         )
     with price_col_2:
@@ -6488,4 +6488,3 @@ else:
 if auto_scan_requested and auto_continuous and not st.session_state.get("auto_scan_running"):
     time.sleep(CONTINUOUS_AUTO_REFRESH_SECONDS)
     rerun_app()
-
