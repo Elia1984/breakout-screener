@@ -854,6 +854,7 @@ DATA_TIMEOUT_SEC = 15
 NASDAQ_TIMEOUT_SEC = 20
 ALPACA_CACHE_TTL_SEC = 10
 ALPACA_OPTIONS_CACHE_TTL_SEC = 120
+SHORT_PUT_MIN_QUOTED_CONTRACTS = 30
 YAHOO_CACHE_TTL_SEC = 60
 BATCH_SIZE = 120
 ALPACA_SIP_DELAY_MINUTES = 16
@@ -1908,6 +1909,102 @@ def option_quote_bid_ask(quote: dict[str, Any]) -> tuple[float, float, str]:
     return bid, ask, quote_time
 
 
+def option_quote_is_live(quote: dict[str, Any]) -> bool:
+    bid, ask, _ = option_quote_bid_ask(quote)
+    bid_size = option_int(quote.get("bs") or quote.get("bid_size") or quote.get("bidSize"), 0)
+    ask_size = option_int(quote.get("as") or quote.get("ask_size") or quote.get("askSize"), 0)
+    return bid > 0 and ask > 0 and ask >= bid and bid_size > 0 and ask_size > 0
+
+
+def option_contract_parts(contract_symbol: str) -> tuple[str, datetime.date | None, str, float]:
+    symbol = str(contract_symbol or "").upper().strip()
+    match = re.search(r"(\d{6})([CP])(\d{8})$", symbol)
+    if not match:
+        return "", None, "", 0.0
+    exp_raw, side, strike_raw = match.groups()
+    exp_date = parse_iso_date(f"20{exp_raw[:2]}-{exp_raw[2:4]}-{exp_raw[4:6]}")
+    strike = option_float(strike_raw, 0.0) / 1000.0
+    root = symbol[: match.start()]
+    return root, exp_date, side, strike
+
+
+@st.cache_data(ttl=ALPACA_OPTIONS_CACHE_TTL_SEC, show_spinner=False)
+def fetch_alpaca_option_snapshot_liquidity(
+    underlying: str,
+    price: float,
+    min_dte: int,
+    max_dte: int,
+    strike_range_pct: float,
+    feed: str,
+) -> dict[str, Any]:
+    symbol = normalize_ticker_id(underlying)
+    if not ALPACA_KEY or not ALPACA_SECRET or not symbol or price <= 0:
+        return {}
+
+    requested_feed = str(feed or "auto").lower().strip()
+    feeds = ("opra", "indicative") if requested_feed == "auto" else (requested_feed,)
+    today = now_et().date()
+    min_days = max(0, int(min_dte))
+    max_days = max(min_days, int(max_dte))
+    strike_range = max(0.01, float(strike_range_pct)) / 100.0
+    strike_low = max(0.01, price * (1 - strike_range))
+    strike_high = max(strike_low + 0.01, price * (1 + strike_range))
+    best_info: dict[str, Any] = {}
+
+    for feed_name in feeds:
+        try:
+            resp = requests.get(
+                f"{ALPACA_BASE}/v1beta1/options/snapshots/{symbol}",
+                headers=ALPACA_HEADERS,
+                params={"limit": 1000, "feed": feed_name},
+                timeout=DATA_TIMEOUT_SEC,
+            )
+            if resp.status_code in {401, 403, 404}:
+                LOGGER.info("Alpaca option snapshots unavailable for %s on %s: %s", symbol, feed_name, resp.status_code)
+                continue
+            resp.raise_for_status()
+            payload = resp.json()
+            snapshots = payload.get("snapshots") or {}
+            if not isinstance(snapshots, dict):
+                snapshots = {}
+
+            quoted = 0
+            near_put_quoted = 0
+            opt_volume = 0
+            for contract_symbol, snapshot in snapshots.items():
+                if not isinstance(snapshot, dict):
+                    continue
+                opt_volume += option_int((snapshot.get("dailyBar") or {}).get("v"), 0)
+                quote = snapshot.get("latestQuote") or {}
+                if not isinstance(quote, dict) or not option_quote_is_live(quote):
+                    continue
+                quoted += 1
+                _, exp_date, side, strike = option_contract_parts(str(contract_symbol))
+                if side != "P" or exp_date is None or strike <= 0:
+                    continue
+                dte = (exp_date - today).days
+                if min_days <= dte <= max_days and strike_low <= strike <= strike_high:
+                    near_put_quoted += 1
+
+            info = {
+                "optionable": bool(snapshots),
+                "contracts": len(snapshots),
+                "quoted": quoted,
+                "near_put_quoted": near_put_quoted,
+                "opt_volume": opt_volume,
+                "feed": feed_name,
+                "tradeable": near_put_quoted >= SHORT_PUT_MIN_QUOTED_CONTRACTS,
+            }
+            if not best_info or near_put_quoted > int(best_info.get("near_put_quoted") or 0):
+                best_info = info
+            if info["tradeable"]:
+                break
+        except Exception as exc:
+            LOGGER.info("Alpaca option snapshots failed for %s on %s: %s", symbol, feed_name, exc)
+            continue
+    return best_info
+
+
 @st.cache_data(ttl=ALPACA_OPTIONS_CACHE_TTL_SEC * 30, show_spinner=False)
 def fetch_alpaca_put_contracts_for_underlying(
     underlying: str,
@@ -2122,6 +2219,27 @@ def annotate_row_with_put(row: dict[str, Any], match: PutOptionMatch) -> dict[st
     return next_row
 
 
+def annotate_row_with_put_chain(row: dict[str, Any], chain_info: dict[str, Any]) -> dict[str, Any]:
+    if not chain_info:
+        return row
+    next_row = row.copy()
+    near_put_quoted = int(chain_info.get("near_put_quoted") or 0)
+    quoted = int(chain_info.get("quoted") or 0)
+    opt_volume = int(chain_info.get("opt_volume") or 0)
+    next_row.update(
+        {
+            "_put_chain_contracts": int(chain_info.get("contracts") or 0),
+            "_put_chain_quoted": quoted,
+            "_put_chain_near_put_quoted": near_put_quoted,
+            "_put_chain_volume": opt_volume,
+            "_put_chain_feed": str(chain_info.get("feed") or ""),
+        }
+    )
+    if not next_row.get("Put"):
+        next_row["Put"] = f"цепочка: {near_put_quoted} живых put"
+    return next_row
+
+
 def filter_rows_with_tradable_puts(
     rows: list[dict[str, Any]],
     cfg: ScanConfig,
@@ -2136,6 +2254,7 @@ def filter_rows_with_tradable_puts(
 
     contract_pool: dict[str, list[dict[str, Any]]] = {}
     contract_symbols: list[str] = []
+    chain_pool: dict[str, dict[str, Any]] = {}
     total = len(rows)
     for idx, row in enumerate(rows, start=1):
         symbol = normalize_ticker_id(row.get("Тикер"))
@@ -2147,6 +2266,14 @@ def filter_rows_with_tradable_puts(
         contracts = candidate_put_contracts(symbol, price, cfg)
         contract_pool[symbol] = contracts
         contract_symbols.extend(option_contract_symbol(contract) for contract in contracts)
+        chain_pool[symbol] = fetch_alpaca_option_snapshot_liquidity(
+            symbol,
+            price,
+            cfg.short_put_min_dte,
+            cfg.short_put_max_dte,
+            cfg.short_put_strike_range_pct,
+            cfg.short_put_feed,
+        )
 
     unique_contract_symbols = tuple(dict.fromkeys(symbol for symbol in contract_symbols if symbol))
     quotes = fetch_alpaca_option_latest_quotes(unique_contract_symbols, cfg.short_put_feed)
@@ -2156,7 +2283,9 @@ def filter_rows_with_tradable_puts(
         price = safe_float(row.get("Цена"))
         match = choose_best_put_contract(symbol, price, contract_pool.get(symbol, []), quotes, cfg)
         if match is not None:
-            filtered.append(annotate_row_with_put(row, match))
+            filtered.append(annotate_row_with_put_chain(annotate_row_with_put(row, match), chain_pool.get(symbol, {})))
+        elif bool(chain_pool.get(symbol, {}).get("tradeable")):
+            filtered.append(annotate_row_with_put_chain(row, chain_pool.get(symbol, {})))
     if status_box is not None:
         status_box.caption(f"Short/Put: прошло опционы {len(filtered)}/{len(rows)}")
     return filtered
@@ -4205,7 +4334,11 @@ def display_column_config(base_pattern: bool = False) -> dict[str, Any]:
         "Объём": st.column_config.NumberColumn("Объём", width="medium"),
         "Долларовый объём": st.column_config.NumberColumn("Долларовый объём", width="medium"),
         "Капитализация": st.column_config.NumberColumn("Капитализация", width="medium"),
-        "Put": st.column_config.TextColumn("Put", width="large", help="Лучший найденный put-контракт после фильтра ликвидности."),
+        "Put": st.column_config.TextColumn(
+            "Put",
+            width="large",
+            help="Лучший найденный put-контракт или подтверждение, что рядом с ценой есть живая цепочка put с bid/ask.",
+        ),
         "Put OI": st.column_config.NumberColumn("Put OI", width="small", help="Open interest выбранного put-контракта."),
         "Put spread": st.column_config.NumberColumn("Put spread %", width="small", format="%.1f%%"),
         "Время": st.column_config.TextColumn("Время", width="small"),
@@ -4321,6 +4454,57 @@ def ai_tickers_from_results(rows: list[dict[str, Any]]) -> list[str]:
     return tickers
 
 
+def ai_short_value(value: Any, suffix: str = "") -> str:
+    if value in (None, ""):
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        text = str(value).strip()
+        return text if text and text.lower() != "nan" else ""
+    if not pd.notna(number):
+        return ""
+    return f"{number:.1f}{suffix}" if suffix else f"{number:.2f}"
+
+
+def ai_context_lines_from_rows(rows: list[dict[str, Any]], tickers: list[str]) -> list[str]:
+    wanted = [normalize_ticker_id(ticker) for ticker in tickers]
+    wanted_set = {ticker for ticker in wanted if ticker}
+    by_ticker: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        ticker = normalize_ticker_id(row.get("Тикер"))
+        if ticker and ticker in wanted_set and ticker not in by_ticker:
+            by_ticker[ticker] = row
+
+    lines: list[str] = []
+    for ticker in wanted:
+        row = by_ticker.get(ticker)
+        if not row:
+            continue
+        parts = [
+            f"сигнал={format_signal_cell(row)}",
+            f"цена=${ai_short_value(row.get('Цена'))}",
+            f"RVOL={ai_short_value(row.get('_rvol') or row.get('RVOL') or row.get('Объём ×'), 'x')}",
+            f"движение={ai_short_value(row.get('_move_pct') or row.get('Движение %'), '%')}",
+            f"объём={format_int_cell(safe_float(row.get('Объём')))}",
+            f"$объём={spaced_number(safe_float(row.get('Долларовый объём')), '$')}",
+        ]
+        put_text = str(row.get("Put") or "").strip()
+        if put_text:
+            parts.append(f"put={put_text}")
+        put_oi = row.get("Put OI")
+        if put_oi not in (None, ""):
+            parts.append(f"put OI={format_int_cell(safe_float(put_oi))}")
+        put_spread = ai_short_value(row.get("Put spread") or row.get("_put_spread_pct"), "%")
+        if put_spread:
+            parts.append(f"put spread={put_spread}")
+        near_puts = row.get("_put_chain_near_put_quoted")
+        if near_puts not in (None, ""):
+            parts.append(f"живых put рядом={format_int_cell(safe_float(near_puts))}")
+        lines.append(f"{ticker}: " + "; ".join(part for part in parts if part and not part.endswith("=")))
+    return lines
+
+
 def ai_limit_options(total: int) -> list[int]:
     base = [5, 10, 15, 20]
     options = [value for value in base if value < total]
@@ -4333,7 +4517,12 @@ def ai_analysis_mode_for_config(cfg: ScanConfig) -> str:
     return "short_put" if cfg.scanner_mode == SCANNER_SHORT_PUT else "general"
 
 
-def ai_result_signature(tickers: list[str], cfg: ScanConfig, web_search: bool) -> str:
+def ai_result_signature(
+    tickers: list[str],
+    cfg: ScanConfig,
+    web_search: bool,
+    context_lines: list[str] | None = None,
+) -> str:
     return "|".join(
         [
             cfg.scanner_mode,
@@ -4343,6 +4532,7 @@ def ai_result_signature(tickers: list[str], cfg: ScanConfig, web_search: bool) -
             AI_GROK_MODEL_SETTING,
             "claude_economy" if AI_CLAUDE_ECONOMY else "claude_max",
             "web" if web_search else "no_web",
+            " / ".join(context_lines or []),
         ]
     )
 
@@ -4498,7 +4688,12 @@ def ai_resolved_items_for_tickers(tickers: list[str]) -> list[dict[str, Any]]:
     ]
 
 
-def ai_ticker_prompt(base_prompt: str, raw_tickers: str, resolved_items: list[dict[str, Any]]) -> str:
+def ai_ticker_prompt(
+    base_prompt: str,
+    raw_tickers: str,
+    resolved_items: list[dict[str, Any]],
+    context_lines: list[str] | None = None,
+) -> str:
     public_tickers = [
         str(item["ticker"]).upper()
         for item in resolved_items
@@ -4516,6 +4711,9 @@ def ai_ticker_prompt(base_prompt: str, raw_tickers: str, resolved_items: list[di
         )
 
     ticker_list = ", ".join(public_tickers) if public_tickers else raw_tickers
+    screener_context = "\n".join(context_lines or [])
+    if not screener_context:
+        screener_context = "нет дополнительных фактов"
     return f"""
 Источник данных: торговый Streamlit-скринер. Это уже очищенный список найденных тикеров.
 
@@ -4523,6 +4721,9 @@ def ai_ticker_prompt(base_prompt: str, raw_tickers: str, resolved_items: list[di
 {chr(10).join(resolution_lines)}
 
 Публичные тикеры для анализа: {ticker_list}
+
+Факты из скринера:
+{screener_context}
 
 Жёсткое правило:
 - анализируй только тикеры из строки "Публичные тикеры для анализа";
@@ -4572,6 +4773,7 @@ def ai_call_claude_with_tickers(
     resolved_items: list[dict[str, Any]],
     model: str,
     ai_mode: str = "general",
+    context_lines: list[str] | None = None,
 ) -> str:
     import anthropic
 
@@ -4584,7 +4786,7 @@ def ai_call_claude_with_tickers(
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": ai_ticker_prompt(prompt, raw_tickers, resolved_items)}
+                    {"type": "text", "text": ai_ticker_prompt(prompt, raw_tickers, resolved_items, context_lines)}
                 ],
             }
         ],
@@ -4609,6 +4811,7 @@ def ai_call_grok_with_tickers(
     web_search: bool,
     model: str,
     ai_mode: str = "general",
+    context_lines: list[str] | None = None,
 ) -> str:
     client = ai_make_grok_client()
     prompt = AI_GROK_SHORT_PUT_PROMPT if ai_mode == "short_put" else AI_GROK_SENTIMENT_PROMPT
@@ -4620,7 +4823,7 @@ def ai_call_grok_with_tickers(
             {
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": ai_ticker_prompt(prompt, raw_tickers, resolved_items)}
+                    {"type": "input_text", "text": ai_ticker_prompt(prompt, raw_tickers, resolved_items, context_lines)}
                 ],
             }
         ],
@@ -4665,14 +4868,19 @@ def ai_call_grok_synthesis(
     return ai_grok_text(response)
 
 
-def ai_run_analysis_from_tickers(tickers: list[str], web_search: bool, ai_mode: str = "general") -> dict[str, Any]:
+def ai_run_analysis_from_tickers(
+    tickers: list[str],
+    web_search: bool,
+    ai_mode: str = "general",
+    context_lines: list[str] | None = None,
+) -> dict[str, Any]:
     raw_tickers = " ".join(tickers)
     resolved_items = ai_resolved_items_for_tickers(tickers)
     claude_model, claude_model_source = ai_resolve_claude_model()
     grok_model, grok_model_source = ai_resolve_grok_model()
-    claude_answer = ai_call_claude_with_tickers(raw_tickers, resolved_items, claude_model, ai_mode)
+    claude_answer = ai_call_claude_with_tickers(raw_tickers, resolved_items, claude_model, ai_mode, context_lines)
     try:
-        grok_answer = ai_call_grok_with_tickers(raw_tickers, resolved_items, web_search, grok_model, ai_mode)
+        grok_answer = ai_call_grok_with_tickers(raw_tickers, resolved_items, web_search, grok_model, ai_mode, context_lines)
         final_answer = ai_call_grok_synthesis(claude_answer, grok_answer, web_search, grok_model, tickers, ai_mode)
     except Exception as exc:
         if grok_model == AI_GROK_FALLBACK_MODEL:
@@ -4680,7 +4888,7 @@ def ai_run_analysis_from_tickers(tickers: list[str], web_search: bool, ai_mode: 
         LOGGER.warning("Grok model %s failed, retrying %s: %s", grok_model, AI_GROK_FALLBACK_MODEL, exc)
         grok_model = AI_GROK_FALLBACK_MODEL
         grok_model_source = "fallback"
-        grok_answer = ai_call_grok_with_tickers(raw_tickers, resolved_items, web_search, grok_model, ai_mode)
+        grok_answer = ai_call_grok_with_tickers(raw_tickers, resolved_items, web_search, grok_model, ai_mode, context_lines)
         final_answer = ai_call_grok_synthesis(claude_answer, grok_answer, web_search, grok_model, tickers, ai_mode)
     return {
         "tickers": tickers,
@@ -4939,6 +5147,7 @@ def render_ai_analysis_panel(rows: list[dict[str, Any]], cfg: ScanConfig) -> Non
         )
 
     selected_tickers = tickers_all[: int(ticker_limit)]
+    context_lines = ai_context_lines_from_rows(rows, selected_tickers)
     st.caption(f"В AI-разбор уйдут: {', '.join(selected_tickers)}")
 
     missing = ai_missing_secrets()
@@ -4951,11 +5160,11 @@ def render_ai_analysis_panel(rows: list[dict[str, Any]], cfg: ScanConfig) -> Non
         use_container_width=True,
         disabled=bool(missing),
     )
-    signature = ai_result_signature(selected_tickers, cfg, web_search)
+    signature = ai_result_signature(selected_tickers, cfg, web_search, context_lines)
     if analyze_clicked:
         try:
             with st.spinner(spinner_text):
-                result = ai_run_analysis_from_tickers(selected_tickers, web_search, ai_mode)
+                result = ai_run_analysis_from_tickers(selected_tickers, web_search, ai_mode, context_lines)
             result["signature"] = signature
             st.session_state.ai_analysis_result = result
             st.session_state.ai_analysis_error = ""
