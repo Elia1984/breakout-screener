@@ -926,7 +926,7 @@ MOMENTUM_DIRECTION_LABELS = {
 
 SCANNER_LABELS = {
     SCANNER_BASE: "Взрыв из базы",
-    SCANNER_RVOL: "Относительный объём RW",
+    SCANNER_RVOL: "Относительный объём RVOL",
     SCANNER_VCP: "VCP-сжатие",
     SCANNER_SPRING: "Spring-отскок",
     SCANNER_MOMENTUM: "Импульс + объём",
@@ -939,7 +939,7 @@ SCANNER_HELP = {
     ),
     SCANNER_RVOL: (
         "Ищет акции, где сегодняшний объём резко выше средней за выбранное число дней. "
-        "Это классический фильтр RW/RVOL: бумага сейчас в игре."
+        "Это классический фильтр RVOL: бумага сейчас в игре."
     ),
     SCANNER_VCP: (
         "Ищет сжатие перед движением: диапазон свечей постепенно становится уже, "
@@ -969,7 +969,7 @@ SCANNER_SUBTITLES = {
 
 SIGNAL_LABELS = {
     SIG_BASE: "ВЗРЫВ ОБЪЁМА ИЗ БАЗЫ",
-    SIG_RVOL: "ОТНОСИТЕЛЬНЫЙ ОБЪЁМ RW",
+    SIG_RVOL: "ОТНОСИТЕЛЬНЫЙ ОБЪЁМ RVOL",
     SIG_VCP: "VCP-СЖАТИЕ",
     SIG_SPRING: "SPRING ОТ ДНА",
     SIG_MOMENTUM: "ИМПУЛЬС + ОБЪЁМ",
@@ -977,7 +977,7 @@ SIGNAL_LABELS = {
 }
 SIGNAL_SHORT_LABELS = {
     SIG_BASE: "Взрыв базы",
-    SIG_RVOL: "RW объём",
+    SIG_RVOL: "RVOL",
     SIG_VCP: "VCP-сжатие",
     SIG_SPRING: "Spring от дна",
     SIG_MOMENTUM: "Импульс",
@@ -1652,6 +1652,19 @@ def remember_error(message: str) -> None:
 
 
 # ── TICKER UNIVERSE ────────────────────────────────────────────────
+def nasdaq_screener_rows(payload: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    table = data.get("table")
+    if not isinstance(table, dict):
+        return None
+    rows = table.get("rows")
+    return rows if isinstance(rows, list) else None
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_nasdaq_tickers(exchange: str, max_price: float) -> list[dict[str, Any]]:
     headers = {
@@ -1665,19 +1678,31 @@ def get_nasdaq_tickers(exchange: str, max_price: float) -> list[dict[str, Any]]:
     exchanges = ["nasdaq", "nyse", "amex"] if exchange == "ALL" else [exchange.lower()]
     tickers: list[dict[str, Any]] = []
     seen: set[str] = set()
+    failed_exchanges: list[str] = []
 
     for ex in exchanges:
-        try:
-            resp = requests.get(
-                "https://api.nasdaq.com/api/screener/stocks",
-                params={"tableonly": "true", "limit": 10000, "exchange": ex},
-                headers=headers,
-                timeout=NASDAQ_TIMEOUT_SEC,
-            )
-            resp.raise_for_status()
-            rows = resp.json().get("data", {}).get("table", {}).get("rows", []) or []
-        except Exception as exc:
-            LOGGER.warning("Could not load Nasdaq tickers for %s: %s", ex, exc)
+        rows: list[dict[str, Any]] | None = None
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                resp = requests.get(
+                    "https://api.nasdaq.com/api/screener/stocks",
+                    params={"tableonly": "true", "limit": 10000, "exchange": ex},
+                    headers=headers,
+                    timeout=NASDAQ_TIMEOUT_SEC,
+                )
+                resp.raise_for_status()
+                rows = nasdaq_screener_rows(resp.json())
+                if rows is None:
+                    raise ValueError("Nasdaq response has no stock rows")
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt == 0:
+                    time.sleep(0.4)
+        if rows is None:
+            failed_exchanges.append(ex.upper())
+            LOGGER.warning("Could not load Nasdaq tickers for %s after retry: %s", ex, last_error)
             continue
 
         for row in rows:
@@ -1703,6 +1728,10 @@ def get_nasdaq_tickers(exchange: str, max_price: float) -> list[dict[str, Any]]:
                     ),
                 }
             )
+
+    if failed_exchanges:
+        LOGGER.warning("Ticker universe is incomplete; failed exchanges: %s", ", ".join(failed_exchanges))
+        return []
 
     if tickers:
         return tickers
@@ -2775,7 +2804,8 @@ def build_rvol_setup(df: pd.DataFrame, cfg: ScanConfig) -> RvolSetup | None:
 
     avg_window = pd.to_numeric(df["Volume"].iloc[-(avg_days + 1) : -1], errors="coerce")
     avg_window = avg_window[avg_window > 0]
-    if avg_window.empty:
+    min_valid_days = max(5, (avg_days * 4 + 4) // 5)
+    if len(avg_window) < min_valid_days:
         return None
     avg_volume = float(avg_window.mean())
     if avg_volume <= 0:
@@ -2821,7 +2851,7 @@ def build_vcp_setup(df: pd.DataFrame, cfg: ScanConfig) -> VcpSetup | None:
     if lookback < 30 or len(df) < lookback + 2:
         return None
 
-    window = df.tail(lookback).copy()
+    window = df.iloc[-(lookback + 1) : -1].copy()
     if len(window) < lookback:
         return None
 
@@ -2849,7 +2879,8 @@ def build_vcp_setup(df: pd.DataFrame, cfg: ScanConfig) -> VcpSetup | None:
     if recent_width > required_recent_width:
         return None
 
-    close = float(window.iloc[-1]["Close"])
+    latest = df.iloc[-1]
+    close = float(latest["Close"])
     prev_close = float(df.iloc[-2]["Close"])
     base_low = float(window["Low"].min())
     base_high = float(window["High"].max())
@@ -2871,7 +2902,7 @@ def build_vcp_setup(df: pd.DataFrame, cfg: ScanConfig) -> VcpSetup | None:
     if dry_ratio > cfg.vcp_dry_volume_ratio:
         return None
 
-    current_volume = float(window.iloc[-1]["Volume"])
+    current_volume = float(latest["Volume"])
     current_volume_ratio = current_volume / recent_avg if recent_avg > 0 else 0.0
     move_pct = (close - prev_close) / prev_close * 100
     return VcpSetup(
@@ -3070,7 +3101,7 @@ def recent_intraday_window(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
         return df
     latest_ts = df.index[-1]
     cutoff = latest_ts - pd.Timedelta(minutes=max(1, int(minutes)))
-    return df[df.index >= cutoff]
+    return df[df.index > cutoff]
 
 
 def rolling_volume_baseline(prior: pd.DataFrame, window_minutes: int) -> float:
@@ -3612,7 +3643,7 @@ def score_base_signal(setup: BaseImpulse, cfg: ScanConfig) -> int:
 def score_rvol(setup: RvolSetup, cfg: ScanConfig) -> int:
     volume_score = min(60.0, setup.rvol / max(cfg.rvol_mult, 0.1) * 30.0)
     liquidity_score = min(25.0, setup.dollar_volume / 2_000_000 * 25.0)
-    move_score = min(15.0, max(0.0, setup.move_pct) * 0.6)
+    move_score = min(15.0, abs(setup.move_pct) * 0.6)
     return int(round(volume_score + liquidity_score + move_score))
 
 
@@ -3853,7 +3884,7 @@ def detect_signal(
                 setup.range_days,
                 setup.low,
                 setup.high,
-                "RW-диапазон",
+                "диапазон RVOL",
                 visible_candles=CHART_VISIBLE_CANDLES,
                 band_days=setup.range_days,
                 timeframe="D",
@@ -4425,7 +4456,7 @@ def display_column_config(base_pattern: bool = False) -> dict[str, Any]:
             "RVOL",
             width="small",
             format="%.2fx",
-            help="Объём / выбранная база сравнения. В RW это средний дневной объём; во Взрыве базы это максимум прошлых свечей; в Pulse это объём последних минут против внутридневной нормы.",
+            help="Объём / выбранная база сравнения. В RVOL это средний дневной объём; во Взрыве базы это максимум прошлых свечей; в Pulse это объём последних минут против внутридневной нормы.",
         ),
         "Движение %": st.column_config.NumberColumn("Движение %", width="small", format="%.1f%%"),
         "Объём": st.column_config.NumberColumn("Объём", width="medium"),
@@ -6102,7 +6133,7 @@ with st.sidebar:
         """
         <div class="sidebar-brand">
             <div class="sidebar-brand-title">PR Screener</div>
-            <div class="sidebar-brand-subtitle">Взрыв базы · RW · VCP · Spring · Short/Put · Pulse</div>
+            <div class="sidebar-brand-subtitle">Взрыв базы · RVOL · VCP · Spring · Short/Put · Pulse</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -6210,7 +6241,7 @@ with st.sidebar:
             100_000_000,
             5_000_000 if short_put_active else 250_000,
             250_000 if short_put_active else 50_000,
-            help="Для RW, VCP, Spring и Short/Put фильтрует слишком тонкие акции.",
+            help="Для RVOL, VCP, Spring и Short/Put фильтрует слишком тонкие акции.",
         )
         min_dollar_volume = int(min_dollar_volume_input)
 
@@ -6313,9 +6344,9 @@ with st.sidebar:
         )
 
     if rvol_active:
-        st.markdown('<div class="desk-section-title">Относительный объём RW</div>', unsafe_allow_html=True)
+        st.markdown('<div class="desk-section-title">Относительный объём RVOL</div>', unsafe_allow_html=True)
         rvol_avg_days = st.slider(
-            "RW · средний объём за дней",
+            "RVOL · средний объём за дней",
             5,
             60,
             defaults.rvol_avg_days,
@@ -6323,7 +6354,7 @@ with st.sidebar:
             help="Сколько предыдущих дневных свечей берём для средней. Базовый рыночный пресет: 30 дней, чтобы сравнивать с месячной нормой.",
         )
         rvol_mult = st.slider(
-            "RW · объём сегодня выше средней ×",
+            "RVOL · объём сегодня выше средней ×",
             1.5,
             20.0,
             defaults.rvol_mult,
@@ -6776,7 +6807,7 @@ elif cfg.scanner_mode == SCANNER_RVOL:
             chip("За прогон", format_int_cell(max_tickers)),
             chip("Цена", f"${min_price:g}-${max_price:g}"),
             chip("Средняя", f"{cfg.rvol_avg_days} дней"),
-            chip("RW", f"≥ {cfg.rvol_mult:g}x"),
+            chip("RVOL", f"≥ {cfg.rvol_mult:g}x"),
             chip("Свежесть", f"{cfg.max_stale_days}д"),
             chip("Свечи/объём", DATA_SOURCE_LABELS.get(data_source, data_source), "green"),
             chip("Alpaca", alpaca_freshness_label, alpaca_freshness_tone),
@@ -7147,4 +7178,3 @@ else:
 if auto_scan_requested and auto_continuous and not st.session_state.get("auto_scan_running"):
     time.sleep(CONTINUOUS_AUTO_REFRESH_SECONDS)
     rerun_app()
-
