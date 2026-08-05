@@ -4837,10 +4837,18 @@ def dismiss_ticker(ticker: Any) -> str:
         state_value = st.session_state.get(state_name)
         if isinstance(state_value, dict):
             state_value.pop(symbol, None)
+    priority = st.session_state.get("ai_ticker_analysis_priority")
+    if isinstance(priority, dict):
+        priority.pop(symbol, None)
+    focused = st.session_state.get("ai_gallery_focus_tickers")
+    if isinstance(focused, list):
+        st.session_state.ai_gallery_focus_tickers = [
+            ticker for ticker in focused if normalize_ticker_id(ticker) != symbol
+        ]
     control_symbol = re.sub(r"[^A-Za-z0-9_]+", "_", symbol).strip("_")
     for state_key in list(st.session_state.keys()):
         state_key_text = str(state_key)
-        if state_key_text.startswith(("analyze_ticker_", "refresh_ticker_ai_")) and (
+        if state_key_text.startswith(("analyze_ticker_", "refresh_ticker_ai_", "select_ticker_ai_")) and (
             f"_{control_symbol}_" in f"_{state_key_text}_"
         ):
             del st.session_state[state_key]
@@ -4864,10 +4872,15 @@ def rerun_app() -> None:
 def clear_ticker_ai_analysis_state(clear_controls: bool = False) -> None:
     st.session_state.ai_ticker_analysis_results = {}
     st.session_state.ai_ticker_analysis_errors = {}
+    st.session_state.ai_ticker_analysis_priority = {}
+    st.session_state.ai_ticker_analysis_sequence = 0
+    st.session_state.ai_gallery_focus_tickers = []
+    st.session_state.ai_selected_analysis_error = ""
+    st.session_state.ai_selected_batch_pending = False
     if not clear_controls:
         return
     for key in list(st.session_state.keys()):
-        if str(key).startswith(("analyze_ticker_", "refresh_ticker_ai_")):
+        if str(key).startswith(("analyze_ticker_", "refresh_ticker_ai_", "select_ticker_ai_")):
             del st.session_state[key]
 
 
@@ -7819,13 +7832,22 @@ def render_ticker_ai_control(
         error_cache = {}
         st.session_state.ai_ticker_analysis_errors = error_cache
 
-    requested = st.toggle(
-        "Разобрать",
-        value=False,
-        key=f"analyze_ticker_{key_base}",
-        disabled=not providers_available,
-        help=f"Отдельный AI-разбор только {ticker}: Claude проверит факты и риски, Grok — хайп и рыночный итог.",
-    )
+    select_col, analyze_col = st.columns([0.44, 0.56], vertical_alignment="center")
+    with select_col:
+        st.checkbox(
+            "Выбрать",
+            value=False,
+            key=ticker_ai_selection_key(row),
+            help=f"Добавить {ticker} в пакетный AI-разбор.",
+        )
+    with analyze_col:
+        requested = st.toggle(
+            "Разобрать",
+            value=False,
+            key=f"analyze_ticker_{key_base}",
+            disabled=not providers_available,
+            help=f"Отдельный AI-разбор только {ticker}: Claude проверит факты и риски, Grok — хайп и рыночный итог.",
+        )
     if not requested:
         return
 
@@ -7858,6 +7880,16 @@ def render_ticker_ai_control(
             error_cache.pop(ticker, None)
             cached_result = result
             cached_error = None
+            priority, sequence = mark_tickers_analyzed(
+                st.session_state.get("ai_ticker_analysis_priority"),
+                [ticker],
+                st.session_state.get("ai_ticker_analysis_sequence"),
+            )
+            st.session_state.ai_ticker_analysis_priority = priority
+            st.session_state.ai_ticker_analysis_sequence = sequence
+            if hasattr(st, "toast"):
+                st.toast(f"{ticker}: AI-разбор готов, карточка перенесена наверх.")
+            rerun_app()
         except Exception as exc:
             cached_error = {
                 "signature": signature,
@@ -7880,6 +7912,98 @@ def render_ticker_ai_control(
         render_ai_inline_result(cached_result)
 
 
+def ticker_ai_key_base(row: dict[str, Any]) -> str:
+    scanner = str(row.get("_scanner") or "")
+    ticker = normalize_ticker_id(row.get("Тикер"))
+    signal = str(row.get("_sig") or "")
+    direction = str(row.get("_momentum_direction") or "")
+    raw_key = f"{scanner}_{ticker}_{signal}_{direction}"
+    return re.sub(r"[^A-Za-z0-9_]+", "_", raw_key).strip("_") or "signal_card"
+
+
+def ticker_ai_selection_key(row: dict[str, Any]) -> str:
+    return f"select_ticker_ai_{ticker_ai_key_base(row)}"
+
+
+def selected_ai_tickers(
+    rows: list[dict[str, Any]],
+    selection_state: dict[str, Any],
+) -> list[str]:
+    selected: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        ticker = normalize_ticker_id(row.get("Тикер"))
+        if not ticker or ticker in seen or not bool(selection_state.get(ticker_ai_selection_key(row))):
+            continue
+        seen.add(ticker)
+        selected.append(ticker)
+    return selected
+
+
+def mark_tickers_analyzed(
+    priority: dict[str, Any] | None,
+    tickers: list[str],
+    sequence: Any,
+) -> tuple[dict[str, int], int]:
+    normalized_priority: dict[str, int] = {}
+    if isinstance(priority, dict):
+        for raw_ticker, raw_order in priority.items():
+            ticker = normalize_ticker_id(raw_ticker)
+            try:
+                order = int(raw_order)
+            except (TypeError, ValueError):
+                continue
+            if ticker and order > 0:
+                normalized_priority[ticker] = order
+    try:
+        next_sequence = max(0, int(sequence)) + 1
+    except (TypeError, ValueError):
+        next_sequence = 1
+    for raw_ticker in tickers:
+        ticker = normalize_ticker_id(raw_ticker)
+        if ticker:
+            normalized_priority[ticker] = next_sequence
+    return normalized_priority, next_sequence
+
+
+def prioritize_analyzed_ticker_rows(
+    rows: list[dict[str, Any]],
+    priority: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    normalized_priority: dict[str, int] = {}
+    if isinstance(priority, dict):
+        for raw_ticker, raw_order in priority.items():
+            ticker = normalize_ticker_id(raw_ticker)
+            if not ticker:
+                continue
+            try:
+                normalized_priority[ticker] = max(0, int(raw_order))
+            except (TypeError, ValueError):
+                continue
+    return sorted(
+        rows,
+        key=lambda row: normalized_priority.get(
+            normalize_ticker_id(row.get("Тикер")),
+            0,
+        ),
+        reverse=True,
+    )
+
+
+def focused_ticker_rows(
+    rows: list[dict[str, Any]],
+    focused_tickers: list[Any] | None,
+) -> list[dict[str, Any]]:
+    focused = {
+        ticker
+        for ticker in (normalize_ticker_id(value) for value in (focused_tickers or []))
+        if ticker
+    }
+    if not focused:
+        return rows
+    return [row for row in rows if normalize_ticker_id(row.get("Тикер")) in focused]
+
+
 def render_signal_gallery(
     rows: list[dict[str, Any]],
     cfg: ScanConfig,
@@ -7891,6 +8015,17 @@ def render_signal_gallery(
         for row in rows
         if isinstance(row, dict) and row.get("_chart_payload")
     ])
+    all_cards = prioritize_analyzed_ticker_rows(
+        all_cards,
+        st.session_state.get("ai_ticker_analysis_priority"),
+    )
+    focused = st.session_state.get("ai_gallery_focus_tickers")
+    focused_cards = focused_ticker_rows(all_cards, focused if isinstance(focused, list) else [])
+    focus_active = bool(focused) and bool(focused_cards)
+    if focus_active:
+        all_cards = focused_cards
+    elif focused:
+        st.session_state.ai_gallery_focus_tickers = []
     cards = all_cards[:MAX_SIGNAL_GALLERY_CARDS]
     if not cards:
         return
@@ -7902,6 +8037,19 @@ def render_signal_gallery(
         f'<div class="desk-section-title">Графики найденных акций · {gallery_count}</div>',
         unsafe_allow_html=True,
     )
+
+    if focus_active:
+        focus_col, restore_col = st.columns([0.58, 0.42], vertical_alignment="center")
+        with focus_col:
+            st.caption("Показаны только выбранные и разобранные акции.")
+        with restore_col:
+            if st.button(
+                "Показать остальные",
+                key="restore_unselected_ai_cards",
+                width="stretch",
+            ):
+                st.session_state.ai_gallery_focus_tickers = []
+                rerun_app()
 
     with st.container(key="chart_refresh_controls"):
         control_col, status_col = st.columns([0.58, 0.42], vertical_alignment="bottom")
@@ -7983,6 +8131,94 @@ def render_signal_gallery(
         )
     )
 
+    batch_tickers = selected_ai_tickers(cards, dict(st.session_state))
+    pending_batch = bool(st.session_state.pop("ai_selected_batch_pending", False))
+    batch_col, clear_col = st.columns([0.68, 0.32], vertical_alignment="center")
+    with batch_col:
+        analyze_selected = st.button(
+            f"Разобрать выбранные ({len(batch_tickers)})",
+            key="analyze_selected_tickers",
+            type="primary",
+            width="stretch",
+            disabled=not providers_available or not batch_tickers,
+            help="Claude и Grok разберут только отмеченные акции одним пакетом.",
+        )
+        analyze_selected = analyze_selected or pending_batch
+    with clear_col:
+        if st.button(
+            "Снять выбор",
+            key="clear_selected_tickers",
+            width="stretch",
+            disabled=not batch_tickers,
+        ):
+            for row in cards:
+                st.session_state[ticker_ai_selection_key(row)] = False
+            rerun_app()
+
+    selected_error = str(st.session_state.get("ai_selected_analysis_error") or "")
+    if analyze_selected:
+        selected_set = set(batch_tickers)
+        selected_rows = [
+            row for row in cards if normalize_ticker_id(row.get("Тикер")) in selected_set
+        ]
+        context_lines = ai_context_lines_from_rows(selected_rows, batch_tickers)
+        try:
+            with st.spinner(f"Claude и Grok разбирают выбранные акции: {', '.join(batch_tickers)}..."):
+                batch_result = ai_run_analysis_from_tickers(
+                    batch_tickers,
+                    web_search,
+                    social_search=social_search,
+                    ai_mode=ai_analysis_mode_for_config(cfg),
+                    context_lines=context_lines,
+                )
+            result_cache = st.session_state.get("ai_ticker_analysis_results")
+            if not isinstance(result_cache, dict):
+                result_cache = {}
+            error_cache = st.session_state.get("ai_ticker_analysis_errors")
+            if not isinstance(error_cache, dict):
+                error_cache = {}
+            rows_by_ticker = {
+                normalize_ticker_id(row.get("Тикер")): row for row in selected_rows
+            }
+            for ticker in batch_tickers:
+                ticker_row = rows_by_ticker.get(ticker, {})
+                ticker_context = ai_context_lines_from_rows([ticker_row], [ticker])
+                ticker_result = dict(batch_result)
+                ticker_result["tickers"] = [ticker]
+                ticker_result["signature"] = ai_result_signature(
+                    [ticker],
+                    cfg,
+                    web_search,
+                    social_search,
+                    ticker_context,
+                )
+                result_cache[ticker] = ticker_result
+                error_cache.pop(ticker, None)
+            priority, sequence = mark_tickers_analyzed(
+                st.session_state.get("ai_ticker_analysis_priority"),
+                batch_tickers,
+                st.session_state.get("ai_ticker_analysis_sequence"),
+            )
+            st.session_state.ai_ticker_analysis_results = result_cache
+            st.session_state.ai_ticker_analysis_errors = error_cache
+            st.session_state.ai_ticker_analysis_priority = priority
+            st.session_state.ai_ticker_analysis_sequence = sequence
+            st.session_state.ai_gallery_focus_tickers = list(batch_tickers)
+            st.session_state.ai_selected_analysis_error = ""
+            for row in selected_rows:
+                st.session_state[ticker_ai_selection_key(row)] = False
+                st.session_state[f"analyze_ticker_{ticker_ai_key_base(row)}"] = True
+            if hasattr(st, "toast"):
+                st.toast(f"Готово: разобрано {len(batch_tickers)}. Неотмеченные карточки скрыты.")
+            rerun_app()
+        except Exception as exc:
+            selected_error = ai_provider_error_summary(exc)
+            st.session_state.ai_selected_analysis_error = selected_error
+            st.error(ai_user_error_message(exc))
+    elif selected_error:
+        with st.expander("Ошибка разбора выбранных акций", expanded=False):
+            st.write(selected_error)
+
     used_card_keys: set[str] = set()
     gallery_columns: list[Any] = []
     for card_index, row in enumerate(cards):
@@ -7994,8 +8230,7 @@ def render_signal_gallery(
         scanner_raw = str(row.get("_scanner", ""))
         is_momentum = scanner_raw == SCANNER_MOMENTUM
         direction_raw = str(row.get("_momentum_direction", ""))
-        key_seed = f"{scanner_raw}_{ticker_key}_{signal_raw}_{direction_raw}"
-        key_base_root = re.sub(r"[^A-Za-z0-9_]+", "_", key_seed).strip("_") or "signal_card"
+        key_base_root = ticker_ai_key_base(row)
         key_base = key_base_root
         duplicate_idx = 2
         while key_base in used_card_keys:
@@ -8108,6 +8343,19 @@ def render_signal_gallery(
                 providers_available,
             )
 
+    bottom_batch_tickers = selected_ai_tickers(cards, dict(st.session_state))
+    if len(cards) > 2:
+        if st.button(
+            f"Разобрать выбранные ({len(bottom_batch_tickers)})",
+            key="analyze_selected_tickers_bottom",
+            type="primary",
+            width="stretch",
+            disabled=not providers_available or not bottom_batch_tickers,
+            help="Пакетный AI-разбор отмеченных акций без возврата к началу галереи.",
+        ):
+            st.session_state.ai_selected_batch_pending = True
+            rerun_app()
+
 
 # ── FORMAT HELPERS ──────────────────────────────────────────────────
 def safe_float(value: Any, default: float = 0.0) -> float:
@@ -8180,6 +8428,16 @@ if "ai_ticker_analysis_results" not in st.session_state:
     st.session_state.ai_ticker_analysis_results = {}
 if "ai_ticker_analysis_errors" not in st.session_state:
     st.session_state.ai_ticker_analysis_errors = {}
+if "ai_ticker_analysis_priority" not in st.session_state:
+    st.session_state.ai_ticker_analysis_priority = {}
+if "ai_ticker_analysis_sequence" not in st.session_state:
+    st.session_state.ai_ticker_analysis_sequence = 0
+if "ai_gallery_focus_tickers" not in st.session_state:
+    st.session_state.ai_gallery_focus_tickers = []
+if "ai_selected_analysis_error" not in st.session_state:
+    st.session_state.ai_selected_analysis_error = ""
+if "ai_selected_batch_pending" not in st.session_state:
+    st.session_state.ai_selected_batch_pending = False
 
 auto_started_at = st.session_state.get("auto_scan_started_at")
 if st.session_state.get("auto_scan_running") and isinstance(auto_started_at, datetime):
@@ -9296,3 +9554,4 @@ else:
 if auto_scan_requested and st.session_state.get("auto_continue_pending") and not st.session_state.get("auto_scan_running"):
     st.session_state.auto_continue_pending = False
     rerun_app()
+
