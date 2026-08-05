@@ -463,6 +463,19 @@ def apply_custom_theme() -> None:
                 margin-top: 0.52rem;
             }
 
+            .ai-inline-result {
+                border-top: 2px solid var(--desk-blue);
+                margin-top: 0.7rem;
+                padding: 0.8rem 0.05rem 0.1rem;
+                min-width: 0;
+            }
+
+            .ai-inline-result.ai-yes { border-top-color: var(--desk-green); }
+            .ai-inline-result.ai-careful { border-top-color: var(--desk-amber); }
+            .ai-inline-result.ai-no,
+            .ai-inline-result.ai-short-strong,
+            .ai-inline-result.ai-short-watch { border-top-color: var(--desk-red); }
+
             div[class*="st-key-chart_card_"] {
                 border: 2px solid var(--desk-blue) !important;
                 border-radius: 8px !important;
@@ -4794,6 +4807,17 @@ def dismiss_ticker(ticker: Any) -> str:
     st.session_state.ai_analysis_result = {}
     st.session_state.ai_analysis_error = ""
     st.session_state.ai_provider_connection = {}
+    for state_name in ("ai_ticker_analysis_results", "ai_ticker_analysis_errors"):
+        state_value = st.session_state.get(state_name)
+        if isinstance(state_value, dict):
+            state_value.pop(symbol, None)
+    control_symbol = re.sub(r"[^A-Za-z0-9_]+", "_", symbol).strip("_")
+    for state_key in list(st.session_state.keys()):
+        state_key_text = str(state_key)
+        if state_key_text.startswith(("analyze_ticker_", "refresh_ticker_ai_")) and (
+            f"_{control_symbol}_" in f"_{state_key_text}_"
+        ):
+            del st.session_state[state_key]
     return symbol
 
 
@@ -4809,6 +4833,16 @@ def rerun_app() -> None:
         st.rerun()
     elif hasattr(st, "experimental_rerun"):
         st.experimental_rerun()
+
+
+def clear_ticker_ai_analysis_state(clear_controls: bool = False) -> None:
+    st.session_state.ai_ticker_analysis_results = {}
+    st.session_state.ai_ticker_analysis_errors = {}
+    if not clear_controls:
+        return
+    for key in list(st.session_state.keys()):
+        if str(key).startswith(("analyze_ticker_", "refresh_ticker_ai_")):
+            del st.session_state[key]
 
 
 def auto_scan_next_state(scan_end: int, total: int) -> tuple[int, bool]:
@@ -5365,6 +5399,21 @@ def ai_result_signature(
     )
 
 
+def ai_ticker_analysis_needs_run(
+    cached_result: Any,
+    cached_error: Any,
+    signature: str,
+    force_refresh: bool = False,
+) -> bool:
+    if force_refresh:
+        return True
+    if isinstance(cached_result, dict) and cached_result.get("final"):
+        return False
+    if isinstance(cached_error, dict) and cached_error.get("signature") == signature:
+        return False
+    return True
+
+
 def ai_auto_model_requested(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"", "auto", "latest", "auto-latest", "best"}
 
@@ -5372,6 +5421,8 @@ def ai_auto_model_requested(value: str | None) -> bool:
 def ai_claude_setting_label() -> str:
     setting = str(AI_CLAUDE_MODEL_SETTING or "").strip()
     if ai_auto_model_requested(setting) and AI_CLAUDE_MODEL_POLICY == "previous_stable":
+        if AI_CLAUDE_ECONOMY:
+            return "auto · цена/качество"
         return "auto · предпоследняя по дате"
     if ai_auto_model_requested(setting) and AI_CLAUDE_ECONOMY:
         return "auto economy"
@@ -5435,6 +5486,34 @@ def ai_pick_previous_claude_release(models: list[dict[str, Any]]) -> str:
     )
     if release_dates:
         target_date = release_dates[1] if len(release_dates) > 1 else release_dates[0]
+        if AI_CLAUDE_ECONOMY:
+            eligible_models = [
+                model
+                for model in dated_models
+                if ai_claude_release_date(model) <= target_date
+            ]
+            for target_family in AI_CLAUDE_ECONOMY_TARGET_FAMILIES:
+                family_models = [
+                    model
+                    for model in eligible_models
+                    if ai_claude_model_family(str(model.get("id") or "")) == target_family
+                ]
+                if not family_models:
+                    family_models = [
+                        model
+                        for model in dated_models
+                        if ai_claude_model_family(str(model.get("id") or "")) == target_family
+                    ]
+                if family_models:
+                    selected = max(
+                        family_models,
+                        key=lambda model: (
+                            ai_claude_release_date(model),
+                            ai_model_version_tuple(str(model.get("id") or "")),
+                            str(model.get("id") or ""),
+                        ),
+                    )
+                    return str(selected.get("id") or AI_CLAUDE_FALLBACK_MODEL)
         target_models = [
             model for model in dated_models if ai_claude_release_date(model) == target_date
         ]
@@ -6966,6 +7045,60 @@ def render_ai_analysis_result(result: dict[str, Any]) -> None:
     )
 
 
+def render_ai_inline_result(result: dict[str, Any]) -> None:
+    final_text = str(result.get("final") or "").strip()
+    ai_mode = str(result.get("ai_mode") or "general")
+    requested_tickers = [str(ticker) for ticker in result.get("tickers", [])]
+    rows = ai_filter_rows_to_requested_tickers(
+        ai_parse_final_rows(final_text),
+        requested_tickers,
+    )
+    rows = ai_rows_for_mode(rows, ai_mode)
+    if rows:
+        row = rows[0]
+        badge_class, badge_text = ai_overnight_class(
+            row["Вход"],
+            row.get("Сторона", ""),
+            ai_mode,
+            row.get("Сила", ""),
+        )
+        st.markdown(
+            f"""
+            <div class="ai-inline-result {badge_class}">
+                <div class="ai-ticker-head">
+                    <div>
+                        <div class="ai-ticker-symbol">AI · {html.escape(row["Тикер"])}</div>
+                        <div class="ai-ticker-news">{html.escape(row["Новость"] or "Новость не подтверждена")}</div>
+                    </div>
+                    <div class="ai-badge {badge_class}">{html.escape(badge_text)}</div>
+                </div>
+                <div class="ai-ticker-grid">
+                    <div><span>Сторона</span><strong>{html.escape(row["Сторона"] or "неясно")}</strong></div>
+                    <div><span>Вход</span><strong>{html.escape(row["Вход"] or "неясно")}</strong></div>
+                    <div><span>Overnight</span><strong>{html.escape(row["Overnight"] or "неясно")}</strong></div>
+                    <div><span>Техника</span><strong>{html.escape(row.get("Техника") or "неясно")}</strong></div>
+                    <div><span>Катализатор</span><strong>{html.escape(row["Сила"] or "неясно")}</strong></div>
+                    <div><span>Хайп / FOMO</span><strong>{html.escape((row.get("Хайп") or "неясно") + " · " + (row.get("FOMO") or "неясно"))}</strong></div>
+                    <div><span>Трейдеры / подлинность</span><strong>{html.escape((row.get("Трейдеры") or "неясно") + " · " + (row.get("Подлинность") or "неясно"))}</strong></div>
+                    <div><span>Фаза / хаб</span><strong>{html.escape((row.get("Фаза хайпа") or "неясно") + " · " + (row.get("Хаб") or "неясно"))}</strong></div>
+                </div>
+                <div class="ai-verdict"><strong>Риск:</strong> {html.escape(row["Риски"] or "нет данных")}</div>
+                <div class="ai-verdict">{html.escape(row["Вердикт"] or "Нет короткого вердикта.")}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    elif final_text:
+        st.markdown(final_text)
+
+    social_text = str(result.get("social") or "").strip()
+    if social_text and result.get("social_model_source") != "disabled":
+        with st.expander("Хайп Grok: X, Reddit, Stocktwits", expanded=False):
+            st.markdown(social_text)
+    render_ai_verified_sources(result)
+    render_ai_usage(result)
+
+
 def render_ai_analysis_panel(rows: list[dict[str, Any]], cfg: ScanConfig) -> None:
     rows = filter_dismissed_results(rows)
     tickers_all = ai_tickers_from_results(rows)
@@ -7280,6 +7413,88 @@ def refresh_visible_result_charts(
     return refreshed_rows, refreshed_count
 
 
+def render_ticker_ai_control(
+    row: dict[str, Any],
+    cfg: ScanConfig,
+    key_base: str,
+    web_search: bool,
+    social_search: bool,
+    providers_available: bool,
+) -> None:
+    ticker = normalize_ticker_id(row.get("Тикер"))
+    if not ticker:
+        return
+
+    result_cache = st.session_state.get("ai_ticker_analysis_results")
+    if not isinstance(result_cache, dict):
+        result_cache = {}
+        st.session_state.ai_ticker_analysis_results = result_cache
+    error_cache = st.session_state.get("ai_ticker_analysis_errors")
+    if not isinstance(error_cache, dict):
+        error_cache = {}
+        st.session_state.ai_ticker_analysis_errors = error_cache
+
+    requested = st.toggle(
+        "Разобрать",
+        value=False,
+        key=f"analyze_ticker_{key_base}",
+        disabled=not providers_available,
+        help=f"Отдельный AI-разбор только {ticker}: Claude проверит факты и риски, Grok — хайп и рыночный итог.",
+    )
+    if not requested:
+        return
+
+    context_lines = ai_context_lines_from_rows([row], [ticker])
+    signature = ai_result_signature([ticker], cfg, web_search, social_search, context_lines)
+    cached_result = result_cache.get(ticker)
+    cached_error = error_cache.get(ticker)
+    force_refresh = False
+    if (
+        isinstance(cached_result, dict) and cached_result.get("final")
+    ) or isinstance(cached_error, dict):
+        force_refresh = st.button(
+            "Обновить AI-разбор",
+            key=f"refresh_ticker_ai_{key_base}",
+            width="stretch",
+        )
+
+    if ai_ticker_analysis_needs_run(cached_result, cached_error, signature, force_refresh):
+        try:
+            with st.spinner(f"Claude и Grok разбирают {ticker}..."):
+                result = ai_run_analysis_from_tickers(
+                    [ticker],
+                    web_search,
+                    social_search=social_search,
+                    ai_mode=ai_analysis_mode_for_config(cfg),
+                    context_lines=context_lines,
+                )
+            result["signature"] = signature
+            result_cache[ticker] = result
+            error_cache.pop(ticker, None)
+            cached_result = result
+            cached_error = None
+        except Exception as exc:
+            cached_error = {
+                "signature": signature,
+                "message": ai_user_error_message(exc),
+                "details": ai_provider_error_summary(exc),
+            }
+            error_cache[ticker] = cached_error
+
+    if isinstance(cached_error, dict):
+        st.error(str(cached_error.get("message") or "AI-разбор не выполнен."))
+        details = str(cached_error.get("details") or "").strip()
+        if details:
+            with st.expander("Ошибка AI-разбора", expanded=False):
+                st.write(details)
+
+    cached_result = result_cache.get(ticker)
+    if isinstance(cached_result, dict) and cached_result.get("final"):
+        if cached_result.get("signature") != signature:
+            st.caption("Показан сохранённый разбор. Для свежих данных нажми «Обновить AI-разбор».")
+        render_ai_inline_result(cached_result)
+
+
 def render_signal_gallery(
     rows: list[dict[str, Any]],
     cfg: ScanConfig,
@@ -7367,6 +7582,21 @@ def render_signal_gallery(
     )
     for batch in chunks(minute_symbols, 25):
         minute_bars.update(fetch_alpaca_minute_bars_batch(tuple(batch), minute_visible, alpaca_realtime))
+
+    claude_ready, grok_ready = ai_available_providers()
+    providers_available = claude_ready or grok_ready
+    web_search = bool(
+        st.session_state.get(
+            f"ai_web_search_{cfg.scanner_mode}",
+            AI_OFFICIAL_WEB_SEARCH_DEFAULT,
+        )
+    )
+    social_search = bool(
+        st.session_state.get(
+            f"ai_social_search_{cfg.scanner_mode}",
+            AI_GROK_SOCIAL_DEFAULT,
+        )
+    )
 
     used_card_keys: set[str] = set()
     gallery_columns: list[Any] = []
@@ -7484,6 +7714,14 @@ def render_signal_gallery(
                     """,
                     unsafe_allow_html=True,
                 )
+            render_ticker_ai_control(
+                row,
+                cfg,
+                key_base,
+                web_search,
+                social_search,
+                providers_available,
+            )
 
 
 # ── FORMAT HELPERS ──────────────────────────────────────────────────
@@ -7553,6 +7791,10 @@ if "ai_analysis_result" not in st.session_state:
     st.session_state.ai_analysis_result = {}
 if "ai_analysis_error" not in st.session_state:
     st.session_state.ai_analysis_error = ""
+if "ai_ticker_analysis_results" not in st.session_state:
+    st.session_state.ai_ticker_analysis_results = {}
+if "ai_ticker_analysis_errors" not in st.session_state:
+    st.session_state.ai_ticker_analysis_errors = {}
 
 auto_started_at = st.session_state.get("auto_scan_started_at")
 if st.session_state.get("auto_scan_running") and isinstance(auto_started_at, datetime):
@@ -8229,6 +8471,7 @@ if previous_result_signature and previous_result_signature != active_result_sign
     st.session_state.auto_last_run = None
     st.session_state.ai_analysis_result = {}
     st.session_state.ai_analysis_error = ""
+    clear_ticker_ai_analysis_state(clear_controls=True)
 st.session_state.results_config_signature = active_result_signature
 
 telegram_ready = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
@@ -8477,6 +8720,7 @@ with clear_col:
         st.session_state.auto_last_run = None
         st.session_state.ai_analysis_result = {}
         st.session_state.ai_analysis_error = ""
+        clear_ticker_ai_analysis_state(clear_controls=True)
         st.rerun()
 
 
