@@ -1170,7 +1170,11 @@ AI_PLACEHOLDER_SECRETS = {
     "YOUR_DEEPSEEK_API_KEY",
     "YOUR_XAI_API_KEY",
 }
-AI_DEEPSEEK_KEY_NAMES = ("DEEPSEEK_API_KEY", "DEEPSEEK_KEY")
+AI_DEEPSEEK_KEY_NAMES = (
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_KEY",
+    "DEEPSEEK_R1_KEY",
+)
 AI_GROK_KEY_NAMES = ("XAI_API_KEY", "GROK_API_KEY", "XAI_KEY")
 
 
@@ -5540,6 +5544,7 @@ def ai_result_signature(
 ) -> str:
     return "|".join(
         [
+            "strict_deepseek_pair_v1",
             cfg.scanner_mode,
             ai_analysis_mode_for_config(cfg),
             ",".join(tickers),
@@ -5566,7 +5571,10 @@ def ai_ticker_analysis_needs_run(
     if force_refresh:
         return True
     if isinstance(cached_result, dict) and cached_result.get("final"):
-        return False
+        return bool(
+            cached_result.get("signature") != signature
+            or cached_result.get("deepseek_participated") is not True
+        )
     if isinstance(cached_error, dict) and cached_error.get("signature") == signature:
         return False
     return True
@@ -5631,6 +5639,7 @@ def ai_pick_deepseek_model(models: list[dict[str, Any]]) -> str:
 def ai_resolve_deepseek_model() -> tuple[str, str]:
     models = ai_fetch_deepseek_models(ai_key_cache_token(AI_DEEPSEEK_KEY))
     model = ai_pick_deepseek_model(models)
+    ai_preflight_deepseek_inference(model, ai_key_cache_token(AI_DEEPSEEK_KEY))
     return model, f"DeepSeek API direct · thinking {AI_DEEPSEEK_REASONING_EFFORT}"
 
 
@@ -6811,6 +6820,12 @@ def ai_probe_deepseek_inference(model: str) -> None:
         raise RuntimeError("DeepSeek ответил, но API не подтвердил Thinking-токены")
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def ai_preflight_deepseek_inference(model: str, key_token: str = "") -> bool:
+    ai_probe_deepseek_inference(model)
+    return True
+
+
 def ai_probe_grok_inference(model: str) -> None:
     end_date = now_et().date()
     start_date = end_date - timedelta(days=2)
@@ -7032,9 +7047,16 @@ def ai_call_deepseek_synthesis(
         extra_body={"thinking": {"type": "enabled"}},
     )
     ai_require_completed_response(response, "DeepSeek Thinking")
+    if not ai_deepseek_reasoning_observed(response):
+        raise RuntimeError(
+            "DeepSeek вернул текст, но API не подтвердил reasoning_content или Thinking-токены"
+        )
+    usage = ai_usage_record(response, "DeepSeek Thinking", "market_synthesis", model)
+    usage["reasoning_verified"] = True
     return {
         "text": ai_deepseek_text(response),
-        "usage": ai_usage_record(response, "DeepSeek Thinking", "market_synthesis", model),
+        "usage": usage,
+        "reasoning_verified": True,
     }
 
 
@@ -7175,6 +7197,11 @@ def ai_call_synthesis_resilient(
                 f"DeepSeek Thinking synthesis {deepseek_model}: {ai_provider_error_summary(exc)}"
             )
             LOGGER.warning("DeepSeek Thinking synthesis attempt failed: %s", warnings[-1])
+            raise RuntimeError(
+                "DeepSeek Thinking не завершил финальный reasoning. "
+                "Резервная подмена итогом Grok отключена. "
+                + ai_provider_error_summary(exc)
+            ) from exc
 
     attempts = [(model, model_source)] if model else []
     if model and model != AI_GROK_FALLBACK_MODEL:
@@ -7226,8 +7253,15 @@ def _ai_run_analysis_chunk(
     context_lines: list[str] | None = None,
 ) -> dict[str, Any]:
     deepseek_ready, grok_ready = ai_available_providers()
-    if not (deepseek_ready or grok_ready):
-        raise RuntimeError("DeepSeek Thinking и Grok не получили API-ключи")
+    if not deepseek_ready:
+        raise RuntimeError(
+            "DeepSeek Thinking не получил DEEPSEEK_API_KEY. "
+            "Grok-поиск не запущен, чтобы не тратить деньги без финального reasoning."
+        )
+    if not grok_ready:
+        raise RuntimeError(
+            "Grok не получил XAI_API_KEY. Для совместного разбора нужны обе модели."
+        )
 
     raw_tickers = " ".join(tickers)
     resolved_items = ai_resolved_items_for_tickers(tickers)
@@ -7240,8 +7274,11 @@ def _ai_run_analysis_chunk(
         try:
             deepseek_model, deepseek_model_source = ai_resolve_deepseek_model()
         except Exception as exc:
-            deepseek_model_source = "unavailable"
-            provider_warnings.append(f"DeepSeek Thinking недоступен: {ai_provider_error_summary(exc)}")
+            raise RuntimeError(
+                "DeepSeek Thinking не прошёл обязательную проверку до запуска Grok. "
+                "Grok-поиск не запускался. "
+                + ai_provider_error_summary(exc)
+            ) from exc
     if grok_ready:
         try:
             grok_model, grok_model_source = ai_resolve_grok_model()
@@ -7406,7 +7443,8 @@ def _ai_run_analysis_chunk(
     deepseek_participated = bool(
         deepseek_model
         and synthesis_model == deepseek_model
-        and not str(synthesis_model_source or "").lower().startswith("grok fallback")
+        and isinstance(synthesis_usage, dict)
+        and synthesis_usage.get("reasoning_verified") is True
     )
     final_answer, guardrail_warnings = ai_enforce_final_guardrails(
         final_answer,
@@ -8199,9 +8237,10 @@ def render_ai_agent_views(result: dict[str, Any]) -> None:
         1 for status in verification.values() if isinstance(status, dict) and status.get("social_verified")
     )
     verification_total = len(verification)
+    deepseek_verified = result.get("deepseek_participated") is True
     st.caption(
         "Фактически зафиксировано API: "
-        "DeepSeek Thinking · "
+        f"DeepSeek Thinking {'подтверждён' if deepseek_verified else 'НЕ подтверждён'} · "
         f"Grok X {format_int_cell(grok_x)} · "
         f"Grok Web {format_int_cell(grok_news_web + grok_social_web)} · "
         f"URL {format_int_cell(source_count)}"
@@ -8287,6 +8326,10 @@ def render_ai_analysis_result(result: dict[str, Any]) -> None:
         st.error(
             "DeepSeek Thinking не участвовал в финальном reasoning. Показанный итог является "
             "резервным разбором Grok; вход и overnight программно запрещены."
+        )
+    elif result.get("deepseek_participated") is True:
+        st.success(
+            "DeepSeek Thinking подтверждён ответом API: финальный reasoning выполнен DeepSeek."
         )
     final_text = str(result.get("final") or "")
     ai_mode = str(result.get("ai_mode") or "general")
@@ -8529,16 +8572,12 @@ def render_ai_analysis_panel(
     st.caption(f"В AI-разбор уйдут: {', '.join(selected_tickers)}")
 
     missing = ai_missing_secrets()
-    available_count = 2 - len(missing)
     if missing:
-        if available_count:
-            st.warning(
-                "Ограниченный AI-режим: приложение не получило "
-                + ", ".join(missing)
-                + ". Разбор всё равно доступен через подключённого провайдера."
-            )
-        else:
-            st.warning(ai_missing_secrets_message(missing))
+        st.error(
+            ai_missing_secrets_message(missing)
+            + " Совместный разбор не запускается в ограниченном режиме: "
+            "это защищает от расхода Grok без финального reasoning DeepSeek."
+        )
         st.caption(ai_secrets_diagnostic())
 
     if st.button(
@@ -8571,7 +8610,7 @@ def render_ai_analysis_panel(
         button_label,
         type="primary",
         width="stretch",
-        disabled=available_count == 0,
+        disabled=bool(missing),
     )
     signature = ai_result_signature(selected_tickers, cfg, web_search, social_search, context_lines)
     if analyze_clicked:
@@ -9114,7 +9153,7 @@ def render_signal_gallery(
         minute_bars.update(fetch_alpaca_minute_bars_batch(tuple(batch), minute_visible, alpaca_realtime))
 
     deepseek_ready, grok_ready = ai_available_providers()
-    providers_available = deepseek_ready or grok_ready
+    providers_available = deepseek_ready and grok_ready
     web_search = bool(
         st.session_state.get(
             f"ai_web_search_{cfg.scanner_mode}",
