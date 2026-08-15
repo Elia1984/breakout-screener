@@ -1239,18 +1239,15 @@ if AI_DEEPSEEK_MODEL not in {"deepseek-v4-flash", "deepseek-v4-pro"}:
     AI_DEEPSEEK_MODEL = "deepseek-v4-flash"
 AI_DEEPSEEK_MODEL_SETTING = AI_DEEPSEEK_MODEL
 AI_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-AI_DEEPSEEK_REASONING_EFFORT = secret_or_default(
-    "DEEPSEEK_REASONING_EFFORT", "high"
-).strip().lower()
-if AI_DEEPSEEK_REASONING_EFFORT not in {"high", "max"}:
-    AI_DEEPSEEK_REASONING_EFFORT = "high"
+# Trading synthesis always uses the strongest official DeepSeek thinking effort.
+AI_DEEPSEEK_REASONING_EFFORT = "max"
 AI_GROK_MODEL_SETTING = secret_or_default("GROK_MODEL", "auto")
-AI_GROK_FALLBACK_MODEL = secret_or_default("GROK_FALLBACK_MODEL", "grok-4.5")
+AI_GROK_FALLBACK_MODEL = secret_or_default("GROK_FALLBACK_MODEL", "grok-4.6")
 if AI_GROK_MODEL_SETTING.strip().lower() in {"", "auto", "latest", "auto-latest", "best"}:
-    AI_GROK_FALLBACK_MODEL = "grok-4.5"
+    AI_GROK_FALLBACK_MODEL = "grok-4.6"
 AI_GROK_PREFERRED_MODELS = tuple(
     part.strip()
-    for part in secret_or_default("GROK_PREFERRED_MODELS", "grok-4.5,grok-4.3,latest").split(",")
+    for part in secret_or_default("GROK_PREFERRED_MODELS", "grok-4.6,grok-4.5,latest").split(",")
     if part.strip()
 )
 AI_GROK_WEB_SEARCH_DEFAULT = secret_or_default("GROK_WEB_SEARCH", "1").strip().lower() not in {
@@ -1270,7 +1267,8 @@ AI_DEEPSEEK_MAX_TOKENS = secret_int("DEEPSEEK_MAX_TOKENS", 12000, 4000, 32000)
 AI_GROK_MAX_TOKENS = 3000
 AI_GROK_SOCIAL_MAX_TOKENS = 1800
 AI_SYNTHESIS_MAX_TOKENS = 2000
-AI_GROK_SOCIAL_LOOKBACK_DAYS = secret_int("GROK_SOCIAL_LOOKBACK_DAYS", 7, 1, 30)
+AI_GROK_SOCIAL_LOOKBACK_HOURS = secret_int("GROK_SOCIAL_LOOKBACK_HOURS", 4, 1, 24)
+AI_OFFICIAL_LOOKBACK_DAYS = secret_int("GROK_OFFICIAL_LOOKBACK_DAYS", 7, 1, 30)
 AI_DEEPSEEK_TIMEOUT_SEC = secret_int("DEEPSEEK_TIMEOUT_SEC", 300, 60, 900)
 AI_GROK_TIMEOUT_SEC = secret_int("GROK_TIMEOUT_SEC", 240, 30, 600)
 AI_GROK_REASONING_EFFORT = secret_or_default("GROK_REASONING_EFFORT", "medium").strip().lower()
@@ -1322,14 +1320,15 @@ AI_GROK_SENTIMENT_PROMPT = """
 Катализатор: <5-12 слов / не подтверждён>
 Дата/время катализатора ET: <YYYY-MM-DD HH:MM ET / YYYY-MM-DD / не подтверждено>
 Тип события: <FDA / SEC / earnings / contract / M&A / offering / другое>
-Подтверждённая сумма/масштаб события: <$ и период / не раскрыто>
-Гарантированная доля компании: <$ и период / не раскрыта>
-Последняя годовая/TTM-выручка: <$ + период + первичный источник / не подтверждена>
-Обязательность события: <Подписано/обязательно / MOU/намерение / Неясно>
+Подтверждённая сумма/масштаб события: <$ и период + URL этого факта / не раскрыто>
+Гарантированная доля компании: <$ и период + URL этого факта / не раскрыта>
+Последняя годовая/TTM-выручка: <$ + период + URL первичного источника / не подтверждена>
+Обязательность события: <Подписано/обязательно / MOU/намерение / Неясно + URL>
 Рыночный смысл факта: <Позитивный / Нейтральный / Негативный / Неясно>
 Сила факта: <1-5>
 Фундаментальный стоп: <Да / Нет>
 Причина стопа: <3-10 слов / нет>
+Источник стопа: <URL / нет>
 Тип основного источника: <SEC / FDA / IR компании / Биржа / Официальный пресс-релиз / СМИ / Неясно>
 Основной источник: <дата + URL / нет подтверждённого источника>
 Резервный источник: <дата + URL / нет>
@@ -1347,7 +1346,9 @@ AI_GROK_SOCIAL_PROMPT = """
 - Stocktwits.
 
 Правила:
-- анализируй только свежий период, заданный инструментами поиска;
+- анализируй только точное четырёхчасовое окно ET, указанное в запросе;
+- полностью игнорируй посты и обсуждения, опубликованные до начала этого окна;
+- для каждой площадки укажи время самой свежей учтённой активности в ET;
 - ищи и $TICKER, и точное название компании, но не смешивай одноимённые тикеры;
 - игнорируй ботов, повторяющиеся тексты, реферальные ссылки, paid promotion,
   однотипные призывы купить, шиллинг и аккаунты без живого взаимодействия;
@@ -1367,8 +1368,11 @@ AI_GROK_SOCIAL_PROMPT = """
 Формат строго по каждому тикеру, без вступления и заключения:
 Тикер: <TICKER>
 X: <Проверен: активность растёт / стабильна / падает / живых обсуждений нет / неясно>
+Последняя активность X ET: <YYYY-MM-DD HH:MM ET / нет за окно>
 Reddit: <Проверен: активность растёт / стабильна / падает / живых обсуждений нет / неясно>
+Последняя активность Reddit ET: <YYYY-MM-DD HH:MM ET / нет за окно>
 Stocktwits: <Проверен: активность растёт / стабильна / падает / живых обсуждений нет / неясно>
+Последняя активность Stocktwits ET: <YYYY-MM-DD HH:MM ET / нет за окно>
 Уникальные авторы: <Много / Средне / Мало / Неясно>
 Динамика упоминаний: <Растёт / Стабильна / Падает / Неясно>
 Повторы и копипаст: <Низкие / Средние / Высокие / Неясно>
@@ -1533,14 +1537,15 @@ AI_GROK_SHORT_PUT_PROMPT = """
 Катализатор: <5-12 слов / не подтверждён>
 Дата/время катализатора ET: <YYYY-MM-DD HH:MM ET / YYYY-MM-DD / не подтверждено>
 Тип события: <offering / FDA / earnings / lawsuit / delisting / другое>
-Подтверждённая сумма/масштаб события: <$ и период / не раскрыто>
-Гарантированная доля компании: <$ и период / не раскрыта>
-Последняя годовая/TTM-выручка: <$ + период + первичный источник / не подтверждена>
-Обязательность события: <Подписано/обязательно / MOU/намерение / Неясно>
+Подтверждённая сумма/масштаб события: <$ и период + URL этого факта / не раскрыто>
+Гарантированная доля компании: <$ и период + URL этого факта / не раскрыта>
+Последняя годовая/TTM-выручка: <$ + период + URL первичного источника / не подтверждена>
+Обязательность события: <Подписано/обязательно / MOU/намерение / Неясно + URL>
 Рыночный смысл факта: <Негативный / Нейтральный / Позитивный / Неясно>
 Сила факта: <1-5>
 Short/Put блокер: <Да / Нет>
 Причина блокера: <3-10 слов / нет>
+Источник блокера: <URL / нет>
 Тип основного источника: <SEC / FDA / IR компании / Биржа / Официальный пресс-релиз / СМИ / Неясно>
 Основной источник: <дата + URL / нет подтверждённого источника>
 Резервный источник: <дата + URL / нет>
@@ -1928,7 +1933,11 @@ def nasdaq_screener_rows(payload: Any) -> list[dict[str, Any]] | None:
 
 
 @st.cache_data(ttl=NASDAQ_CACHE_TTL_SEC, show_spinner=False)
-def get_nasdaq_tickers(exchange: str, max_price: float) -> list[dict[str, Any]]:
+def get_nasdaq_tickers(
+    exchange: str,
+    min_price: float,
+    max_price: float,
+) -> list[dict[str, Any]]:
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -1973,7 +1982,7 @@ def get_nasdaq_tickers(exchange: str, max_price: float) -> list[dict[str, Any]]:
             if not ticker or ticker in seen:
                 continue
             price = parse_price(row.get("lastsale"))
-            if price is None or price > max_price:
+            if price is None or price < min_price or price > max_price:
                 continue
             seen.add(ticker)
             tickers.append(
@@ -2090,6 +2099,7 @@ def fetch_market_symbol_directory() -> list[tuple[str, str, str]]:
 def snapshot_universe_rows(
     payload: Any,
     metadata: dict[str, tuple[str, str]],
+    min_price: float,
     max_price: float,
 ) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
@@ -2111,7 +2121,7 @@ def snapshot_universe_rows(
             or latest_trade.get("p")
             or previous_bar.get("c")
         )
-        if price is None or price > max_price:
+        if price is None or price < min_price or price > max_price:
             continue
         name, exchange = metadata[symbol]
         rows.append(
@@ -2128,7 +2138,11 @@ def snapshot_universe_rows(
 
 
 @st.cache_data(ttl=UNIVERSE_SNAPSHOT_CACHE_TTL_SEC, show_spinner=False)
-def get_alpaca_fallback_tickers(exchange: str, max_price: float) -> list[dict[str, Any]]:
+def get_alpaca_fallback_tickers(
+    exchange: str,
+    min_price: float,
+    max_price: float,
+) -> list[dict[str, Any]]:
     if not ALPACA_KEY or not ALPACA_SECRET:
         return []
     directory = fetch_market_symbol_directory()
@@ -2150,18 +2164,29 @@ def get_alpaca_fallback_tickers(exchange: str, max_price: float) -> list[dict[st
             if response.status_code in {401, 403}:
                 return []
             response.raise_for_status()
-            rows.extend(snapshot_universe_rows(response.json(), metadata, max_price))
+            rows.extend(
+                snapshot_universe_rows(
+                    response.json(),
+                    metadata,
+                    min_price,
+                    max_price,
+                )
+            )
         except Exception as exc:
             LOGGER.warning("Alpaca universe snapshots failed: %s", exc)
     return rows
 
 
-def get_market_tickers(exchange: str, max_price: float) -> list[dict[str, Any]]:
-    primary = get_nasdaq_tickers(exchange, max_price)
+def get_market_tickers(
+    exchange: str,
+    min_price: float,
+    max_price: float,
+) -> list[dict[str, Any]]:
+    primary = get_nasdaq_tickers(exchange, min_price, max_price)
     if primary:
         return primary
     LOGGER.warning("Nasdaq universe is unavailable; using NasdaqTrader + Alpaca delayed SIP fallback.")
-    fallback = get_alpaca_fallback_tickers(exchange, max_price)
+    fallback = get_alpaca_fallback_tickers(exchange, min_price, max_price)
     if not fallback:
         try:
             fetch_market_symbol_directory.clear()
@@ -5186,7 +5211,7 @@ def ai_provider_connection_check() -> dict[str, dict[str, Any]]:
                 "message": (
                     f"ключ и thinking inference работают; модель: {probe_model}"
                     if provider == "DeepSeek Thinking"
-                    else f"ключ и короткий inference работают; моделей: {len(models)}"
+                    else f"ключ, inference и Web/X Search работают; модель: {probe_model}"
                 ),
             }
         except Exception as exc:
@@ -5519,9 +5544,12 @@ def ai_result_signature(
             ai_analysis_mode_for_config(cfg),
             ",".join(tickers),
             AI_DEEPSEEK_MODEL_SETTING,
+            AI_DEEPSEEK_REASONING_EFFORT,
+            f"deepseek_tokens={AI_DEEPSEEK_MAX_TOKENS}",
             AI_GROK_MODEL_SETTING,
             AI_GROK_REASONING_EFFORT,
-            f"social_days={AI_GROK_SOCIAL_LOOKBACK_DAYS}",
+            f"official_days={AI_OFFICIAL_LOOKBACK_DAYS}",
+            f"social_hours={AI_GROK_SOCIAL_LOOKBACK_HOURS}",
             "web" if web_search else "no_web",
             "social" if social_search else "no_social",
             " / ".join(context_lines or []),
@@ -5668,14 +5696,6 @@ def ai_pick_latest_grok_model(models: list[Any]) -> str:
         )
         return str(selected.get("id") or "")
 
-    available_by_lower = {
-        str(record.get("id") or "").lower(): str(record.get("id") or "")
-        for record in candidates
-    }
-    for preferred in AI_GROK_PREFERRED_MODELS:
-        matched = available_by_lower.get(preferred.lower())
-        if matched:
-            return matched
     if candidates:
         return str(max(candidates, key=lambda record: ai_grok_model_score(str(record.get("id") or ""))).get("id") or "")
     return ""
@@ -5834,6 +5854,31 @@ def ai_deepseek_text(response: Any) -> str:
     return str(getattr(message, "content", None) or "").strip()
 
 
+def ai_deepseek_reasoning_observed(response: Any) -> bool:
+    choices = getattr(response, "choices", None) or []
+    if choices:
+        choice = choices[0]
+        message = choice.get("message") if isinstance(choice, dict) else getattr(choice, "message", None)
+        reasoning = (
+            message.get("reasoning_content")
+            if isinstance(message, dict)
+            else getattr(message, "reasoning_content", None)
+        )
+        if str(reasoning or "").strip():
+            return True
+
+    usage = ai_object_payload(getattr(response, "usage", None))
+    if not isinstance(usage, dict):
+        return False
+    details = usage.get("completion_tokens_details") or usage.get("output_tokens_details")
+    if not isinstance(details, dict):
+        details = {}
+    try:
+        return int(details.get("reasoning_tokens") or usage.get("reasoning_tokens") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def ai_grok_text(response: Any) -> str:
     output_text = getattr(response, "output_text", None)
     if output_text:
@@ -5863,7 +5908,7 @@ def ai_require_completed_response(response: Any, provider: str) -> None:
             else getattr(choice, "finish_reason", None)
         )
         finish_reason = str(finish_reason or "").strip().lower()
-        if finish_reason and finish_reason != "stop":
+        if finish_reason != "stop":
             raise RuntimeError(f"DeepSeek Thinking вернул незавершённый ответ: {finish_reason}")
         return
 
@@ -5997,9 +6042,13 @@ def ai_usage_record(response: Any, provider: str, role: str, model: str) -> dict
     input_tokens = number(usage.get("input_tokens"), usage.get("prompt_tokens"))
     output_tokens = number(usage.get("output_tokens"), usage.get("completion_tokens"))
     cached_tokens = number(
+        usage.get("prompt_cache_hit_tokens"),
         input_details.get("cached_tokens"),
         usage.get("cache_read_input_tokens"),
     )
+    cache_miss_tokens = number(usage.get("prompt_cache_miss_tokens"))
+    if not cache_miss_tokens:
+        cache_miss_tokens = max(0, input_tokens - cached_tokens)
     cache_write_tokens = number(usage.get("cache_creation_input_tokens"))
     if not cache_write_tokens:
         cache_write_tokens = number(input_details.get("cache_write_tokens"))
@@ -6010,12 +6059,27 @@ def ai_usage_record(response: Any, provider: str, role: str, model: str) -> dict
         direct_cost = max(0.0, float(usage.get("cost") or 0.0))
     except (TypeError, ValueError):
         direct_cost = 0.0
+    exact_cost = direct_cost or (cost_ticks / 10_000_000_000 if cost_ticks else 0.0)
+    estimated_cost = 0.0
+    if not exact_cost and str(provider or "").lower().startswith("deepseek"):
+        pricing = {
+            "deepseek-v4-flash": (0.0028, 0.14, 0.28),
+            "deepseek-v4-pro": (0.003625, 0.435, 0.87),
+        }.get(str(model or "").lower())
+        if pricing:
+            cache_hit_rate, cache_miss_rate, output_rate = pricing
+            estimated_cost = (
+                cached_tokens * cache_hit_rate
+                + cache_miss_tokens * cache_miss_rate
+                + output_tokens * output_rate
+            ) / 1_000_000
     return {
         "provider": provider,
         "role": role,
         "model": model,
         "input_tokens": input_tokens,
         "cached_tokens": cached_tokens,
+        "cache_miss_tokens": cache_miss_tokens,
         "cache_write_tokens": cache_write_tokens,
         "output_tokens": output_tokens,
         "reasoning_tokens": reasoning_tokens,
@@ -6025,7 +6089,8 @@ def ai_usage_record(response: Any, provider: str, role: str, model: str) -> dict
             tool_counts["web_search"],
         ),
         "x_searches": tool_counts["x_search"],
-        "cost_usd": direct_cost or (cost_ticks / 10_000_000_000 if cost_ticks else 0.0),
+        "cost_usd": exact_cost,
+        "estimated_cost_usd": estimated_cost,
     }
 
 
@@ -6233,6 +6298,136 @@ def ai_primary_source_kind(value: str) -> bool:
     ) and "сми" not in normalized
 
 
+def ai_url_host(url: str) -> str:
+    match = re.match(r"https?://([^/:?#]+)", str(url or "").strip().lower())
+    return match.group(1).removeprefix("www.") if match else ""
+
+
+def ai_company_tokens(value: str) -> set[str]:
+    ignored = {
+        "inc", "incorporated", "corp", "corporation", "company", "co", "ltd", "limited",
+        "plc", "group", "holdings", "holding", "technologies", "technology", "therapeutics",
+        "pharmaceuticals", "pharmaceutical", "biotech", "energy", "systems", "international",
+        "the", "and", "of",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]{3,}", str(value or "").lower())
+        if token not in ignored
+    }
+
+
+def ai_company_identity_matches(reported: str, expected: str) -> bool:
+    reported_tokens = ai_company_tokens(reported)
+    expected_tokens = ai_company_tokens(expected)
+    if not reported_tokens or not expected_tokens:
+        return False
+    return bool(reported_tokens & expected_tokens)
+
+
+def ai_expected_companies(context_lines: list[str] | None) -> dict[str, str]:
+    companies: dict[str, str] = {}
+    for line in context_lines or []:
+        ticker = normalize_ticker_id(str(line).partition(":")[0])
+        match = re.search(r"(?:^|;)\s*компания=([^;]+)", str(line).partition(":")[2], flags=re.I)
+        if ticker and match and ai_confirmed_fact_field(match.group(1)):
+            companies[ticker] = match.group(1).strip()
+    return companies
+
+
+def ai_recent_event_date(value: str, max_age_days: int = AI_OFFICIAL_LOOKBACK_DAYS) -> bool:
+    match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", str(value or ""))
+    if not match:
+        return False
+    try:
+        event_day = datetime.strptime(match.group(1), "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    age = (now_et().date() - event_day).days
+    return 0 <= age < max(1, int(max_age_days))
+
+
+def ai_recent_social_timestamp(
+    value: str,
+    reference_time: Any = None,
+    max_age_hours: int = AI_GROK_SOCIAL_LOOKBACK_HOURS,
+) -> bool:
+    match = re.search(
+        r"\b(20\d{2}-\d{2}-\d{2})[T\s]+(\d{2}):(\d{2})(?::\d{2})?\b",
+        str(value or ""),
+    )
+    if not match:
+        return False
+    try:
+        activity_time = datetime.strptime(
+            f"{match.group(1)} {match.group(2)}:{match.group(3)}",
+            "%Y-%m-%d %H:%M",
+        ).replace(tzinfo=MARKET_TZ)
+    except ValueError:
+        return False
+    current_time = reference_time or now_et()
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=MARKET_TZ)
+    else:
+        current_time = current_time.astimezone(MARKET_TZ)
+    age_seconds = (current_time - activity_time).total_seconds()
+    return -300 <= age_seconds <= max(1, int(max_age_hours)) * 3600
+
+
+def ai_official_source_url(
+    url: str,
+    source_kind: str,
+    reported_company: str,
+    expected_company: str,
+    title: str = "",
+) -> bool:
+    host = ai_url_host(url)
+    if not host or not ai_company_identity_matches(reported_company, expected_company):
+        return False
+    kind = str(source_kind or "").strip().lower()
+    if "sec" in kind:
+        return host == "sec.gov" or host.endswith(".sec.gov")
+    if "fda" in kind:
+        return host == "fda.gov" or host.endswith(".fda.gov")
+    if "бирж" in kind:
+        return any(
+            host == domain or host.endswith(f".{domain}")
+            for domain in ("nasdaq.com", "nyse.com", "cboe.com", "otcmarkets.com")
+        )
+
+    third_party = (
+        "reuters.com", "bloomberg.com", "finance.yahoo.com", "marketwatch.com",
+        "benzinga.com", "seekingalpha.com", "globenewswire.com", "businesswire.com",
+        "accesswire.com", "prnewswire.com", "stocktwits.com", "reddit.com", "x.com",
+    )
+    if any(host == domain or host.endswith(f".{domain}") for domain in third_party):
+        return False
+    evidence_tokens = ai_company_tokens(f"{host} {title}")
+    return bool(evidence_tokens & ai_company_tokens(expected_company))
+
+
+def ai_social_url_platform(url: str) -> str:
+    host = ai_url_host(url)
+    if host == "x.com" or host.endswith(".x.com") or host == "twitter.com" or host.endswith(".twitter.com"):
+        return "x"
+    if host == "reddit.com" or host.endswith(".reddit.com"):
+        return "reddit"
+    if host == "stocktwits.com" or host.endswith(".stocktwits.com"):
+        return "stocktwits"
+    return ""
+
+
+def ai_detect_long_hard_stop(block: str) -> bool:
+    text = str(block or "").lower()
+    patterns = (
+        r"\b(?:active|активн\w*)\s+(?:public\s+)?offering\b",
+        r"\b(?:s-1|424b[1-9]?|at-the-market|atm offering|dilution|размыт\w*)\b",
+        r"\b(?:bankrupt\w*|банкрот\w*|delist\w*|делистинг|trading halt|остановк\w+ торгов)\b",
+        r"\b(?:complete response letter|clinical trial failed|trial failure|fda (?:reject|denial)|провал\w* fda)\b",
+    )
+    return any(re.search(pattern, text, flags=re.I) for pattern in patterns)
+
+
 def ai_build_ticker_verification(
     tickers: list[str],
     official_text: str,
@@ -6243,12 +6438,19 @@ def ai_build_ticker_verification(
     social_x_search: bool,
     social_web_search: bool,
     ai_mode: str,
+    context_lines: list[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     normalized_tickers = [normalize_ticker_id(ticker) for ticker in tickers]
     official_blocks = ai_ticker_blocks(official_text)
     social_blocks = ai_ticker_blocks(social_text)
     official_allowed = ai_source_urls(official_sources)
     social_allowed = ai_source_urls(social_sources)
+    official_metadata = {
+        str(item.get("url") or "").strip().rstrip("/"): item
+        for item in official_sources
+        if isinstance(item, dict)
+    }
+    expected_companies = ai_expected_companies(context_lines)
     verification: dict[str, dict[str, Any]] = {}
 
     for ticker in normalized_tickers:
@@ -6260,12 +6462,12 @@ def ai_build_ticker_verification(
             or ai_field_value(official_block, "Источник")
         )
         reserve_source = ai_field_value(official_block, "Резервный источник")
-        primary_urls = [
+        candidate_primary_urls = [
             url
             for url in ai_urls_in_text(primary_source)
             if url.rstrip("/") in official_allowed
         ]
-        official_urls = [
+        candidate_official_urls = [
             url
             for url in ai_urls_in_text(f"{primary_source}\n{reserve_source}")
             if url.rstrip("/") in official_allowed
@@ -6278,18 +6480,47 @@ def ai_build_ticker_verification(
         event_date = ai_field_value(official_block, "Дата/время катализатора ET")
         source_kind = ai_field_value(official_block, "Тип основного источника")
         company = ai_field_value(official_block, "Компания")
+        market_meaning = ai_field_value(official_block, "Рыночный смысл факта").strip().lower()
+        expected_company = expected_companies.get(ticker, "")
+        primary_urls = [
+            url
+            for url in candidate_primary_urls
+            if ai_official_source_url(
+                url,
+                source_kind,
+                company,
+                expected_company,
+                str(official_metadata.get(url.rstrip("/"), {}).get("title") or ""),
+            )
+        ]
+        official_urls = [
+            url
+            for url in candidate_official_urls
+            if ai_official_source_url(
+                url,
+                source_kind,
+                company,
+                expected_company,
+                str(official_metadata.get(url.rstrip("/"), {}).get("title") or ""),
+            )
+        ]
         official_verified = bool(
             official_search
             and primary_urls
             and ai_confirmed_fact_field(catalyst)
-            and ai_confirmed_fact_field(event_date)
-            and re.search(r"\b20\d{2}-\d{2}-\d{2}\b", event_date)
+            and ai_recent_event_date(event_date)
             and ai_primary_source_kind(source_kind)
-            and ai_confirmed_fact_field(company)
+            and ai_company_identity_matches(company, expected_company)
         )
         stop_label = "Short/Put блокер" if ai_mode == "short_put" else "Фундаментальный стоп"
         stop_value = ai_field_value(official_block, stop_label).strip().lower()
-        hard_stop = stop_value.startswith("да") or stop_value.startswith("yes")
+        hard_stop = (
+            stop_value.startswith("да")
+            or stop_value.startswith("yes")
+            or (ai_mode != "short_put" and ai_detect_long_hard_stop(official_block))
+            or (ai_mode != "short_put" and market_meaning.startswith(("негатив", "negative")))
+            or (ai_mode == "short_put" and market_meaning.startswith(("позитив", "positive")))
+        )
 
         social_block = social_blocks.get(ticker, "")
         social_urls = [
@@ -6302,12 +6533,39 @@ def ai_build_ticker_verification(
             "reddit": ai_field_value(social_block, "Reddit"),
             "stocktwits": ai_field_value(social_block, "Stocktwits"),
         }
-        platform_coverage = all(str(value or "").strip() for value in platform_fields.values())
+        platform_time_fields = {
+            "x": ai_field_value(social_block, "Последняя активность X ET"),
+            "reddit": ai_field_value(social_block, "Последняя активность Reddit ET"),
+            "stocktwits": ai_field_value(social_block, "Последняя активность Stocktwits ET"),
+        }
+        platform_coverage = all(
+            str(value or "").strip().lower().startswith("проверен:")
+            and "неясно" not in str(value or "").strip().lower()
+            for value in platform_fields.values()
+        )
+        linked_platforms = {
+            platform
+            for platform in (ai_social_url_platform(url) for url in social_urls)
+            if platform
+        }
+        verified_platforms = []
+        for platform, status_value in platform_fields.items():
+            status = str(status_value or "").strip().lower()
+            timestamp_value = str(platform_time_fields.get(platform) or "").strip().lower()
+            no_live_discussion = "живых обсуждений нет" in status
+            no_activity_reported = "нет за окно" in timestamp_value
+            if no_live_discussion and no_activity_reported:
+                verified_platforms.append(platform)
+                continue
+            if platform in linked_platforms and ai_recent_social_timestamp(timestamp_value):
+                verified_platforms.append(platform)
+        verified_platforms.sort()
+        freshness_coverage = set(verified_platforms) == set(platform_fields)
         social_verified = bool(
             social_x_search
             and social_web_search
             and platform_coverage
-            and social_urls
+            and freshness_coverage
         )
 
         verification[ticker] = {
@@ -6315,15 +6573,63 @@ def ai_build_ticker_verification(
             "official_urls": official_urls[:3],
             "primary_source_url": primary_urls[0] if primary_urls else "",
             "source_kind": source_kind,
+            "expected_company": expected_company,
+            "reported_company": company,
             "event_date": event_date,
             "catalyst": catalyst,
+            "market_meaning": market_meaning,
             "fundamental_stop": hard_stop if ai_mode != "short_put" else False,
             "short_blocker": hard_stop if ai_mode == "short_put" else False,
             "social_verified": social_verified,
             "social_urls": social_urls[:3],
             "social_platforms": platform_fields,
+            "social_platform_timestamps": platform_time_fields,
+            "social_verified_platforms": verified_platforms,
         }
     return verification
+
+
+def ai_sanitize_verified_official_block(block: str, allowed_urls: list[str]) -> str:
+    allowed = {str(url or "").strip().rstrip("/") for url in allowed_urls if url}
+    source_required = {
+        "подтверждённая сумма/масштаб события",
+        "гарантированная доля компании",
+        "последняя годовая/ttm-выручка",
+        "обязательность события",
+    }
+    independent_judgment = {"рыночный смысл факта", "сила факта"}
+    sanitized: list[str] = []
+    for line in str(block or "").splitlines():
+        label, separator, value = line.partition(":")
+        normalized_label = label.strip().lower().strip("* ")
+        if not separator:
+            sanitized.append(line)
+            continue
+        if normalized_label in independent_judgment:
+            sanitized.append(f"{label}: оценивает DeepSeek независимо")
+            continue
+        if normalized_label in source_required:
+            line_urls = {url.rstrip("/") for url in ai_urls_in_text(value)}
+            if not (line_urls & allowed):
+                sanitized.append(f"{label}: не подтверждено первичным URL")
+                continue
+        sanitized.append(line)
+    return "\n".join(sanitized).strip()
+
+
+def ai_sanitize_verified_social_block(block: str, verified_platforms: list[str]) -> str:
+    verified = {str(platform or "").strip().lower() for platform in verified_platforms}
+    labels = {"x": "x", "reddit": "reddit", "stocktwits": "stocktwits"}
+    sanitized: list[str] = []
+    for line in str(block or "").splitlines():
+        label, separator, _value = line.partition(":")
+        normalized_label = label.strip().lower().strip("* ")
+        platform = labels.get(normalized_label)
+        if separator and platform and platform not in verified:
+            sanitized.append(f"{label}: Неясно — нет привязанного URL этой площадки")
+        else:
+            sanitized.append(line)
+    return "\n".join(sanitized).strip()
 
 
 def ai_verified_provider_text(
@@ -6340,7 +6646,22 @@ def ai_verified_provider_text(
         status = verification.get(ticker, {}) if isinstance(verification, dict) else {}
         block = blocks.get(ticker, "")
         if status.get(verified_key) and block:
-            safe_blocks.append(block)
+            if kind == "official":
+                safe_blocks.append(
+                    ai_sanitize_verified_official_block(
+                        block,
+                        status.get("official_urls") if isinstance(status.get("official_urls"), list) else [],
+                    )
+                )
+            else:
+                safe_blocks.append(
+                    ai_sanitize_verified_social_block(
+                        block,
+                        status.get("social_verified_platforms")
+                        if isinstance(status.get("social_verified_platforms"), list)
+                        else [],
+                    )
+                )
             continue
         if kind == "social":
             safe_blocks.append(
@@ -6438,17 +6759,23 @@ def ai_grok_tools(web_search: bool) -> list[dict[str, Any]]:
 
 
 def ai_grok_social_tools(
-    lookback_days: int = AI_GROK_SOCIAL_LOOKBACK_DAYS,
-    reference_date: Any = None,
+    lookback_hours: int = AI_GROK_SOCIAL_LOOKBACK_HOURS,
+    reference_time: Any = None,
 ) -> list[dict[str, Any]]:
-    end_date = reference_date or now_et().date()
-    days = max(1, min(30, int(lookback_days)))
-    start_date = end_date - timedelta(days=days - 1)
+    end_time = reference_time or now_et()
+    if not isinstance(end_time, datetime):
+        end_time = datetime.combine(end_time, datetime.min.time()).replace(tzinfo=MARKET_TZ)
+    elif end_time.tzinfo is None:
+        end_time = end_time.replace(tzinfo=MARKET_TZ)
+    else:
+        end_time = end_time.astimezone(MARKET_TZ)
+    hours = max(1, min(24, int(lookback_hours)))
+    start_time = end_time - timedelta(hours=hours)
     return [
         {
             "type": "x_search",
-            "from_date": start_date.isoformat(),
-            "to_date": end_date.isoformat(),
+            "from_date": start_time.date().isoformat(),
+            "to_date": end_time.date().isoformat(),
         },
         {
             "type": "web_search",
@@ -6472,27 +6799,45 @@ def ai_make_grok_client() -> Any:
 def ai_probe_deepseek_inference(model: str) -> None:
     response = ai_make_deepseek_client().chat.completions.create(
         model=model,
-        max_tokens=512,
-        reasoning_effort="high",
+        max_tokens=2048,
+        reasoning_effort=AI_DEEPSEEK_REASONING_EFFORT,
         messages=[{"role": "user", "content": "Ответь строго одним словом: READY"}],
         extra_body={"thinking": {"type": "enabled"}},
     )
     ai_require_completed_response(response, "DeepSeek Thinking")
     if not ai_deepseek_text(response):
         raise RuntimeError("DeepSeek Thinking probe вернул пустой ответ")
+    if not ai_deepseek_reasoning_observed(response):
+        raise RuntimeError("DeepSeek ответил, но API не подтвердил Thinking-токены")
 
 
 def ai_probe_grok_inference(model: str) -> None:
+    end_date = now_et().date()
+    start_date = end_date - timedelta(days=2)
     response = ai_make_grok_client().responses.create(
         model=model,
-        max_output_tokens=64,
+        max_output_tokens=160,
         reasoning={"effort": "low"},
         store=False,
-        input="Reply with exactly one word: READY",
+        tools=[
+            {"type": "web_search"},
+            {
+                "type": "x_search",
+                "from_date": start_date.isoformat(),
+                "to_date": end_date.isoformat(),
+            },
+        ],
+        input=(
+            "Use Web Search and X Search at least once each only to verify tool access. "
+            "Then reply with exactly one word: READY"
+        ),
     )
     ai_require_completed_response(response, "Grok")
     if not ai_grok_text(response):
         raise RuntimeError("Grok probe вернул пустой ответ")
+    tool_counts = ai_server_tool_counts(response)
+    if tool_counts.get("web_search", 0) < 1 or tool_counts.get("x_search", 0) < 1:
+        raise RuntimeError("Grok inference работает, но Web/X Search не подтверждены ответом API")
 
 
 def ai_call_grok_with_tickers(
@@ -6552,6 +6897,14 @@ def ai_call_grok_social_with_tickers(
 ) -> dict[str, Any]:
     client = ai_make_grok_client()
     identity_context = ai_social_identity_context(context_lines)
+    window_end = now_et()
+    window_start = window_end - timedelta(hours=AI_GROK_SOCIAL_LOOKBACK_HOURS)
+    window_instruction = (
+        "\n\nОБЯЗАТЕЛЬНОЕ ОКНО СОЦИАЛЬНОГО АНАЛИЗА ET: "
+        f"{window_start.strftime('%Y-%m-%d %H:%M ET')} — "
+        f"{window_end.strftime('%Y-%m-%d %H:%M ET')}. "
+        "Не учитывай ни одного сообщения до начала окна."
+    )
     request: dict[str, Any] = {
         "model": model,
         "max_output_tokens": ai_output_token_budget("social", len(resolved_items)),
@@ -6569,12 +6922,12 @@ def ai_call_grok_social_with_tickers(
                             raw_tickers,
                             resolved_items,
                             identity_context,
-                        ),
+                        ) + window_instruction,
                     }
                 ],
             }
         ],
-        "tools": ai_grok_social_tools(),
+        "tools": ai_grok_social_tools(reference_time=window_end),
     }
     response = client.responses.create(**request)
     ai_require_completed_response(response, "Grok")
@@ -6908,7 +7261,7 @@ def _ai_run_analysis_chunk(
                 ai_mode,
                 context_lines,
             )
-            if grok_ready and grok_model_source != "unavailable"
+            if web_search and grok_ready and grok_model_source != "unavailable"
             else None
         )
         social_future = (
@@ -6932,7 +7285,7 @@ def _ai_run_analysis_chunk(
         grok_news_model = grok_model
         grok_news_model_source = grok_model_source
         grok_warnings: list[str] = []
-        research_provider = "unavailable"
+        research_provider = "disabled" if not web_search else "unavailable"
         if grok_research_future is not None:
             try:
                 grok_result, grok_news_model, grok_news_model_source, grok_warnings = grok_research_future.result()
@@ -6948,7 +7301,14 @@ def _ai_run_analysis_chunk(
                 }
                 grok_news_model_source = "unavailable"
                 grok_warnings = [f"Grok research недоступен: {ai_provider_error_summary(exc)}"]
-        if not grok_ready:
+        if not web_search:
+            grok_result = {
+                "text": "Официальный Web Search отключён пользователем.",
+                "sources": [],
+                "web_search": False,
+            }
+            grok_news_model_source = "disabled"
+        elif not grok_ready:
             grok_warnings.append(
                 "Grok не подключён: официальные новости и социальный поиск недоступны."
             )
@@ -7007,6 +7367,7 @@ def _ai_run_analysis_chunk(
         bool(social_result.get("x_search")),
         bool(social_result.get("web_search")),
         ai_mode,
+        context_lines,
     )
     usage_records = []
     for provider_result in (grok_result, social_result):
@@ -7042,12 +7403,18 @@ def _ai_run_analysis_chunk(
         deepseek_model_source,
         verification,
     )
+    deepseek_participated = bool(
+        deepseek_model
+        and synthesis_model == deepseek_model
+        and not str(synthesis_model_source or "").lower().startswith("grok fallback")
+    )
     final_answer, guardrail_warnings = ai_enforce_final_guardrails(
         final_answer,
         tickers,
         ai_mode,
         verification,
         ai_technical_scores_from_context(context_lines),
+        reasoning_verified=deepseek_participated,
     )
     provider_warnings.extend(guardrail_warnings)
     if isinstance(synthesis_usage, dict) and synthesis_usage.get("provider"):
@@ -7082,6 +7449,7 @@ def _ai_run_analysis_chunk(
         "social_model_source": social_model_source,
         "synthesis_model": synthesis_model,
         "synthesis_model_source": synthesis_model_source,
+        "deepseek_participated": deepseek_participated,
     }
 
 
@@ -7155,6 +7523,7 @@ def ai_failed_chunk_result(
         "grok_model_source": "unavailable",
         "social_model_source": "unavailable",
         "synthesis_model_source": "unavailable",
+        "deepseek_participated": False,
     }
 
 
@@ -7267,6 +7636,9 @@ def ai_run_analysis_from_tickers(
         "usage": usage_records,
         "search_audit": ai_search_audit(usage_records, sources),
         "chunk_count": len(chunk_results),
+        "deepseek_participated": all(
+            bool(result.get("deepseek_participated")) for result in chunk_results
+        ),
     }
     for field in (
         "deepseek_model",
@@ -7450,6 +7822,7 @@ def ai_enforce_final_guardrails(
     ai_mode: str,
     verification: dict[str, dict[str, Any]],
     technical_scores: dict[str, int] | None = None,
+    reasoning_verified: bool = True,
 ) -> tuple[str, list[str]]:
     rows = ai_filter_rows_to_requested_tickers(ai_parse_final_rows(final_text), tickers)
     warnings: list[str] = []
@@ -7524,6 +7897,23 @@ def ai_enforce_final_guardrails(
         else:
             next_row["Проверка"] = "Официальный источник подтверждён"
             next_row["Источники"] = " | ".join(str(url) for url in official_urls[:3])
+
+        if not reasoning_verified:
+            next_row["Сторона"] = "Нет"
+            next_row["Вход"] = "Нет"
+            next_row["Overnight"] = "Нет"
+            next_row["Риски"] = ai_append_risk(
+                next_row.get("Риски", ""),
+                "DeepSeek Thinking не участвовал",
+            )
+            next_row["Вердикт"] = "Предварительно: финальное reasoning DeepSeek не выполнено."
+            next_row["Проверка"] = ai_append_risk(
+                next_row.get("Проверка", ""),
+                "DeepSeek не подтвердил итог",
+            )
+            warnings.append(
+                f"{ticker}: вход и overnight запрещены — DeepSeek Thinking не участвовал."
+            )
 
         if next_row["Сторона"] == "Нет" or next_row["Вход"] == "Нет":
             next_row["Сторона"] = "Нет"
@@ -7866,6 +8256,7 @@ def render_ai_usage(result: dict[str, Any]) -> None:
         if not isinstance(item, dict):
             continue
         exact_cost = safe_float(item.get("cost_usd"))
+        estimated_cost = safe_float(item.get("estimated_cost_usd"))
         rows.append(
             {
                 "AI": str(item.get("provider") or ""),
@@ -7879,15 +8270,24 @@ def render_ai_usage(result: dict[str, Any]) -> None:
                 "Web": format_int_cell(safe_float(item.get("web_searches"))),
                 "X": format_int_cell(safe_float(item.get("x_searches"))),
                 "Точная цена": f"${exact_cost:.4f}" if exact_cost > 0 else "не возвращена API",
+                "Оценка цены": f"~${estimated_cost:.4f}" if estimated_cost > 0 else "—",
             }
         )
     if rows:
         with st.expander("Расход AI по каждому этапу", expanded=False):
             st.dataframe(rows, width="stretch", hide_index=True)
-            st.caption("Точная цена доступна, когда провайдер возвращает её прямо в ответе API.")
+            st.caption(
+                "Точная цена показывается из ответа API. Оценка DeepSeek рассчитывается "
+                "по cache-hit, cache-miss и output-токенам текущего тарифа модели."
+            )
 
 
 def render_ai_analysis_result(result: dict[str, Any]) -> None:
+    if result.get("deepseek_participated") is False:
+        st.error(
+            "DeepSeek Thinking не участвовал в финальном reasoning. Показанный итог является "
+            "резервным разбором Grok; вход и overnight программно запрещены."
+        )
     final_text = str(result.get("final") or "")
     ai_mode = str(result.get("ai_mode") or "general")
     rows = ai_filter_rows_to_requested_tickers(
@@ -7947,7 +8347,7 @@ def render_ai_analysis_result(result: dict[str, Any]) -> None:
 Фактически Grok Web: {grok_news_web + grok_social_web}
 Фактически Grok X: {grok_x}
 URL из поисковых ответов: {source_count}
-Период социального поиска: {AI_GROK_SOCIAL_LOOKBACK_DAYS} дней
+Период социального поиска: последние {AI_GROK_SOCIAL_LOOKBACK_HOURS} часа(ов)
 Усилие рассуждения Grok: {AI_GROK_REASONING_EFFORT}
 
 ## Официальный research Grok
@@ -8146,8 +8546,8 @@ def render_ai_analysis_panel(
         key=f"ai_connection_check_{cfg.scanner_mode}",
         width="stretch",
         help=(
-            "Проверяет ключи, модель и выполняет по одному короткому ответу READY. "
-            "Расход минимальный, зато проверка подтверждает реальный inference."
+            "Проверяет ключи и модели. DeepSeek подтверждает Thinking-токены, а Grok "
+            "выполняет короткие Web и X Search. Проверка платная, но расход минимальный."
         ),
     ):
         with st.spinner("Проверяю доступ к DeepSeek и Grok..."):
@@ -9127,14 +9527,6 @@ with st.sidebar:
 
     st.markdown('<div class="desk-section-title">Рынок</div>', unsafe_allow_html=True)
     exchange = st.selectbox("Биржа", ["ALL", "NASDAQ", "NYSE", "AMEX"], index=0)
-    max_scan_price = st.number_input(
-        "Макс. цена для списка рынка",
-        min_value=0.1,
-        max_value=500.0,
-        value=500.0 if short_put_active else (50.0 if momentum_active else 20.0),
-        step=1.0,
-        help="Фильтр цены применяется ещё на этапе списка рынка.",
-    )
     max_tickers = st.slider(
         "Акций за прогон",
         50,
@@ -9566,17 +9958,20 @@ with st.sidebar:
             )
 
     st.markdown('<div class="desk-section-title">Цена</div>', unsafe_allow_html=True)
-    price_col_1, price_col_2 = st.columns(2)
-    with price_col_1:
-        min_price = st.number_input(
-            "Мин. цена",
-            0.01,
-            500.0,
-            20.00 if short_put_active else (0.10 if base_impulse_only or rvol_active else (1.50 if momentum_active else 0.50)),
-            0.01 if base_impulse_only or rvol_active else 0.10,
-        )
-    with price_col_2:
-        max_price = st.number_input("Макс. цена", 0.01, 500.0, 500.0 if short_put_active else (50.0 if momentum_active else 20.0), 1.0)
+    default_min_price = 0.10 if base_impulse_only else defaults.min_price
+    default_max_price = 500.0 if short_put_active else (50.0 if momentum_active else defaults.max_price)
+    min_price, max_price = st.slider(
+        "Диапазон цены акции, $",
+        min_value=0.01,
+        max_value=500.0,
+        value=(float(default_min_price), float(default_max_price)),
+        step=0.01,
+        format="$%.2f",
+        help=(
+            "Левый бегунок задаёт минимальную цену, правый — максимальную. "
+            "Один диапазон применяется ко всем паттернам, списку рынка и проверке свечей."
+        ),
+    )
 
     st.markdown('<div class="desk-section-title">Автоматизация</div>', unsafe_allow_html=True)
     send_alerts = st.toggle("Telegram-уведомления", value=False)
@@ -9704,7 +10099,7 @@ cfg = ScanConfig(
 )
 
 active_result_signature = (
-    f"{cfg!r}|exchange={exchange}|market_max={max_scan_price:g}|"
+    f"{cfg!r}|exchange={exchange}|market_range={min_price:g}:{max_price:g}|"
     f"source={data_source}|realtime={int(alpaca_realtime)}"
 )
 previous_result_signature = str(st.session_state.get("results_config_signature") or "")
@@ -9997,7 +10392,7 @@ if (start_scan and not auto_running) or (auto_scan and should_auto_run and not a
     is_auto_batch = bool(auto_scan and should_auto_run and not start_scan and not auto_running)
     st.session_state.ai_analysis_result = {}
     st.session_state.ai_analysis_error = ""
-    all_tickers_full = get_market_tickers(exchange, max_scan_price)
+    all_tickers_full = get_market_tickers(exchange, min_price, max_price)
     batch_size = max(1, int(max_tickers))
 
     if is_auto_batch:
