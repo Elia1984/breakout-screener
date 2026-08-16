@@ -62,6 +62,54 @@ def apply_custom_theme() -> None:
                 --desk-shadow-soft: 0 3px 12px rgba(16, 24, 40, 0.05);
             }
 
+            /* ПРИНУДИТЕЛЬНО СВЕТЛАЯ ТЕМА.
+               Тема приложения задана в .streamlit/config.toml, но в GitHub переносится
+               только pr.py — в облаке config.toml нет, и Streamlit берёт СИСТЕМНУЮ тему
+               телефона. При тёмной теме собственные виджеты Streamlit (выпадающие
+               списки, кнопки, подписи, поля ввода) рисуются тёмными, а CSS ниже задаёт
+               тёмный текст — получается тёмное на тёмном, те самые чёрные плашки, в
+               которых не видно надписей. Поэтому цвета фиксируем прямо здесь, чтобы
+               одного файла pr.py хватало и вид не зависел от настроек телефона. */
+            .stApp,
+            [data-testid="stAppViewContainer"],
+            [data-testid="stHeader"],
+            [data-testid="stSidebar"],
+            [data-testid="stBottomBlockContainer"] {
+                background: #eef2f6 !important;
+                color: #111827 !important;
+                color-scheme: light !important;
+            }
+            [data-testid="stAppViewContainer"] *,
+            [data-testid="stSidebar"] * {
+                color: #111827;
+            }
+            /* Поля, списки и кнопки: белый фон и тёмный текст в любой системной теме */
+            [data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+            [data-testid="stMultiSelect"] div[data-baseweb="select"] > div,
+            [data-baseweb="popover"], [data-baseweb="menu"], [role="listbox"],
+            .stTextInput input, .stNumberInput input, .stTextArea textarea,
+            [data-testid="stDataFrame"], [data-testid="stTable"] {
+                background: #ffffff !important;
+                color: #111827 !important;
+            }
+            [role="option"] { background: #ffffff !important; color: #111827 !important; }
+            [role="option"]:hover { background: #eef2f6 !important; }
+            /* Кнопки: синяя основная и светлая обычная, текст всегда контрастный */
+            .stButton > button, .stDownloadButton > button, .stFormSubmitButton > button {
+                background: #ffffff !important;
+                color: #111827 !important;
+                border: 1px solid #d0d5dd !important;
+            }
+            .stButton > button[kind="primary"],
+            .stFormSubmitButton > button[kind="primary"] {
+                background: #175cd3 !important;
+                color: #ffffff !important;
+                border-color: #175cd3 !important;
+            }
+            label, .stMarkdown, .stCaption, [data-testid="stWidgetLabel"] * {
+                color: #111827 !important;
+            }
+
             .stApp {
                 background: #eef2f6;
                 color: var(--desk-ink);
@@ -1241,7 +1289,13 @@ AI_DEEPSEEK_KEY, AI_GROK_KEY = read_ai_provider_keys()
 # АНАЛИТИК — сильная модель. Раньше по умолчанию стоял v4-flash, хотя комментарий ниже
 # сам говорит, что DeepSeek делает «дорогое размышление»: слабая ступень выносила
 # торговый вердикт. Для решения «входить или нет» экономить на этом нельзя.
-AI_DEEPSEEK_MODEL = secret_or_default("DEEPSEEK_MODEL", "deepseek-v4-pro").strip()
+# ВАЖНО: раньше здесь читалась настройка DEEPSEEK_MODEL из Secrets, и старое значение
+# "deepseek-v4-flash", прописанное в облаке, ТИХО ПЕРЕБИВАЛО правку в коде — в панели
+# приложения значилось «V4 Flash», хотя файл требовал pro. Правка кода не помогала,
+# потому что Secrets всегда в приоритете. Чтобы решение о сделке не выносила слабая
+# ступень из-за забытой строки в облаке, модель аналитика зафиксирована здесь.
+# Понадобится вернуть выбор — впиши DEEPSEEK_MODEL_OVERRIDE в Secrets осознанно.
+AI_DEEPSEEK_MODEL = secret_or_default("DEEPSEEK_MODEL_OVERRIDE", "deepseek-v4-pro").strip()
 if AI_DEEPSEEK_MODEL not in {"deepseek-v4-flash", "deepseek-v4-pro"}:
     AI_DEEPSEEK_MODEL = "deepseek-v4-pro"
 AI_DEEPSEEK_MODEL_SETTING = AI_DEEPSEEK_MODEL
