@@ -5667,6 +5667,18 @@ def ai_analysis_mode_for_config(cfg: ScanConfig) -> str:
     return "short_put" if cfg.scanner_mode == SCANNER_SHORT_PUT else "general"
 
 
+@st.cache_resource(show_spinner=False)
+def ai_result_store() -> dict:
+    """Общее хранилище готовых AI-разборов, ОДНО на всё приложение.
+
+    st.session_state живёт только внутри сессии браузера: погас экран телефона,
+    моргнула связь, свернули вкладку — сессия умирает, и готовый разбор пропадает,
+    хотя запросы к моделям уже оплачены. Пользователь видит «покрутило и ничего»,
+    причём без ошибки, потому что ошибки и не было. st.cache_resource переживает
+    смену сессии, поэтому результат возвращается сам при следующем заходе."""
+    return {}
+
+
 def ai_result_signature(
     tickers: list[str],
     cfg: ScanConfig,
@@ -8813,6 +8825,7 @@ def render_ai_analysis_panel(
         disabled=bool(missing),
     )
     signature = ai_result_signature(selected_tickers, cfg, web_search, social_search, context_lines)
+    _ai_store = ai_result_store()
     if analyze_clicked:
         st.session_state.ai_analysis_result = {}
         st.session_state.ai_analysis_error = ""
@@ -8827,11 +8840,35 @@ def render_ai_analysis_panel(
                 )
             result["signature"] = signature
             st.session_state.ai_analysis_result = result
+            # Дубль в общее хранилище: st.session_state живёт ТОЛЬКО в сессии браузера.
+            # Разбор идёт 3-5 минут, и на телефоне за это время гаснет экран или рвётся
+            # связь — сессия умирает, готовый результат пропадает вместе с ней, хотя
+            # деньги за запросы уже списаны. Выглядит это как «покрутило и ничего».
+            # Здесь результат переживает обрыв и возвращается сам при следующем заходе.
+            try:
+                _ai_store[signature] = result
+                if len(_ai_store) > 12:            # не растим память бесконечно
+                    for old in list(_ai_store)[:-12]:
+                        _ai_store.pop(old, None)
+            except Exception:
+                pass
             st.session_state.ai_analysis_error = ""
             st.success("AI-разбор готов.")
         except Exception as exc:
             st.session_state.ai_analysis_error = ai_provider_error_summary(exc)
             st.error(ai_user_error_message(exc))
+
+    # Восстановление после обрыва: сессия пуста, но готовый разбор с тем же заданием
+    # уже лежит в общем хранилище — показываем его, а не пустой экран.
+    _current = st.session_state.get("ai_analysis_result")
+    if not (isinstance(_current, dict) and _current.get("final")):
+        _saved = _ai_store.get(signature) if isinstance(_ai_store, dict) else None
+        if isinstance(_saved, dict) and _saved.get("final"):
+            st.session_state.ai_analysis_result = _saved
+            st.info(
+                "Показан готовый AI-разбор по этому же списку: связь во время разбора "
+                "прерывалась, результат восстановлен из памяти приложения."
+            )
 
     error_text = str(st.session_state.get("ai_analysis_error") or "")
     if error_text:
