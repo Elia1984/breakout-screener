@@ -4,6 +4,5 @@ requests>=2.31
 yfinance>=0.2.65
 streamlit-autorefresh>=1.0.1
 tomli>=2.0; python_version < "3.11"
-anthropic>=0.64
 openai>=1.90
 httpx>=0.28
