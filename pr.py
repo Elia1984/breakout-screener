@@ -474,14 +474,66 @@ def apply_custom_theme() -> None:
             .ai-badge.ai-short-strong { color: var(--desk-red); border-color: #fecdca; background: #fff1f0; }
             .ai-badge.ai-short-watch { color: #b42318; border-color: #fecdca; background: #fff8f7; }
 
+            /* ПОЛЗУНКИ ПОД ПАЛЕЦ (телефон, в т.ч. Galaxy Z Fold).
+               Стандартные бегунки Streamlit рассчитаны на мышь: точка ~14px, попасть
+               пальцем и тащить вдвоём — мучение. Здесь бегунок увеличен до 30px,
+               дорожка утолщена, добавлен воздух снизу под подписи значений. */
+            [data-testid="stSlider"] { padding-bottom: 0.9rem; }
+            [data-testid="stSlider"] [role="slider"] {
+                width: 30px !important;
+                height: 30px !important;
+                background: #175cd3 !important;
+                border: 3px solid #ffffff !important;
+                box-shadow: 0 2px 8px rgba(16, 24, 40, 0.35) !important;
+                touch-action: none;
+            }
+            [data-testid="stSlider"] [data-baseweb="slider"] > div > div {
+                height: 8px !important;
+                border-radius: 999px !important;
+            }
+            /* Подписи значений над бегунками — крупнее, чтобы читались на ходу */
+            [data-testid="stSlider"] [data-testid="stTickBarMin"],
+            [data-testid="stSlider"] [data-testid="stTickBarMax"] {
+                font-size: 0.78rem !important;
+                color: #475467 !important;
+            }
+
             .ai-ticker-grid {
                 display: grid;
-                grid-template-columns: repeat(5, minmax(0, 1fr));
+                /* Было жёстко repeat(5, ...) на любой ширине: на телефоне выходило по
+                   ~60px на колонку, и слова рвались по вертикали — «Осторожн о»,
+                   «Официаль ный источник подтверж дён». auto-fit переносит колонки:
+                   на компьютере по-прежнему пять в ряд, на телефоне две-три. */
+                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
                 gap: 0.55rem;
                 margin: 0.5rem 0;
             }
 
+            /* Связный разбор — главное поле карточки, ему нужна вся ширина и воздух */
+            .ai-explain {
+                background: #f8fafc;
+                border-left: 3px solid #175cd3;
+                border-radius: 8px;
+                padding: 0.6rem 0.75rem;
+                margin-top: 0.55rem;
+                font-size: 0.95rem;
+                line-height: 1.5;
+                color: #111827;
+            }
+            .ai-explain-title {
+                display: block;
+                font-size: 0.7rem;
+                font-weight: 700;
+                letter-spacing: 0.06em;
+                text-transform: uppercase;
+                color: #475467;
+                margin-bottom: 0.25rem;
+            }
+
             .ai-ticker-grid > div {
+                overflow-wrap: break-word;
+                word-break: normal;
+                hyphens: none;
                 background: #ffffff;
                 border: 1px solid rgba(208, 213, 221, 0.82);
                 border-radius: 8px;
@@ -1529,7 +1581,10 @@ Short не предлагай в обычном режиме. Если фон м
 Если суммы, сроки или обязательность не подтверждены, снижай важность и уверенность.
 Не копируй вывод Grok: сопоставь найденные им факты с техническими данными скринера,
 оцени противоречия и вынеси собственный итог DeepSeek Thinking.
-Сделай полный внутренний анализ, но наружу выведи только короткое решение.
+Сделай полный внутренний анализ. Короткие поля держи короткими, но поле
+«Разбор» — это ГЛАВНОЕ, ради чего запускается разбор: там трейдер должен
+увидеть твою логику с цифрами и сам её проверить. Пустой или общий «Разбор»
+обесценивает всю работу — пиши по существу, без воды и без повторов.
 Если данные противоречат друг другу, выбирай более осторожный вариант и явно отметь риск.
 Статусы проверки ниже являются жёсткими ограничениями, а не мнением:
 - если official_verified=нет И для тикера НЕТ ни одной ссылки — ставь Сторона: Нет,
@@ -1558,7 +1613,11 @@ Short не предлагай в обычном режиме. Если фон м
 - overnight: Да / Осторожно / Нет;
 - риск: 3-8 слов;
 - вердикт: 5-12 слов;
-- никаких абзацев, рассуждений и длинных новостей.
+- КОРОТКО — это про поля выше. Поля «Масштаб события для компании», «Довод против»,
+  «Идея отменяется при» и особенно «Разбор» заполняй ОБЯЗАТЕЛЬНО и по существу:
+  именно ради них запускается анализ. «Разбор» — 3-5 предложений с цифрами и датами.
+  Слово «Неясно» в этих полях допустимо ТОЛЬКО когда данных действительно нет,
+  и тогда объясни в «Разборе», чего именно не хватило.
 
 Строгий формат для каждого тикера:
 
@@ -1570,8 +1629,12 @@ Short не предлагай в обычном режиме. Если фон м
 Сторона: <Long / Нет>
 Вход сейчас: <Вход / Осторожно / Нет>
 Overnight: <Да / Осторожно / Нет>
+Масштаб события для компании: <с ЦИФРАМИ: сумма события против капитализации или годовой выручки, например «сделка 71 млрд при выручке 3.04 млрд — меняет компанию» или «размер не назван»>
 Главные риски: <3-8 слов>
+Довод против: <до 10 слов — самый сильный аргумент ПРОТИВ твоего же вердикта; он обязателен всегда>
+Идея отменяется при: <до 10 слов — конкретный уровень цены из данных скринера или событие>
 Короткий вердикт: <5-12 слов, почему входить или пропустить>
+Разбор: <3-5 предложений связного текста ДЛЯ ЧЕЛОВЕКА, обязательно с цифрами и датами: (1) какая новость и когда вышла, (2) насколько она велика ДЛЯ ЭТОЙ компании — сопоставь суммы, (3) что говорят цифры скринера — объём, положение цены, техника, (4) главный риск с конкретикой, (5) почему в итоге такой вердикт. Не повторяй короткие поля дословно, поясняй их.>
 Источники: <1-3 URL / нет подтверждённого источника>
 
 ---
@@ -1707,8 +1770,12 @@ Grok дал короткий актуальный research по плохим н�
 Сторона: <Short / Нет>
 Вход сейчас: <Вход / Осторожно / Нет>
 Overnight: <Да / Осторожно / Нет>
+Масштаб события для компании: <с ЦИФРАМИ: сумма события против капитализации или годовой выручки, например «сделка 71 млрд при выручке 3.04 млрд — меняет компанию» или «размер не назван»>
 Главные риски: <3-8 слов>
-Короткий вердикт: <5-12 слов>
+Довод против: <до 10 слов — самый сильный аргумент ПРОТИВ твоего же вердикта; он обязателен всегда>
+Идея отменяется при: <до 10 слов — конкретный уровень цены из данных скринера или событие>
+Короткий вердикт: <5-12 слов, почему входить или пропустить>
+Разбор: <3-5 предложений связного текста ДЛЯ ЧЕЛОВЕКА, обязательно с цифрами и датами: (1) какая новость и когда вышла, (2) насколько она велика ДЛЯ ЭТОЙ компании — сопоставь суммы, (3) что говорят цифры скринера — объём, положение цены, техника, (4) главный риск с конкретикой, (5) почему в итоге такой вердикт. Не повторяй короткие поля дословно, поясняй их.>
 Источники: <1-3 URL / нет подтверждённого источника>
 
 ---
@@ -1740,8 +1807,8 @@ class ScanConfig:
     base_impulse_only: bool = False
 
     max_stale_days: int = 5
-    min_price: float = 0.5
-    max_price: float = 20.0
+    min_price: float = 0.0
+    max_price: float = 30.0
 
     rvol_avg_days: int = 30
     rvol_mult: float = 2.0
@@ -7929,7 +7996,17 @@ def ai_parse_final_rows(final_text: str) -> list[dict[str, str]]:
                     ai_field_value(block, "Overnight")
                     or ai_field_value(block, "Овернайт")
                 ),
+                # Новые поля разбора. Модель их пишет (проверено на сыром ответе),
+                # но раньше парсер о них не знал и терял — на карточку приходило
+                # «Неясно», хотя в ответе лежал развёрнутый разбор с цифрами.
+                "Масштаб": ai_field_value(block, "Масштаб события для компании"),
                 "Риски": ai_field_value(block, "Главные риски"),
+                "Контр": ai_field_value(block, "Довод против"),
+                "Отмена": ai_field_value(block, "Идея отменяется при"),
+                "Разбор": (
+                    ai_field_value(block, "Разбор")
+                    or ai_field_value(block, "Пояснение")
+                ),
                 "Вердикт": ai_field_value(block, "Короткий вердикт"),
                 "Источники": ai_field_value(block, "Источники"),
                 "Проверка": ai_field_value(block, "Проверка источника"),
@@ -8042,8 +8119,12 @@ def ai_rows_to_final_text(rows: list[dict[str, str]]) -> str:
         ("Сторона", "Сторона"),
         ("Вход", "Вход сейчас"),
         ("Overnight", "Overnight"),
+        ("Масштаб", "Масштаб события для компании"),
         ("Риски", "Главные риски"),
+        ("Контр", "Довод против"),
+        ("Отмена", "Идея отменяется при"),
         ("Вердикт", "Короткий вердикт"),
+        ("Разбор", "Разбор"),
         ("Проверка", "Проверка источника"),
         ("Источники", "Источники"),
     )
@@ -8139,7 +8220,7 @@ def ai_enforce_final_guardrails(
                 # меняется только пометка о качестве источника. Раньше хвост ниже затирал
                 # их безусловно — из-за этого даже понижённое решение выглядело как
                 # «Пропустить: катализатор не подтверждён», и смысл разбора пропадал.
-                next_row["Проверка"] = "Источник не первичный — проверьте вручную"
+                next_row["Проверка"] = "Не первичный"
                 next_row["Источники"] = (
                     " | ".join(str(url) for url in (official_urls or seen_urls)[:3])
                     or "ссылка не приведена — проверьте новость сами"
@@ -8161,7 +8242,7 @@ def ai_enforce_final_guardrails(
                 next_row["Важность"] = "Неясно 0"
                 next_row["Сила"] = "☆☆☆☆☆"
                 next_row["Вердикт"] = "Пропустить: официальный катализатор не подтверждён."
-                next_row["Проверка"] = "Не подтверждено"
+                next_row["Проверка"] = "Не подтверждён"
                 next_row["Источники"] = "нет подтверждённого источника"
                 warnings.append(
                     f"{ticker}: торговое решение ограничено — официальный источник не подтверждён."
@@ -8173,11 +8254,11 @@ def ai_enforce_final_guardrails(
             stop_text = "Short/Put блокер" if ai_mode == "short_put" else "фундаментальный стоп"
             next_row["Риски"] = ai_append_risk(next_row.get("Риски", ""), stop_text)
             next_row["Вердикт"] = f"Пропустить: действует {stop_text.lower()}."
-            next_row["Проверка"] = "Источник подтверждён, действует стоп"
+            next_row["Проверка"] = "Подтверждён · стоп"
             next_row["Источники"] = " | ".join(str(url) for url in official_urls[:3])
             warnings.append(f"{ticker}: торговое решение ограничено — {stop_text}.")
         else:
-            next_row["Проверка"] = "Официальный источник подтверждён"
+            next_row["Проверка"] = "Подтверждён"
             next_row["Источники"] = " | ".join(str(url) for url in official_urls[:3])
 
         if not reasoning_verified:
@@ -8373,8 +8454,11 @@ def render_ai_ticker_cards(rows: list[dict[str, str]], ai_mode: str = "general")
                     <div><span>Катализатор</span><strong>{html.escape(row["Сила"] or "неясно")}</strong></div>
                     <div><span>Проверка</span><strong>{html.escape(row.get("Проверка") or "неясно")}</strong></div>
                 </div>
+                {ai_scale_html(row)}
                 <div class="ai-verdict"><strong>Риск:</strong> {html.escape(row["Риски"] or "нет данных")}</div>
-                <div class="ai-verdict">{html.escape(row["Вердикт"] or "Нет короткого вердикта.")}</div>
+                {ai_contra_html(row)}
+                <div class="ai-verdict"><strong>Вывод:</strong> {html.escape(row["Вердикт"] or "Нет короткого вердикта.")}</div>
+                {ai_explain_html(row)}
             </div>
             """,
             unsafe_allow_html=True,
@@ -8641,6 +8725,39 @@ URL из поисковых ответов: {source_count}
         mime="text/markdown",
         width="stretch",
     )
+
+
+def ai_scale_html(row: dict[str, Any]) -> str:
+    """Масштаб события ДЛЯ ЭТОЙ компании. Grok приносит суммы сделок и выручку, но
+    раньше они умирали в сыром блоке: на карточку попадала строка вроде «апсайд
+    ограничен», без единой цифры. Здесь цифры доходят до глаз."""
+    value = str(row.get("Масштаб") or "").strip()
+    if not value or value.lower().startswith(("нет", "неясно", "—")):
+        return ""
+    return f'<div class="ai-verdict"><strong>Масштаб:</strong> {html.escape(value)}</div>'
+
+
+def ai_contra_html(row: dict[str, Any]) -> str:
+    """Довод против вердикта и уровень его отмены — то, что превращает мнение в сделку
+    с понятным выходом. Без них трейдер видит «Осторожно» и не знает, где он неправ."""
+    parts = []
+    contra = str(row.get("Контр") or "").strip()
+    cancel = str(row.get("Отмена") or "").strip()
+    if contra and not contra.lower().startswith(("нет", "неясно", "—")):
+        parts.append(f'<div class="ai-verdict"><strong>Довод против:</strong> {html.escape(contra)}</div>')
+    if cancel and not cancel.lower().startswith(("нет", "неясно", "—")):
+        parts.append(f'<div class="ai-verdict"><strong>Отмена идеи:</strong> {html.escape(cancel)}</div>')
+    return "".join(parts)
+
+
+def ai_explain_html(row: dict[str, Any]) -> str:
+    """Связный разбор — главное поле. Модель думает на максимальном усилии, и раньше
+    весь этот труд сжимался в десять слов вердикта. Здесь он виден целиком."""
+    value = str(row.get("Разбор") or "").strip()
+    if not value:
+        return ""
+    return (f'<div class="ai-explain"><span class="ai-explain-title">Разбор</span>'
+            f'{html.escape(value)}</div>')
 
 
 def render_ai_inline_result(result: dict[str, Any]) -> None:
@@ -10229,18 +10346,25 @@ with st.sidebar:
             )
 
     st.markdown('<div class="desk-section-title">Цена</div>', unsafe_allow_html=True)
-    default_min_price = 0.10 if base_impulse_only else defaults.min_price
-    default_max_price = 500.0 if short_put_active else (50.0 if momentum_active else defaults.max_price)
+    default_min_price = 0.0 if base_impulse_only else defaults.min_price
+    default_max_price = 200.0 if short_put_active else (50.0 if momentum_active else defaults.max_price)
     min_price, max_price = st.slider(
         "Диапазон цены акции, $",
-        min_value=0.01,
-        max_value=500.0,
+        min_value=0.0,
+        # Потолок 200$ вместо 500$: выше цены в скане не нужны, а короткая шкала
+        # заметно повышает точность попадания пальцем.
+        max_value=200.0,
         value=(float(default_min_price), float(default_max_price)),
-        step=0.01,
+        # Шаг 0.5$ вместо 0.01$. При копеечном шаге у ползунка было почти 50 000
+        # положений — пальцем в нужное значение попасть невозможно, бегунок
+        # «убегает». Полдоллара оставляют 400 положений: и точность достаточная,
+        # и таскать удобно с телефона.
+        step=0.5,
         format="$%.2f",
         help=(
             "Левый бегунок задаёт минимальную цену, правый — максимальную. "
-            "Один диапазон применяется ко всем паттернам, списку рынка и проверке свечей."
+            "Шаг 0.5$, потолок 200$. Один диапазон применяется ко всем паттернам, "
+            "списку рынка и проверке свечей."
         ),
     )
 
