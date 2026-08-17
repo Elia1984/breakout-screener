@@ -1797,7 +1797,7 @@ URL ИЗ ПОИСКОВЫХ ОТВЕТОВ (не каждый URL подтвер
 @dataclass(frozen=True)
 class ScanConfig:
     scanner_mode: str = SCANNER_BASE
-    min_dollar_volume: int = 250_000
+    min_dollar_volume: int = 1_000_000   # 1 млн$: торговля вечером, нужна ликвидность
 
     base_impulse_enabled: bool = True
     base_impulse_days: int = 10
@@ -1813,7 +1813,7 @@ class ScanConfig:
     rvol_avg_days: int = 30
     rvol_mult: float = 2.0
     rvol_day_range_filter_enabled: bool = False
-    rvol_max_day_range_pct: float = 100.0
+    rvol_max_day_range_pct: float = 30.0  # включается тумблером; 30% = берём начало хода
 
     vcp_days: int = 60
     vcp_max_base_width_pct: float = 30.0
@@ -9943,7 +9943,7 @@ with st.sidebar:
             "Мин. долларовый объём сегодня",
             0,
             100_000_000,
-            5_000_000 if short_put_active else 250_000,
+            5_000_000 if short_put_active else 1_000_000,
             250_000 if short_put_active else 50_000,
             help="Для RVOL, VCP, Spring и Short/Put фильтрует слишком тонкие акции.",
         )
@@ -10083,7 +10083,7 @@ with st.sidebar:
             5,
             disabled=not rvol_day_range_filter_enabled,
             help=(
-                "Например, 100% исключит акцию, если сегодняшний High или Low уже уходил дальше 100% "
+                "По умолчанию 30%: акция отсеется, если сегодняшний High или Low уже уходил дальше 30% "
                 "от вчерашнего закрытия. Учитываются хвосты, сегодняшнее закрытие на фильтр не влияет."
             ),
         )
