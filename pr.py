@@ -100,11 +100,22 @@ def apply_custom_theme() -> None:
                 color: #111827 !important;
                 border: 1px solid #d0d5dd !important;
             }
+            /* Главная кнопка — БЕЛАЯ, как и остальные (просьба юзера 22.08).
+               Была синей с тёмным текстом: правило [data-testid=...] * ниже красит
+               ВНУТРЕННИЙ элемент подписи, и белый цвет с самой кнопки до него не
+               доходил — выходило тёмное на синем, плохо читается на телефоне.
+               Выделяем не заливкой, а рамкой: читается при любой системной теме. */
             .stButton > button[kind="primary"],
             .stFormSubmitButton > button[kind="primary"] {
-                background: #175cd3 !important;
-                color: #ffffff !important;
-                border-color: #175cd3 !important;
+                background: #ffffff !important;
+                border: 2px solid #175cd3 !important;
+                font-weight: 700 !important;
+            }
+            .stButton > button[kind="primary"] *,
+            .stFormSubmitButton > button[kind="primary"] *,
+            .stButton > button *, .stDownloadButton > button *,
+            .stFormSubmitButton > button * {
+                color: #111827 !important;
             }
             label, .stMarkdown, .stCaption, [data-testid="stWidgetLabel"] * {
                 color: #111827 !important;
