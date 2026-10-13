@@ -1069,6 +1069,7 @@ SIG_VCP = "VCP_SQUEEZE"
 SIG_SPRING = "SPRING_REVERSAL"
 SIG_MOMENTUM = "MOMENTUM_PULSE"
 SIG_SHORT_PUT = "SHORT_PUT_BREAKDOWN"
+SIG_COMBO = "BASE_PLUS_RVOL"
 
 SCANNER_BASE = "BASE_VOLUME"
 SCANNER_RVOL = "RELATIVE_VOLUME"
@@ -1076,6 +1077,7 @@ SCANNER_VCP = "VCP_SQUEEZE"
 SCANNER_SPRING = "SPRING_REVERSAL"
 SCANNER_MOMENTUM = "MOMENTUM_PULSE"
 SCANNER_SHORT_PUT = "SHORT_PUT_BREAKDOWN"
+SCANNER_COMBO = "BASE_PLUS_RVOL"
 
 MOMENTUM_DIR_BOTH = "BOTH"
 MOMENTUM_DIR_UP = "UP"
@@ -1086,15 +1088,24 @@ MOMENTUM_DIRECTION_LABELS = {
     "Только вниз": MOMENTUM_DIR_DOWN,
 }
 
+# МЕНЮ СКРИНЕРОВ. VCP-сжатие и Spring-отскок убраны 13.10.2026 по просьбе пользователя.
+# Убраны именно ИЗ МЕНЮ, а не вырезаны из кода: на них ссылается около 150 строк в
+# полутора десятках мест (построение сетапа, балл, график, фильтры, подписи), и хирургия
+# в чужом файле на 11 тысяч строк рискует сломать работающее приложение ради нулевой
+# выгоды для пользователя. Из меню они исчезли и выбрать их нельзя — цель достигнута,
+# а вернуть можно одной строкой.
 SCANNER_LABELS = {
-    SCANNER_BASE: "Взрыв из базы",
-    SCANNER_RVOL: "Относительный объём RVOL",
-    SCANNER_VCP: "VCP-сжатие",
-    SCANNER_SPRING: "Spring-отскок",
+    SCANNER_COMBO: "Взрыв из базы + RVOL",
     SCANNER_MOMENTUM: "Импульс + объём",
     SCANNER_SHORT_PUT: "Short / Put пробой вниз",
 }
 SCANNER_HELP = {
+    SCANNER_COMBO: (
+        "Два поиска в одном: бумага попадает в выдачу, если сработал ЛЮБОЙ из них — "
+        "или «Взрыв из базы» (объём выше максимума прошлых свечей, открытие внутри "
+        "вчерашней), или RVOL (объём выше средней за N дней). Настройки обоих ниже, "
+        "крутятся независимо. Так один режим заменяет два, ничего не теряя."
+    ),
     SCANNER_BASE: (
         "Ищет твой старый паттерн: сегодняшнее открытие внутри вчерашней свечи, "
         "а сегодняшний объём выше максимального объёма среди предыдущих свечей."
@@ -1121,6 +1132,7 @@ SCANNER_HELP = {
     ),
 }
 SCANNER_SUBTITLES = {
+    SCANNER_COMBO: "Полный рынок · «Взрыв из базы» ИЛИ RVOL · достаточно одного",
     SCANNER_BASE: "Полный рынок · открытие внутри вчерашней свечи · объём выше всей базы",
     SCANNER_RVOL: "Полный рынок · сегодняшний объём против средней за N дней",
     SCANNER_VCP: "Полный рынок · сжатие диапазона · сухой объём · цена рядом с верхом базы",
@@ -1130,6 +1142,7 @@ SCANNER_SUBTITLES = {
 }
 
 SIGNAL_LABELS = {
+    SIG_COMBO: "ВЗРЫВ ИЗ БАЗЫ + RVOL",
     SIG_BASE: "ВЗРЫВ ОБЪЁМА ИЗ БАЗЫ",
     SIG_RVOL: "ОТНОСИТЕЛЬНЫЙ ОБЪЁМ RVOL",
     SIG_VCP: "VCP-СЖАТИЕ",
@@ -1138,6 +1151,7 @@ SIGNAL_LABELS = {
     SIG_SHORT_PUT: "SHORT / PUT ПРОБОЙ ВНИЗ",
 }
 SIGNAL_SHORT_LABELS = {
+    SIG_COMBO: "База+RVOL",
     SIG_BASE: "Взрыв базы",
     SIG_RVOL: "RVOL",
     SIG_VCP: "VCP-сжатие",
@@ -1365,26 +1379,33 @@ AI_DEEPSEEK_MODEL_SETTING = AI_DEEPSEEK_MODEL
 AI_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 # Trading synthesis always uses the strongest official DeepSeek thinking effort.
 AI_DEEPSEEK_REASONING_EFFORT = "max"
-# СБОРЩИК ФАКТОВ — тоже сильная модель, и это НЕ роскошь.
-# Замер 15.08.2026 на мелкой бумаге VBIO: grok-4.3 НЕ НАШЁЛ зарегистрированный выпуск
-# S-1 на 29.4 млн акций при free float 2.5 млн и написал «не нашёл», а grok-4.6 нашёл
-# и выпуск, и 10-Q с going concern, и инвестгруппу. Пропущенное разводнение — это гэп
-# вниз на открытии по бумаге, которую держишь через ночь. На крупных ликвидных бумагах
-# разницы почти нет (там всё на поверхности), но скринер работает по мелким.
-AI_GROK_MODEL_SETTING = "grok-4.6"
+# СБОРЩИК ФАКТОВ — ДЕШЁВАЯ ступень, решение пользователя 13.10.2026: «сделай дешевле,
+# как у нас». Ниже — оба замера, чтобы размен был виден, а не забыт.
+#
+# ЗА дешёвую. Замер 08.10.2026 в проекте PULSE на пяти бумагах: когда тикер и название
+# компании ИЗВЕСТНЫ и переданы в задание (а здесь это так — разбор идёт по готовому
+# списку), grok-4.3 опознал компанию верно 5 из 5, нашёл главную новость и главный
+# филинг, а его «новостей нет» подтвердил прогон на 4.6 с втрое большим числом
+# прочитанных страниц. Цена ниже в 3–13 раз, ответ быстрее в 4–8 раз.
+#
+# ПРОТИВ. Замер 15.08.2026 на мелкой бумаге VBIO: grok-4.3 НЕ НАШЁЛ зарегистрированный
+# выпуск S-1 на 29.4 млн акций при free float 2.5 млн, а grok-4.6 нашёл и его, и 10-Q
+# с going concern. В замере 08.10 дешёвая ступень тоже потеряла один Form 4 из двух.
+# То есть риск именно такой: ПРОПУЩЕННОЕ РАЗВОДНЕНИЕ по мелкой бумаге, которую держишь
+# через ночь. На крупных ликвидных разницы почти нет.
+#
+# Запасные ступени ниже остаются: если 4.3 не ответит, пойдёт 4.5, затем 4.6.
+AI_GROK_MODEL_SETTING = "grok-4.3"
 AI_GROK_FALLBACK_MODEL = secret_or_default("GROK_FALLBACK_MODEL", "grok-4.5").strip()
 if (
     AI_GROK_FALLBACK_MODEL not in {"grok-4.3", "grok-4.5", "grok-4.6"}
     or AI_GROK_FALLBACK_MODEL == AI_GROK_MODEL_SETTING
 ):
     AI_GROK_FALLBACK_MODEL = "grok-4.5"
-AI_GROK_PREFERRED_MODELS = tuple(
-    part.strip()
-    for part in secret_or_default(
-        "GROK_PREFERRED_MODELS", "grok-4.6,grok-4.5,grok-4.3"
-    ).split(",")
-    if part.strip()
-)
+# AI_GROK_PREFERRED_MODELS убрана 13.10.2026: она определялась, но НИ РАЗУ не читалась —
+# мёртвый код, из-за которого легко решить, что ключ GROK_PREFERRED_MODELS в Secrets
+# на что-то влияет. Он не влияет. Модель задаёт AI_GROK_MODEL_SETTING выше (жёстко,
+# не из Secrets), а запасную — GROK_FALLBACK_MODEL.
 AI_GROK_WEB_SEARCH_DEFAULT = secret_or_default("GROK_WEB_SEARCH", "1").strip().lower() not in {
     "0",
     "false",
@@ -2580,6 +2601,10 @@ def fetch_yahoo_batch(symbols: tuple[str, ...], days: int) -> dict[str, pd.DataF
 
 
 def required_history_days(cfg: ScanConfig) -> int:
+    if cfg.scanner_mode == SCANNER_COMBO:
+        # Обеим линейкам сразу: берём бóльшую из двух потребностей.
+        return max(int(cfg.rvol_avg_days), int(cfg.base_impulse_days), 5,
+                   CHART_VISIBLE_CANDLES)
     if cfg.scanner_mode == SCANNER_RVOL:
         return max(int(cfg.rvol_avg_days), 5, CHART_VISIBLE_CANDLES)
     if cfg.scanner_mode == SCANNER_VCP:
@@ -4556,6 +4581,91 @@ def detect_signal(
     if cfg.scanner_mode != SCANNER_BASE and price * latest_volume < cfg.min_dollar_volume:
         return None
 
+    # Считаем здесь, а не внутри ветки: объединённому режиму эти величины нужны до
+    # выбора ведущей линейки. Одиночные режимы считают их у себя заново — не мешает.
+    body_pct = abs(price - latest_open) / latest_open * 100 if latest_open > 0 else 0.0
+
+    if cfg.scanner_mode == SCANNER_COMBO:
+        # ДВА ПОИСКА, склейка по ИЛИ — достаточно одного сработавшего. Сетапы считают
+        # те же самые функции, что и одиночные режимы, поэтому совпадение с ними
+        # обеспечено по построению, а не подгонкой.
+        base = build_base_impulse(df, cfg)
+        rvol_setup = build_rvol_setup(df, cfg)
+        if base is None and rvol_setup is None:
+            return None
+        prev_close = float(df.iloc[-2]["Close"])
+        gap_pct = (latest_open - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
+        # Кто сработал СИЛЬНЕЕ относительно СВОЕГО порога — тот и задаёт цифры строки.
+        # Сравнивать «×максимума» и «×средней» напрямую нельзя: средняя всегда ниже
+        # максимума, и она перетянула бы и сортировку, и балл на себя.
+        exc_base = (base.volume_mult / max(float(cfg.base_volume_mult), 0.1)) if base else 0.0
+        exc_rvol = (rvol_setup.rvol / max(float(cfg.rvol_mult), 0.1)) if rvol_setup else 0.0
+        lead_base = exc_base >= exc_rvol
+        parts = []
+        if base is not None:
+            parts.append(f"×{base.volume_mult:.1f} от макс. {int(cfg.base_impulse_days)} св.")
+        if rvol_setup is not None:
+            parts.append(f"×{rvol_setup.rvol:.1f} от средней {int(cfg.rvol_avg_days)} дн.")
+        combo_note = " · ".join(parts)
+        if lead_base and base is not None:
+            score = score_base_signal(base, cfg)
+            lead_ratio = base.volume_mult
+            low, high, band = base.low, base.high, int(cfg.base_impulse_days)
+            band_label = "база"
+            move_pct = base.move_pct
+            width_pct = base.width_pct
+            avg_volume = 0
+            dollar_volume = int(price * latest_volume)
+            day_range_pct = 0.0
+        else:
+            score = score_rvol(rvol_setup, cfg)
+            lead_ratio = rvol_setup.rvol
+            low, high, band = rvol_setup.low, rvol_setup.high, int(rvol_setup.range_days)
+            band_label = "диапазон RVOL"
+            move_pct = rvol_setup.move_pct
+            width_pct = rvol_setup.width_pct
+            avg_volume = int(rvol_setup.avg_volume)
+            dollar_volume = int(rvol_setup.dollar_volume)
+            day_range_pct = rvol_setup.day_range_pct
+        return {
+            "_sig": SIG_COMBO,
+            "_rvol": lead_ratio,
+            "_score": score,
+            "_width": width_pct,
+            "_gap": gap_pct,
+            "_move_pct": move_pct,
+            "_day_range_pct": day_range_pct,
+            "_combo_base": bool(base is not None),
+            "_combo_rvol": bool(rvol_setup is not None),
+            "_chart_payload": pattern_chart_payload(
+                df,
+                band,
+                low,
+                high,
+                band_label,
+                visible_candles=CHART_VISIBLE_CANDLES,
+                band_days=band,
+                timeframe="D",
+            ),
+            "_scanner": cfg.scanner_mode,
+            "Тикер": ticker_info["ticker"],
+            "Название": (ticker_info.get("name") or "")[:34],
+            "Биржа": ticker_info.get("exchange", ""),
+            "Сигнал": f"{SIGNAL_LABELS[SIG_COMBO]} · {combo_note}",
+            "Цена": round(price, 4),
+            "Выход %": f"{move_pct:+.1f}%" if move_pct else "—",
+            "Гэп сегодня": f"{gap_pct:+.1f}%",
+            "Объём ×": round(lead_ratio, 2),
+            "Объём": int(latest_volume),
+            "Средний объём": avg_volume,
+            "Тело свечи %": round(body_pct, 1),
+            "Долларовый объём": dollar_volume,
+            "Капитализация": ticker_info.get("market_cap") or 0,
+            "Балл": score,
+            "Источник": df.attrs.get("source", ""),
+            "Время": now_et_str(),
+        }
+
     if cfg.scanner_mode == SCANNER_BASE:
         base = build_base_impulse(df, cfg)
         if base is None:
@@ -5123,6 +5233,8 @@ def result_matches_active_patterns(row: dict[str, Any], cfg: ScanConfig) -> bool
     scanner = str(row.get("_scanner", ""))
     if scanner:
         return scanner == cfg.scanner_mode
+    if cfg.scanner_mode == SCANNER_COMBO:
+        return signal_code in {SIG_COMBO, SIG_BASE, SIG_RVOL}
     if cfg.scanner_mode == SCANNER_BASE:
         return signal_code == SIG_BASE
     if cfg.scanner_mode == SCANNER_RVOL:
@@ -5680,6 +5792,70 @@ def ai_intraday_facts(row: dict[str, Any]) -> list[str]:
         if len(r_closes) >= 15:
             facts.append(f"движение за последние 15 мин сессии="
                          f"{ai_change_pct(r_closes[-1], r_closes[-16]):+.1f}%")
+
+        # ── САМАЯ ГРОМКАЯ МИНУТА ДНЯ ────────────────────────────────────────
+        # Без неё скринер и разбор говорили противоположное: скринер находил бумагу
+        # по всплеску за минуту, а аналитик видел только дневной итог и писал
+        # «объём ниже среднего, движение пустое». Замер на LTRN: 26% ДНЕВНОГО
+        # оборота прошло за одну минуту, а дневной RVOL показывал ровно 1.0.
+        total_r = sum(r_vols) or 1.0
+        top_i = max(range(len(r_vols)), key=lambda i: r_vols[i])
+        top_v = r_vols[top_i]
+        if top_v > 0:
+            share = top_v / total_r * 100
+            med_v = sorted(r_vols)[len(r_vols) // 2]
+            stamp = str(regular[top_i].get("Timestamp") or "")[11:16] or "?"
+            line = (f"самая громкая минута={format_int_cell(top_v)} акций в {stamp}, "
+                    f"{share:.1f}% всего дневного объёма за одну минуту")
+            if med_v > 0:
+                line += f" (обычная минута {format_int_cell(med_v)}, x{top_v / med_v:.0f})"
+            facts.append(line)
+            if share >= 5:
+                facts.append("ВНИМАНИЕ: одна минута дала 5%+ дневного оборота — дневной "
+                             "RVOL такой всплеск НЕ показывает, он усредняет его по дню; "
+                             "событие произошло в конкретную минуту")
+
+        # ── ФОРМА ДНЯ ПО ПОЛУЧАСАМ ──────────────────────────────────────────
+        # Всё выше — ИТОГИ: положение в диапазоне, движение за 15/60 минут. Но день,
+        # который ровно рос, и день, который взлетел на открытии и весь остаток
+        # сползал, дают одинаковые итоги при противоположном торговом смысле.
+        # Здесь — сам ХОД: где прошёл объём и что цена делала именно там.
+        # Половина дневного объёма в одну получасовку при падающей цене = раздача
+        # в пик, и по итоговым числам этого не видно.
+        if len(regular) >= 30:
+            total_r = sum(r_vols) or 1.0
+            step, chunks = 30, []
+            for start in range(0, len(regular), step):
+                part = regular[start:start + step]
+                pv = sum(max(0.0, safe_float(i.get("Volume"))) for i in part)
+                if pv <= 0:
+                    continue
+                chunks.append({
+                    "i": start // step, "vol": pv, "share": pv / total_r * 100,
+                    "open": safe_float(part[0].get("Open")),
+                    "close": safe_float(part[-1].get("Close")),
+                })
+            if len(chunks) >= 3:
+                peak = max(chunks, key=lambda c: c["vol"])
+                shape = "; ".join(
+                    f"{c['i'] * step // 60}ч{c['i'] * step % 60:02d}м+{step}: "
+                    f"{c['share']:.0f}% объёма, цена "
+                    f"{ai_change_pct(c['close'], c['open']):+.1f}%"
+                    + ("(ПИК)" if c is peak else "")
+                    for c in chunks
+                )
+                facts.append(f"форма дня по получасам от открытия={shape}")
+                peak_move = ai_change_pct(peak["close"], peak["open"])
+                facts.append(
+                    f"пик объёма={peak['share']:.0f}% дневного объёма, цена в нём "
+                    f"{peak_move:+.1f}% — "
+                    + ("деньги ЗАХОДИЛИ" if peak_move > 0 else "РАЗДАЧА в пик")
+                )
+                tail = chunks[-1]["vol"] / peak["vol"] if peak["vol"] > 0 else 0.0
+                facts.append(
+                    f"последняя получасовка к пиковой={tail * 100:.0f}% — "
+                    + ("интерес держится" if tail >= 0.5 else "объём затухает")
+                )
     return facts
 
 
@@ -6080,12 +6256,21 @@ def ai_social_identity_context(context_lines: list[str] | None) -> list[str]:
 
 
 def ai_grok_research_context(context_lines: list[str] | None) -> list[str]:
+    # Что сборщик видит о сегодняшнем дне ДО поиска. Без этого он ищет вслепую:
+    # «что вообще известно о бумаге» вместо «почему она сегодня ходит».
+    # RVOL и сигнал скринера добавлены намеренно — именно они говорят, что
+    # СЕЙЧАС что-то происходит, а цена и движение сами по себе этого не говорят.
+    # Капитализацию и фундамент НЕ передаём: их работа сборщика — найти самому,
+    # иначе он просто перепишет наши числа вместо проверки по источникам.
     allowed_prefixes = (
         "компания=",
         "биржа=",
+        "сигнал=",
         "цена=",
+        "RVOL=",
         "движение=",
         "объём=",
+        "$объём=",
         "время строки скринера=",
     )
     compact: list[str] = []
@@ -9933,7 +10118,11 @@ with st.sidebar:
     )
     scanner_mode = {label: code for code, label in SCANNER_LABELS.items()}[scanner_label]
     base_impulse_only = scanner_mode == SCANNER_BASE
-    rvol_active = scanner_mode == SCANNER_RVOL
+    # Объединённому режиму нужны ОБА блока ползунков. base_impulse_only не трогаем —
+    # он управляет ещё и сортировкой с набором колонок (sort_results/display_frame),
+    # поэтому для показа настроек вводим отдельный флаг.
+    base_sliders = scanner_mode in (SCANNER_BASE, SCANNER_COMBO)
+    rvol_active = scanner_mode in (SCANNER_RVOL, SCANNER_COMBO)
     vcp_active = scanner_mode == SCANNER_VCP
     spring_active = scanner_mode == SCANNER_SPRING
     short_put_active = scanner_mode == SCANNER_SHORT_PUT
@@ -10005,7 +10194,7 @@ with st.sidebar:
         5,
         help="Отбрасывает тикеры, у которых последний дневной бар слишком старый.",
     )
-    if base_impulse_only or momentum_active:
+    if base_sliders or momentum_active:
         min_dollar_volume = 0
     else:
         min_dollar_volume_input = st.number_input(
@@ -10019,7 +10208,9 @@ with st.sidebar:
         min_dollar_volume = int(min_dollar_volume_input)
 
     defaults = ScanConfig()
-    base_impulse_enabled = base_impulse_only
+    # В объединённом режиме линейка базы обязана быть включена, иначе
+    # build_base_impulse сразу вернёт None и останется только RVOL.
+    base_impulse_enabled = base_sliders
     base_impulse_days = defaults.base_impulse_days
     base_width_filter_enabled = defaults.base_width_filter_enabled
     base_max_width_pct = defaults.base_max_width_pct
@@ -10081,7 +10272,7 @@ with st.sidebar:
     momentum_min_fast_volume_share_pct = defaults.momentum_min_fast_volume_share_pct
     momentum_max_confirm_move_pct = defaults.momentum_max_confirm_move_pct
 
-    if base_impulse_only:
+    if base_sliders:
         st.markdown('<div class="desk-section-title">Взрыв из базы</div>', unsafe_allow_html=True)
         base_impulse_days = st.slider(
             "Предыдущих свечей для сравнения объёма",
@@ -10415,7 +10606,7 @@ with st.sidebar:
             )
 
     st.markdown('<div class="desk-section-title">Цена</div>', unsafe_allow_html=True)
-    default_min_price = 0.0 if base_impulse_only else defaults.min_price
+    default_min_price = 0.0 if base_sliders else defaults.min_price
     default_max_price = 200.0 if short_put_active else (50.0 if momentum_active else defaults.max_price)
     min_price, max_price = st.slider(
         "Диапазон цены акции, $",
