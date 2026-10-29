@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import logging
 import os
 import re
@@ -1039,7 +1040,6 @@ NASDAQ_CACHE_TTL_SEC = 300
 UNIVERSE_DIRECTORY_CACHE_TTL_SEC = 6 * 3600
 UNIVERSE_SNAPSHOT_CACHE_TTL_SEC = 300
 UNIVERSE_SNAPSHOT_CHUNK = 500
-SHORT_PUT_MIN_QUOTED_CONTRACTS = 30
 YAHOO_CACHE_TTL_SEC = 60
 BATCH_SIZE = 120
 ALPACA_SIP_DELAY_MINUTES = 16
@@ -1054,6 +1054,13 @@ MAX_SIGNAL_GALLERY_CARDS = 12
 MAX_STORED_CHART_PAYLOADS = 24
 DISMISS_TTL_HOURS = 7
 
+# Режим «Два дня вниз · опционы»
+DOWN_OPT_VOLUME_DAYS = 20          # по чему считаем средний объём (только справочно)
+DOWN_OPT_RANGE_DAYS = 24           # полоса диапазона на графике
+OPT_BATCH_SYMBOLS = 40             # бумаг в одном запросе контрактов
+OPT_EXPIRY_WINDOW_DAYS = 60        # окно экспираций, которое считаем «живым»
+OPT_CONTRACTS_CACHE_TTL_SEC = 3600 # цепочки за день не появляются и не исчезают
+
 DATA_SOURCE_AUTO = "AUTO_ALPACA_SIP_YAHOO"
 DATA_SOURCE_ALPACA_SIP = "ALPACA_SIP"
 DATA_SOURCE_YAHOO = "YAHOO"
@@ -1063,101 +1070,59 @@ DATA_SOURCE_LABELS = {
     DATA_SOURCE_YAHOO: "Yahoo Finance",
 }
 
+# ── ДВА СКРИНЕРА ──────────────────────────────────────────────────
+# В приложении ровно два поиска, оба дневные, оба читаются под закрытие рынка.
+# Всё остальное (VCP-сжатие, Spring-отскок, интрадей-Pulse, старый пробой вниз
+# с перебором конкретных put-контрактов) вырезано из кода 27.10.2026 по просьбе
+# хозяина файла — не спрятано из меню, а удалено вместе с настройками, ветками,
+# чипами и подписями. Телефон должен показывать только то, чем реально торгуют.
+SIG_COMBO = "BASE_PLUS_RVOL"
+SIG_DOWN_OPT = "TWO_DAYS_DOWN_OPTIONS"
+
+# SIG_BASE и SIG_RVOL — ЛЕГАСИ. Отдельных режимов «только взрыв базы» и «только
+# RVOL» больше нет, но строки результатов с этими кодами лежат в session_state от
+# прошлых запусков, и result_matches_active_patterns обязана их узнавать.
 SIG_BASE = "BASE_VOLUME_EXPLOSION"
 SIG_RVOL = "RELATIVE_VOLUME"
-SIG_VCP = "VCP_SQUEEZE"
-SIG_SPRING = "SPRING_REVERSAL"
-SIG_MOMENTUM = "MOMENTUM_PULSE"
-SIG_SHORT_PUT = "SHORT_PUT_BREAKDOWN"
-SIG_COMBO = "BASE_PLUS_RVOL"
 
-SCANNER_BASE = "BASE_VOLUME"
-SCANNER_RVOL = "RELATIVE_VOLUME"
-SCANNER_VCP = "VCP_SQUEEZE"
-SCANNER_SPRING = "SPRING_REVERSAL"
-SCANNER_MOMENTUM = "MOMENTUM_PULSE"
-SCANNER_SHORT_PUT = "SHORT_PUT_BREAKDOWN"
 SCANNER_COMBO = "BASE_PLUS_RVOL"
+SCANNER_DOWN_OPT = "TWO_DAYS_DOWN_OPTIONS"
 
-MOMENTUM_DIR_BOTH = "BOTH"
-MOMENTUM_DIR_UP = "UP"
-MOMENTUM_DIR_DOWN = "DOWN"
-MOMENTUM_DIRECTION_LABELS = {
-    "Вверх и вниз": MOMENTUM_DIR_BOTH,
-    "Только вверх": MOMENTUM_DIR_UP,
-    "Только вниз": MOMENTUM_DIR_DOWN,
-}
-
-# МЕНЮ СКРИНЕРОВ. VCP-сжатие и Spring-отскок убраны 13.10.2026 по просьбе пользователя.
-# Убраны именно ИЗ МЕНЮ, а не вырезаны из кода: на них ссылается около 150 строк в
-# полутора десятках мест (построение сетапа, балл, график, фильтры, подписи), и хирургия
-# в чужом файле на 11 тысяч строк рискует сломать работающее приложение ради нулевой
-# выгоды для пользователя. Из меню они исчезли и выбрать их нельзя — цель достигнута,
-# а вернуть можно одной строкой.
 SCANNER_LABELS = {
     SCANNER_COMBO: "Взрыв из базы + RVOL",
-    SCANNER_MOMENTUM: "Импульс + объём",
-    SCANNER_SHORT_PUT: "Short / Put пробой вниз",
+    SCANNER_DOWN_OPT: "Два дня вниз · опционы",
 }
 SCANNER_HELP = {
     SCANNER_COMBO: (
         "Два поиска в одном: бумага попадает в выдачу, если сработал ЛЮБОЙ из них — "
         "или «Взрыв из базы» (объём выше максимума прошлых свечей, открытие внутри "
-        "вчерашней), или RVOL (объём выше средней за N дней). Настройки обоих ниже, "
-        "крутятся независимо. Так один режим заменяет два, ничего не теряя."
+        "вчерашней), или RVOL (объём выше средней за N дней). Сверху стоит общий "
+        "ограничитель хода: бумага, уже прошедшая больше заданного процента от "
+        "вчерашнего закрытия, не показывается — её поезд ушёл."
     ),
-    SCANNER_BASE: (
-        "Ищет твой старый паттерн: сегодняшнее открытие внутри вчерашней свечи, "
-        "а сегодняшний объём выше максимального объёма среди предыдущих свечей."
-    ),
-    SCANNER_RVOL: (
-        "Ищет акции, где сегодняшний объём резко выше средней за выбранное число дней. "
-        "Это классический фильтр RVOL: бумага сейчас в игре."
-    ),
-    SCANNER_VCP: (
-        "Ищет сжатие перед движением: диапазон свечей постепенно становится уже, "
-        "объём сохнет, цена находится близко к верхней границе базы."
-    ),
-    SCANNER_SPRING: (
-        "Ищет ложный прокол поддержки: цена сходила ниже важного минимума, "
-        "но закрылась обратно выше поддержки на повышенном объёме."
-    ),
-    SCANNER_MOMENTUM: (
-        "Интрадей-скринер для day trading: ищет акции, где прямо сейчас появился "
-        "быстрый рост или падение на повышенном минутном объёме."
-    ),
-    SCANNER_SHORT_PUT: (
-        "Ищет медвежий взрыв объёма: акция падает, объём минимум 2x, при включённом "
-        "канале пробивает низ базы вниз. В результат попадают только тикеры с живыми put-опционами."
+    SCANNER_DOWN_OPT: (
+        "Ищет бумаги, которые идут вниз: вчерашняя свеча закрылась ниже своего "
+        "открытия, а сейчас цена ниже вчерашнего закрытия. В выдачу попадают "
+        "только тикеры с живыми опционами — есть и call, и put с экспирацией в "
+        "ближайшие два месяца, то есть торговать опционом реально сегодня."
     ),
 }
 SCANNER_SUBTITLES = {
-    SCANNER_COMBO: "Полный рынок · «Взрыв из базы» ИЛИ RVOL · достаточно одного",
-    SCANNER_BASE: "Полный рынок · открытие внутри вчерашней свечи · объём выше всей базы",
-    SCANNER_RVOL: "Полный рынок · сегодняшний объём против средней за N дней",
-    SCANNER_VCP: "Полный рынок · сжатие диапазона · сухой объём · цена рядом с верхом базы",
-    SCANNER_SPRING: "Полный рынок · прокол поддержки · возврат над уровень · объёмный отскок",
-    SCANNER_MOMENTUM: "Полный рынок · 1Min Alpaca · быстрый импульс 5/15 мин · объёмный всплеск",
-    SCANNER_SHORT_PUT: "Short/Put · пробой вниз · объёмный всплеск · только торгуемые put-опционы",
+    SCANNER_COMBO: "Полный рынок · «Взрыв из базы» ИЛИ RVOL · ограничитель хода от вчерашнего закрытия",
+    SCANNER_DOWN_OPT: "Полный рынок · вчера красная свеча · сейчас ниже вчерашнего закрытия · только с живыми опционами",
 }
 
 SIGNAL_LABELS = {
     SIG_COMBO: "ВЗРЫВ ИЗ БАЗЫ + RVOL",
+    SIG_DOWN_OPT: "ВТОРОЙ ДЕНЬ ВНИЗ · ЕСТЬ ОПЦИОНЫ",
     SIG_BASE: "ВЗРЫВ ОБЪЁМА ИЗ БАЗЫ",
     SIG_RVOL: "ОТНОСИТЕЛЬНЫЙ ОБЪЁМ RVOL",
-    SIG_VCP: "VCP-СЖАТИЕ",
-    SIG_SPRING: "SPRING ОТ ДНА",
-    SIG_MOMENTUM: "ИМПУЛЬС + ОБЪЁМ",
-    SIG_SHORT_PUT: "SHORT / PUT ПРОБОЙ ВНИЗ",
 }
 SIGNAL_SHORT_LABELS = {
     SIG_COMBO: "База+RVOL",
+    SIG_DOWN_OPT: "2 дня вниз",
     SIG_BASE: "Взрыв базы",
     SIG_RVOL: "RVOL",
-    SIG_VCP: "VCP-сжатие",
-    SIG_SPRING: "Spring от дна",
-    SIG_MOMENTUM: "Импульс",
-    SIG_SHORT_PUT: "Short/Put",
 }
 
 DISPLAY_COLS = [
@@ -1173,8 +1138,6 @@ DISPLAY_COLS = [
     "Капитализация",
     "Время",
 ]
-
-BASE_PATTERN_DISPLAY_COLS = DISPLAY_COLS
 
 
 LOCAL_SECRETS_CACHE: dict[str, Any] | None = None
@@ -1861,80 +1824,37 @@ URL ИЗ ПОИСКОВЫХ ОТВЕТОВ (не каждый URL подтвер
 
 @dataclass(frozen=True)
 class ScanConfig:
-    scanner_mode: str = SCANNER_BASE
+    scanner_mode: str = SCANNER_COMBO
     min_dollar_volume: int = 1_000_000   # 1 млн$: торговля вечером, нужна ликвидность
-
-    base_impulse_enabled: bool = True
-    base_impulse_days: int = 10
-    base_width_filter_enabled: bool = False
-    base_max_width_pct: float = 40.0
-    base_volume_mult: float = 2.0
-    base_impulse_only: bool = False
 
     max_stale_days: int = 5
     min_price: float = 0.0
     max_price: float = 30.0
 
+    # ── Взрыв из базы + RVOL ──
+    base_impulse_enabled: bool = True
+    base_impulse_days: int = 10
+    base_width_filter_enabled: bool = False
+    base_max_width_pct: float = 40.0
+    base_volume_mult: float = 2.0
+
     rvol_avg_days: int = 30
     rvol_mult: float = 2.0
-    rvol_day_range_filter_enabled: bool = False
-    rvol_max_day_range_pct: float = 30.0  # включается тумблером; 30% = берём начало хода
 
-    vcp_days: int = 60
-    vcp_max_base_width_pct: float = 30.0
-    vcp_max_recent_width_pct: float = 10.0
-    vcp_min_compression_pct: float = 35.0
-    vcp_near_high_pct: float = 10.0
-    vcp_dry_volume_ratio: float = 0.80
+    # Ограничитель хода. ВКЛЮЧЁН по умолчанию: смысл режима — поймать начало
+    # движения, а не бумагу, которая уже улетела. Считается как самое далёкое
+    # отклонение сегодняшнего High или Low от вчерашнего закрытия, с хвостами.
+    travel_filter_enabled: bool = True
+    max_travel_pct: float = 30.0
 
-    spring_support_days: int = 60
-    spring_low_days: int = 120
-    spring_break_pct: float = 0.7
-    spring_reclaim_pct: float = 0.2
-    spring_close_position_pct: float = 60.0
-    spring_volume_mult: float = 1.2
-    spring_max_from_low_pct: float = 30.0
-
-    short_base_days: int = 10
-    short_channel_enabled: bool = True
-    short_max_base_width_pct: float = 40.0
-    short_volume_mult: float = 2.0
-    short_min_drop_pct: float = 0.8
-    short_break_buffer_pct: float = 0.5
-    short_close_position_pct: float = 40.0
-    short_put_min_dte: int = 0
-    short_put_max_dte: int = 60
-    short_put_strike_range_pct: float = 25.0
-    short_put_min_open_interest: int = 0
-    short_put_max_spread_pct: float = 50.0
-    short_put_min_bid: float = 0.05
-    short_put_max_contracts: int = 12
-    short_put_feed: str = "auto"
-
-    momentum_direction: str = MOMENTUM_DIR_BOTH
-    momentum_fast_minutes: int = 3
-    momentum_confirm_minutes: int = 10
-    momentum_volume_baseline_minutes: int = 60
-    momentum_min_fast_move_pct: float = 0.7
-    momentum_min_confirm_move_pct: float = 1.2
-    momentum_volume_mult: float = 6.0
-    momentum_confirm_volume_mult: float = 3.0
-    momentum_min_5m_dollar_volume: int = 500_000
-    momentum_min_15m_dollar_volume: int = 1_250_000
-    momentum_min_day_dollar_volume: int = 3_000_000
-    momentum_max_bar_age_minutes: int = 2
-    momentum_max_vwap_distance_pct: float = 5.0
-    momentum_require_vwap_side: bool = True
-    momentum_require_ema_trend: bool = True
-    momentum_include_extended_hours: bool = False
-    momentum_min_score: int = 85
-    momentum_min_quality_checks: int = 3
-    momentum_require_new_volume_wave: bool = True
-    momentum_min_volume_acceleration: float = 2.0
-    momentum_max_prior_fast_rvol: float = 2.5
-    momentum_max_recent_prior_rvol: float = 4.0
-    momentum_min_fast_volume_share_pct: float = 40.0
-    momentum_max_confirm_move_pct: float = 8.0
+    # ── Два дня вниз · опционы ──
+    # Порога падения здесь намеренно НЕТ. Фиксируется сам факт: вчерашняя свеча
+    # красная, сегодня цена ниже вчерашнего закрытия. Падение уже началось —
+    # глубину смотрят глазами по графику, а не отсекают ползунком.
+    #
+    # Сегодняшний объём к ВЧЕРАШНЕМУ. 0 = объём не учитывается вовсе,
+    # 1 = не меньше вчерашнего, 2 = вдвое больше вчерашнего.
+    down_volume_mult: float = 0.0
 
 
 def now_et() -> datetime:
@@ -2388,6 +2308,143 @@ def get_alpaca_fallback_tickers(
     return rows
 
 
+COUNTRY_US_ONLY = "US_ONLY"
+COUNTRY_ALL = "ALL"
+COUNTRY_LABELS = {
+    COUNTRY_US_ONLY: "Только американский рынок",
+    COUNTRY_ALL: "Все рынки",
+}
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def get_us_tickers(exchange: str) -> set[str]:
+    """Тикеры компаний ИЗ США — отдельным запросом к тому же скринеру Nasdaq.
+
+    Своего поля страны в основном списке нет (проверено 13.10.2026: источник отдаёт
+    только symbol, name, lastsale, marketCap, netchange, pctchange, url). Но у него
+    есть параметр country: тянем список «united_states» и сравниваем. Что есть в нём —
+    США, чего нет — иностранец: ADR, китайские эмитенты, израильские биотехи.
+
+    Кэш на 6 часов: состав меняется редко, а три запроса стоят несколько секунд.
+    Пустой результат НЕ считаем правдой — при сбое источника вызывающий код честно
+    отключает фильтр, а не выбрасывает весь рынок."""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json",
+        "Referer": "https://www.nasdaq.com/",
+    }
+    exchanges = ["nasdaq", "nyse", "amex"] if exchange == "ALL" else [exchange.lower()]
+    out: set[str] = set()
+    for ex in exchanges:
+        try:
+            resp = requests.get(
+                "https://api.nasdaq.com/api/screener/stocks",
+                params={
+                    "tableonly": "true",
+                    "limit": 10000,
+                    "exchange": ex,
+                    "country": "united_states",
+                },
+                headers=headers,
+                timeout=20,
+            )
+            resp.raise_for_status()
+            rows = ((resp.json().get("data") or {}).get("table") or {}).get("rows") or []
+            for row in rows:
+                sym = str(row.get("symbol") or "").strip().upper()
+                if sym:
+                    out.add(sym)
+        except Exception as exc:
+            LOGGER.warning("US ticker list failed for %s: %s", ex, exc)
+    return out
+
+
+def filter_universe_by_country(
+    universe: list[dict[str, Any]],
+    country_mode: str,
+    exchange: str,
+) -> tuple[list[dict[str, Any]], str]:
+    """Отсев по стране эмитента. → (список, честное примечание для экрана)."""
+    if country_mode != COUNTRY_US_ONLY:
+        return universe, ""
+    us = get_us_tickers(exchange)
+    if not us:
+        return universe, (
+            "Список компаний США не загрузился — фильтр по стране временно отключён, "
+            "показываем все бумаги."
+        )
+    kept = [t for t in universe if str(t.get("ticker") or "").upper() in us]
+    cut = len(universe) - len(kept)
+    note = f"Только американский рынок: {len(kept)} из {len(universe)} (отсеяно {cut})"
+    return kept, note
+
+
+def copy_tickers_block(tickers: list[str]) -> str:
+    """Кнопка «Скопировать тикеры»: нажал — список уже в буфере телефона.
+
+    Зачем отдельный HTML, а не st.button: в буфер обмена умеет писать только сам
+    браузер, Streamlit такого не может. Копирование происходит прямо на странице —
+    мгновенно, без обращения к серверу и без перерисовки.
+
+    Три способа подряд, потому что ни один не работает везде, особенно на телефонах:
+    navigator.clipboard требует защищённого соединения (в облаке Streamlit это https,
+    то есть годится) и разрешения для iframe; execCommand его не требует, но устарел;
+    если отказали оба — показываем текст уже выделенным, чтобы можно было скопировать
+    вручную долгим нажатием. Молча не отваливаемся никогда.
+
+    Кнопка большая намеренно: палец на телефоне, а не курсор."""
+    payload = json.dumps(", ".join(tickers))
+    label = f"Скопировать тикеры ({len(tickers)})"
+    return f"""
+<style>
+ *{{box-sizing:border-box}} body{{margin:0;font-family:-apple-system,system-ui,sans-serif}}
+ #cpb{{width:100%;min-height:46px;font:700 15px -apple-system,system-ui,sans-serif;
+   color:#fff;background:#2563eb;border:0;border-radius:10px;padding:12px;
+   cursor:pointer;-webkit-tap-highlight-color:transparent}}
+ #cpb:active{{background:#1d4ed8}}
+ #cpb.ok{{background:#16a34a}}
+ #cpf{{width:100%;display:none;font:14px ui-monospace,Menlo,monospace;padding:10px;
+   border:2px solid #f59e0b;border-radius:10px;resize:none}}
+</style>
+<button id="cpb">{html.escape(label)}</button>
+<textarea id="cpf" rows="2" readonly></textarea>
+<script>
+(function(){{
+  var T={payload}, LBL={json.dumps(label)};
+  var b=document.getElementById('cpb'), f=document.getElementById('cpf');
+  function flash(txt, cls){{
+    b.textContent=txt; b.className=cls||'';
+    setTimeout(function(){{ b.textContent=LBL; b.className=''; }}, 1800);
+  }}
+  function done(){{ flash('Скопировано', 'ok'); }}
+  function legacy(){{
+    try{{
+      var ta=document.createElement('textarea');
+      ta.value=T; ta.style.position='fixed'; ta.style.top='-999px';
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      var ok=document.execCommand('copy'); ta.remove(); return ok;
+    }}catch(e){{ return false; }}
+  }}
+  function manual(){{
+    b.style.display='none'; f.style.display='block';
+    f.value=T; f.focus(); f.select();
+    setTimeout(function(){{ f.style.display='none'; b.style.display='block'; }}, 12000);
+  }}
+  b.onclick=function(){{
+    if(!T){{ flash('Нечего копировать'); return; }}
+    if(navigator.clipboard && navigator.clipboard.writeText){{
+      navigator.clipboard.writeText(T).then(done, function(){{
+        if(legacy()) done(); else manual();
+      }});
+    }} else if(legacy()){{ done(); }} else {{ manual(); }}
+  }};
+}})();
+</script>"""
+
+
 def get_market_tickers(
     exchange: str,
     min_price: float,
@@ -2601,19 +2658,19 @@ def fetch_yahoo_batch(symbols: tuple[str, ...], days: int) -> dict[str, pd.DataF
 
 
 def required_history_days(cfg: ScanConfig) -> int:
-    if cfg.scanner_mode == SCANNER_COMBO:
-        # Обеим линейкам сразу: берём бóльшую из двух потребностей.
-        return max(int(cfg.rvol_avg_days), int(cfg.base_impulse_days), 5,
-                   CHART_VISIBLE_CANDLES)
-    if cfg.scanner_mode == SCANNER_RVOL:
-        return max(int(cfg.rvol_avg_days), 5, CHART_VISIBLE_CANDLES)
-    if cfg.scanner_mode == SCANNER_VCP:
-        return max(int(cfg.vcp_days), 30, CHART_VISIBLE_CANDLES)
-    if cfg.scanner_mode == SCANNER_SPRING:
-        return max(int(cfg.spring_support_days), int(cfg.spring_low_days), 60, CHART_VISIBLE_CANDLES)
-    if cfg.scanner_mode == SCANNER_SHORT_PUT:
-        return max(int(cfg.short_base_days), 20, CHART_VISIBLE_CANDLES)
-    return max(int(cfg.base_impulse_days), 5, CHART_VISIBLE_CANDLES)
+    """Сколько дневных свечей грузить. Снизу всегда CHART_VISIBLE_CANDLES.
+
+    Нижняя граница не косметика: pattern_chart_svg возвращает пустую строку,
+    если свечей меньше, чем просил payload, а галерея такую карточку пропускает
+    через continue. Срежешь историю — бумага останется в таблице и в CSV, но
+    на телефоне её карточки не будет вовсе."""
+    if cfg.scanner_mode == SCANNER_DOWN_OPT:
+        # Самому условию хватает трёх закрытий, но график и средний объём
+        # требуют истории, поэтому берём обычное окно.
+        return max(DOWN_OPT_VOLUME_DAYS, CHART_VISIBLE_CANDLES)
+    # Объединённому режиму — бóльшая из двух потребностей обеих линеек.
+    return max(int(cfg.rvol_avg_days), int(cfg.base_impulse_days), 5,
+               CHART_VISIBLE_CANDLES)
 
 
 def load_bars(
@@ -2682,34 +2739,8 @@ def load_bars(
     return bars
 
 
-def parse_iso_date(value: Any) -> datetime.date | None:
-    try:
-        return datetime.fromisoformat(str(value).split("T")[0]).date()
-    except Exception:
-        return None
-
-
-def option_float(value: Any, default: float = 0.0) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return default
-    return number if pd.notna(number) else default
-
-
-def option_int(value: Any, default: int = 0) -> int:
-    try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return default
-
-
-def option_contract_symbol(contract: dict[str, Any]) -> str:
-    for key in ("symbol", "contract_symbol", "id"):
-        value = str(contract.get(key) or "").upper().strip()
-        if value:
-            return value
-    return ""
+# ── ОПЦИОНЫ: ЕСТЬ ИЛИ НЕТ ─────────────────────────────────────────
+OPT_INVALID_SYMBOLS_RE = re.compile(r"invalid underlying symbols?:\s*(.+)", re.I)
 
 
 def option_underlying_symbol(contract: dict[str, Any]) -> str:
@@ -2720,407 +2751,271 @@ def option_underlying_symbol(contract: dict[str, Any]) -> str:
     return ""
 
 
-def option_quote_bid_ask(quote: dict[str, Any]) -> tuple[float, float, str]:
-    if not isinstance(quote, dict):
-        return 0.0, 0.0, ""
-    bid = option_float(
-        quote.get("bp")
-        or quote.get("bid_price")
-        or quote.get("bidPrice")
-        or quote.get("bid"),
-        0.0,
-    )
-    ask = option_float(
-        quote.get("ap")
-        or quote.get("ask_price")
-        or quote.get("askPrice")
-        or quote.get("ask"),
-        0.0,
-    )
-    quote_time = str(quote.get("t") or quote.get("timestamp") or quote.get("time") or "")
-    return bid, ask, quote_time
+def invalid_underlying_symbols(payload: Any, raw_text: str = "") -> set[str]:
+    """Какие тикеры Alpaca назвала негодными в ответе 422.
+
+    Это не мелочь, а защита всего режима: ОДИН делистнутый тикер в пачке из
+    сорока обнуляет весь запрос — приходит 422 «invalid underlying symbols: X»
+    и ни одного контракта. Проверено 27.10 вживую. Негодные тикеры перечислены
+    в самом сообщении, поэтому их можно выкинуть и переспросить остаток."""
+    message = ""
+    if isinstance(payload, dict):
+        message = str(payload.get("message") or "")
+    if not message:
+        message = str(raw_text or "")
+    found = OPT_INVALID_SYMBOLS_RE.search(message)
+    if not found:
+        return set()
+    names = {re.sub(r"[^A-Za-z0-9.\-]", "", item).upper() for item in found.group(1).split(",")}
+    return {name for name in names if name}
 
 
-def option_quote_is_live(quote: dict[str, Any]) -> bool:
-    bid, ask, _ = option_quote_bid_ask(quote)
-    bid_size = option_int(quote.get("bs") or quote.get("bid_size") or quote.get("bidSize"), 0)
-    ask_size = option_int(quote.get("as") or quote.get("ask_size") or quote.get("askSize"), 0)
-    return bid > 0 and ask > 0 and ask >= bid and bid_size > 0 and ask_size > 0
-
-
-def option_contract_parts(contract_symbol: str) -> tuple[str, datetime.date | None, str, float]:
-    symbol = str(contract_symbol or "").upper().strip()
-    match = re.search(r"(\d{6})([CP])(\d{8})$", symbol)
-    if not match:
-        return "", None, "", 0.0
-    exp_raw, side, strike_raw = match.groups()
-    exp_date = parse_iso_date(f"20{exp_raw[:2]}-{exp_raw[2:4]}-{exp_raw[4:6]}")
-    strike = option_float(strike_raw, 0.0) / 1000.0
-    root = symbol[: match.start()]
-    return root, exp_date, side, strike
-
-
-@st.cache_data(ttl=ALPACA_OPTIONS_CACHE_TTL_SEC, show_spinner=False)
-def fetch_alpaca_option_snapshot_liquidity(
-    underlying: str,
-    price: float,
-    min_dte: int,
-    max_dte: int,
-    strike_range_pct: float,
-    feed: str,
-) -> dict[str, Any]:
-    symbol = normalize_ticker_id(underlying)
-    if not ALPACA_KEY or not ALPACA_SECRET or not symbol or price <= 0:
-        return {}
-
-    requested_feed = str(feed or "auto").lower().strip()
-    feeds = ("opra", "indicative") if requested_feed == "auto" else (requested_feed,)
-    today = now_et().date()
-    min_days = max(0, int(min_dte))
-    max_days = max(min_days, int(max_dte))
-    strike_range = max(0.01, float(strike_range_pct)) / 100.0
-    strike_low = max(0.01, price * (1 - strike_range))
-    strike_high = max(strike_low + 0.01, price * (1 + strike_range))
-    best_info: dict[str, Any] = {}
-
-    for feed_name in feeds:
-        try:
-            resp = requests.get(
-                f"{ALPACA_BASE}/v1beta1/options/snapshots/{symbol}",
-                headers=ALPACA_HEADERS,
-                params={"limit": 1000, "feed": feed_name},
-                timeout=DATA_TIMEOUT_SEC,
-            )
-            if resp.status_code in {401, 403, 404}:
-                LOGGER.info("Alpaca option snapshots unavailable for %s on %s: %s", symbol, feed_name, resp.status_code)
-                continue
-            resp.raise_for_status()
-            payload = resp.json()
-            snapshots = payload.get("snapshots") or {}
-            if not isinstance(snapshots, dict):
-                snapshots = {}
-
-            quoted = 0
-            near_put_quoted = 0
-            opt_volume = 0
-            for contract_symbol, snapshot in snapshots.items():
-                if not isinstance(snapshot, dict):
-                    continue
-                opt_volume += option_int((snapshot.get("dailyBar") or {}).get("v"), 0)
-                quote = snapshot.get("latestQuote") or {}
-                if not isinstance(quote, dict) or not option_quote_is_live(quote):
-                    continue
-                quoted += 1
-                _, exp_date, side, strike = option_contract_parts(str(contract_symbol))
-                if side != "P" or exp_date is None or strike <= 0:
-                    continue
-                dte = (exp_date - today).days
-                if min_days <= dte <= max_days and strike_low <= strike <= strike_high:
-                    near_put_quoted += 1
-
-            info = {
-                "optionable": bool(snapshots),
-                "contracts": len(snapshots),
-                "quoted": quoted,
-                "near_put_quoted": near_put_quoted,
-                "opt_volume": opt_volume,
-                "feed": feed_name,
-                "tradeable": near_put_quoted >= SHORT_PUT_MIN_QUOTED_CONTRACTS,
-            }
-            if not best_info or near_put_quoted > int(best_info.get("near_put_quoted") or 0):
-                best_info = info
-            if info["tradeable"]:
-                break
-        except Exception as exc:
-            LOGGER.info("Alpaca option snapshots failed for %s on %s: %s", symbol, feed_name, exc)
-            continue
-    return best_info
-
-
-@st.cache_data(ttl=ALPACA_OPTIONS_CACHE_TTL_SEC * 30, show_spinner=False)
-def fetch_alpaca_put_contracts_for_underlying(
-    underlying: str,
+def options_contracts_batch(
+    symbols: tuple[str, ...],
     exp_gte: str,
     exp_lte: str,
-    strike_gte: float,
-    strike_lte: float,
-) -> list[dict[str, Any]]:
-    if not ALPACA_KEY or not ALPACA_SECRET or not underlying:
-        return []
+) -> tuple[dict[str, tuple[int, int]], set[str], str]:
+    """Одна пачка контрактов. → ({ТИКЕР: (call, put)}, негодные тикеры, статус).
 
-    params: dict[str, Any] = {
-        "underlying_symbols": underlying.upper(),
-        "status": "active",
-        "type": "put",
-        "expiration_date_gte": exp_gte,
-        "expiration_date_lte": exp_lte,
-        "strike_price_gte": f"{strike_gte:.2f}",
-        "strike_price_lte": f"{strike_lte:.2f}",
-        "limit": 1000,
-    }
-    contracts: list[dict[str, Any]] = []
+    Статус: "ok" — ответ получен, "invalid" — 422 по негодным тикерам,
+    "error" — сеть, лимит или отказ доступа. Пустой результат при "error"
+    НЕЛЬЗЯ понимать как «ни у кого нет опционов»."""
+    counts: dict[str, tuple[int, int]] = {}
     page_token = None
-    try:
-        for _ in range(4):
-            request_params = params.copy()
-            if page_token:
-                request_params["page_token"] = page_token
-            resp = requests.get(
+    for _ in range(MAX_BARS_PAGES):
+        params: dict[str, Any] = {
+            "underlying_symbols": ",".join(symbols),
+            "status": "active",
+            "expiration_date_gte": exp_gte,
+            "expiration_date_lte": exp_lte,
+            "limit": 10000,
+        }
+        if page_token:
+            params["page_token"] = page_token
+        try:
+            response = requests.get(
                 f"{ALPACA_TRADING_BASE}/v2/options/contracts",
                 headers=ALPACA_HEADERS,
-                params=request_params,
+                params=params,
                 timeout=DATA_TIMEOUT_SEC,
             )
-            if resp.status_code in {401, 403, 404}:
-                LOGGER.info("Alpaca option contracts unavailable for %s: %s", underlying, resp.status_code)
-                return []
-            resp.raise_for_status()
-            payload = resp.json()
-            raw_contracts = payload.get("option_contracts") or payload.get("contracts") or []
-            if isinstance(raw_contracts, list):
-                contracts.extend(item for item in raw_contracts if isinstance(item, dict))
-            page_token = payload.get("next_page_token")
-            if not page_token:
-                break
-    except Exception as exc:
-        LOGGER.info("Alpaca option contracts failed for %s: %s", underlying, exc)
-        return []
-    return contracts
+        except Exception as exc:
+            LOGGER.info("Alpaca options contracts request failed: %s", exc)
+            return {}, set(), "error"
 
-
-@st.cache_data(ttl=15, show_spinner=False)
-def fetch_alpaca_option_latest_quotes(contract_symbols: tuple[str, ...], feed: str) -> dict[str, dict[str, Any]]:
-    symbols = tuple(symbol.upper() for symbol in contract_symbols if symbol)
-    if not ALPACA_KEY or not ALPACA_SECRET or not symbols:
-        return {}
-
-    requested_feed = str(feed or "auto").lower().strip()
-    feeds = ("opra", "indicative") if requested_feed == "auto" else (requested_feed,)
-    quotes: dict[str, dict[str, Any]] = {}
-    for batch in chunks(list(symbols), 100):
-        batch_quotes: dict[str, dict[str, Any]] = {}
-        for feed_name in feeds:
+        if response.status_code == 422:
             try:
-                resp = requests.get(
-                    f"{ALPACA_BASE}/v1beta1/options/quotes/latest",
-                    headers=ALPACA_HEADERS,
-                    params={
-                        "symbols": ",".join(batch),
-                        "feed": feed_name,
-                    },
-                    timeout=DATA_TIMEOUT_SEC,
-                )
-                if resp.status_code in {401, 403, 404}:
-                    LOGGER.info("Alpaca option quotes unavailable on %s: %s", feed_name, resp.status_code)
-                    continue
-                resp.raise_for_status()
-                payload = resp.json()
-                raw_quotes = payload.get("quotes") or payload.get("latestQuotes") or {}
-                if isinstance(raw_quotes, dict):
-                    for symbol, quote in raw_quotes.items():
-                        if isinstance(quote, dict):
-                            batch_quotes[str(symbol).upper()] = quote
-                if batch_quotes:
-                    break
-            except Exception as exc:
-                LOGGER.info("Alpaca option quotes failed on %s: %s", feed_name, exc)
+                payload = response.json()
+            except Exception:
+                payload = None
+            return {}, invalid_underlying_symbols(payload, response.text), "invalid"
+        if response.status_code != 200:
+            LOGGER.info("Alpaca options contracts HTTP %s", response.status_code)
+            return {}, set(), "error"
+        try:
+            payload = response.json()
+        except Exception as exc:
+            LOGGER.info("Alpaca options contracts bad JSON: %s", exc)
+            return {}, set(), "error"
+
+        for contract in payload.get("option_contracts") or []:
+            if not isinstance(contract, dict):
                 continue
-        quotes.update(batch_quotes)
-    return quotes
+            symbol = option_underlying_symbol(contract)
+            if not symbol:
+                continue
+            calls, puts = counts.get(symbol, (0, 0))
+            kind = str(contract.get("type") or "").lower()
+            if kind == "call":
+                calls += 1
+            elif kind == "put":
+                puts += 1
+            counts[symbol] = (calls, puts)
+
+        page_token = payload.get("next_page_token")
+        if not page_token:
+            break
+    return counts, set(), "ok"
 
 
-def candidate_put_contracts(symbol: str, price: float, cfg: ScanConfig) -> list[dict[str, Any]]:
-    if price <= 0:
-        return []
+@st.cache_data(ttl=OPT_CONTRACTS_CACHE_TTL_SEC, show_spinner=False)
+def optionable_symbols(symbols: tuple[str, ...], day: str) -> tuple[dict[str, tuple[int, int]], int]:
+    """У каких бумаг есть живые опционы — ПАЧКАМИ, а не по одной.
+
+    → ({ТИКЕР: (сколько call, сколько put)}, сколько пачек не проверилось).
+
+    Эндпоинт принимает список через запятую, поэтому сотня кандидатов стоит
+    три запроса, а не сто.
+
+    Окно экспираций 60 дней выбрано замером 27.10 на 39 бумагах:
+      без границы      — 55 586 контрактов, 7 запросов, 4.0 сек;
+      окно 60 дней     — 26 482 контракта, 4 запроса, 1.8 сек, те же 24 бумаги;
+      окно 10 и 21 день теряет AVBP, BZAI, OFS, OPTT — у малых бумаг ближайшая
+      экспирация только месячная, недельных нет.
+    Шестьдесят дней — это ещё и ровно то, чем торгуют: контракт на овернайт или
+    на неделю-две берут из ближайших экспираций, а не из годовых.
+
+    day в аргументах нужен ТОЛЬКО для кэша: без него вчерашний ответ пережил бы
+    смену даты и отдавал бы экспирации, которых уже нет."""
+    clean = tuple(dict.fromkeys(
+        str(symbol or "").upper().strip() for symbol in symbols if str(symbol or "").strip()
+    ))
+    if not clean or not (ALPACA_KEY and ALPACA_SECRET):
+        return {}, 0
+
     today = now_et().date()
-    min_dte = max(0, int(cfg.short_put_min_dte))
-    max_dte = max(min_dte, int(cfg.short_put_max_dte))
-    exp_gte = (today + timedelta(days=min_dte)).isoformat()
-    exp_lte = (today + timedelta(days=max_dte)).isoformat()
-    strike_range = max(0.01, float(cfg.short_put_strike_range_pct)) / 100
-    strike_gte = max(0.01, price * (1 - strike_range))
-    strike_lte = max(strike_gte + 0.01, price * (1 + min(strike_range, 0.10)))
-    contracts = fetch_alpaca_put_contracts_for_underlying(symbol.upper(), exp_gte, exp_lte, strike_gte, strike_lte)
-    filtered: list[dict[str, Any]] = []
-    for contract in contracts:
-        if not bool(contract.get("tradable", True)):
-            continue
-        if str(contract.get("type") or contract.get("contract_type") or "put").lower() != "put":
-            continue
-        if option_underlying_symbol(contract) not in {"", symbol.upper()}:
-            continue
-        root_symbol = str(contract.get("root_symbol") or "").upper().strip()
-        if root_symbol and root_symbol != symbol.upper():
-            continue
-        size = str(contract.get("size") or contract.get("multiplier") or "100").strip()
-        if size and size not in {"100", "100.0"}:
-            continue
-        open_interest = option_int(contract.get("open_interest") or contract.get("openInterest"), 0)
-        if open_interest < int(cfg.short_put_min_open_interest):
-            continue
-        exp_date = parse_iso_date(contract.get("expiration_date") or contract.get("expirationDate"))
-        if exp_date is None:
-            continue
-        dte = (exp_date - today).days
-        if dte < min_dte or dte > max_dte:
-            continue
-        strike = option_float(contract.get("strike_price") or contract.get("strikePrice"), 0.0)
-        if strike <= 0:
-            continue
-        filtered.append(contract)
+    exp_gte = today.isoformat()
+    exp_lte = (today + timedelta(days=OPT_EXPIRY_WINDOW_DAYS)).isoformat()
 
-    filtered.sort(
-        key=lambda contract: (
-            option_int(contract.get("open_interest") or contract.get("openInterest"), 0),
-            -abs(option_float(contract.get("strike_price") or contract.get("strikePrice"), 0.0) - price),
-            str(contract.get("expiration_date") or ""),
-        ),
-        reverse=True,
-    )
-    return filtered[: max(1, int(cfg.short_put_max_contracts))]
+    found: dict[str, tuple[int, int]] = {}
+    failed_batches = 0
+    for batch in chunks(list(clean), OPT_BATCH_SYMBOLS):
+        pending: list[list[str]] = [list(batch)]
+        guard = 0
+        while pending and guard < 64:
+            guard += 1
+            group = pending.pop()
+            if not group:
+                continue
+            counts, bad, status = options_contracts_batch(tuple(group), exp_gte, exp_lte)
+            if status == "ok":
+                for symbol, pair in counts.items():
+                    calls, puts = found.get(symbol, (0, 0))
+                    found[symbol] = (calls + pair[0], puts + pair[1])
+                continue
+            if status == "invalid":
+                if bad:
+                    pending.append([item for item in group if item not in bad])
+                elif len(group) > 1:
+                    # 422 без разбора списка: ищем негодный тикер делением пополам,
+                    # чтобы из-за одного не потерять остальные тридцать девять.
+                    middle = len(group) // 2
+                    pending.append(group[:middle])
+                    pending.append(group[middle:])
+                continue
+            failed_batches += 1
+    return found, failed_batches
 
 
-def choose_best_put_contract(
-    symbol: str,
-    price: float,
-    contracts: list[dict[str, Any]],
-    quotes: dict[str, dict[str, Any]],
-    cfg: ScanConfig,
-) -> PutOptionMatch | None:
-    best: tuple[float, PutOptionMatch] | None = None
-    today = now_et().date()
-    for contract in contracts:
-        contract_symbol = option_contract_symbol(contract)
-        if not contract_symbol:
+@st.cache_data(ttl=OPT_CONTRACTS_CACHE_TTL_SEC, show_spinner=False)
+def shortable_universe(day: str) -> tuple[frozenset[str], frozenset[str]]:
+    """Какие бумаги вообще можно шортить. → (шортабельные, легко занять).
+
+    Один запрос на ВЕСЬ рынок: замер 29.10 — 14 349 бумаг за 0.4 секунды,
+    из них 5 229 шортабельных. Поштучно это были бы тысячи запросов.
+
+    Зачем это в режиме под шорт: примерно у каждой третьей падающей бумаги
+    шорта нет вовсе. Пример того же дня — CD падала два дня и опционы у неё
+    есть, а занять её нельзя. Без этой колонки такая бумага выглядит как
+    готовая идея на шорт, а на деле по ней доступны только путы.
+
+    day нужен ТОЛЬКО для кэша: список меняется от дня ко дню."""
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        return frozenset(), frozenset()
+    # Запрос идёт напрямую, а не через get_json_with_retry: этот эндпоинт
+    # отдаёт JSON-МАССИВ, а хелпер считает ответ-не-объект ошибкой и роняет
+    # запрос тремя повторами. Тот же приём уже используется в
+    # fetch_market_symbol_directory, которая ходит на этот же /v2/assets.
+    payload: Any = None
+    for base_url in dict.fromkeys((ALPACA_TRADING_BASE, "https://api.alpaca.markets")):
+        try:
+            response = requests.get(
+                f"{base_url}/v2/assets",
+                headers=ALPACA_HEADERS,
+                params={"status": "active", "asset_class": "us_equity"},
+                timeout=DATA_TIMEOUT_SEC * 2,
+            )
+            if response.status_code in {401, 403}:
+                continue
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, list) and payload:
+                break
+        except Exception as exc:
+            LOGGER.info("Alpaca assets failed on %s: %s", base_url, exc)
+            payload = None
+    if not isinstance(payload, list) or not payload:
+        return frozenset(), frozenset()
+    shortable: set[str] = set()
+    easy: set[str] = set()
+    for asset in payload:
+        if not isinstance(asset, dict):
             continue
-        quote = quotes.get(contract_symbol.upper(), {})
-        bid, ask, quote_time = option_quote_bid_ask(quote)
-        if bid < float(cfg.short_put_min_bid) or ask <= 0 or ask < bid:
+        symbol = str(asset.get("symbol") or "").upper().strip()
+        if not symbol:
             continue
-        mid = (bid + ask) / 2
-        if mid <= 0:
-            continue
-        spread_pct = (ask - bid) / mid * 100
-        if spread_pct > float(cfg.short_put_max_spread_pct):
-            continue
-        exp_raw = str(contract.get("expiration_date") or contract.get("expirationDate") or "")
-        exp_date = parse_iso_date(exp_raw)
-        if exp_date is None:
-            continue
-        dte = (exp_date - today).days
-        strike = option_float(contract.get("strike_price") or contract.get("strikePrice"), 0.0)
-        open_interest = option_int(contract.get("open_interest") or contract.get("openInterest"), 0)
-        if strike <= 0 or open_interest < int(cfg.short_put_min_open_interest):
-            continue
-        distance_pct = abs(strike - price) / price * 100 if price > 0 else 100.0
-        score = open_interest * 1.0 - spread_pct * 8.0 - distance_pct * 5.0 - abs(dte - 21) * 0.2
-        match = PutOptionMatch(
-            contract_symbol=contract_symbol,
-            expiration_date=exp_date.isoformat(),
-            dte=dte,
-            strike=strike,
-            open_interest=open_interest,
-            bid=bid,
-            ask=ask,
-            spread_pct=spread_pct,
-            quote_time=quote_time,
-        )
-        if best is None or score > best[0]:
-            best = (score, match)
-    return best[1] if best else None
+        if asset.get("shortable"):
+            shortable.add(symbol)
+        if asset.get("easy_to_borrow"):
+            easy.add(symbol)
+    return frozenset(shortable), frozenset(easy)
 
 
-def annotate_row_with_put(row: dict[str, Any], match: PutOptionMatch) -> dict[str, Any]:
-    next_row = row.copy()
-    next_row.update(
-        {
-            "_put_contract": match.contract_symbol,
-            "_put_expiration": match.expiration_date,
-            "_put_dte": match.dte,
-            "_put_strike": match.strike,
-            "_put_open_interest": match.open_interest,
-            "_put_bid": match.bid,
-            "_put_ask": match.ask,
-            "_put_spread_pct": match.spread_pct,
-            "_put_quote_time": match.quote_time,
-            "Put": f"{match.contract_symbol} · {match.dte}д · ${match.strike:g}",
-            "Put OI": match.open_interest,
-            "Put spread": round(match.spread_pct, 1),
-        }
-    )
-    return next_row
+def short_availability_label(symbol: str, shortable: frozenset[str], easy: frozenset[str]) -> str:
+    if not shortable:
+        return ""      # справочник не загрузился — молчим, а не врём «нельзя»
+    if symbol in shortable:
+        return "шорт ok · легко занять" if symbol in easy else "шорт ok"
+    return "только путы"
 
 
-def annotate_row_with_put_chain(row: dict[str, Any], chain_info: dict[str, Any]) -> dict[str, Any]:
-    if not chain_info:
-        return row
-    next_row = row.copy()
-    near_put_quoted = int(chain_info.get("near_put_quoted") or 0)
-    quoted = int(chain_info.get("quoted") or 0)
-    opt_volume = int(chain_info.get("opt_volume") or 0)
-    next_row.update(
-        {
-            "_put_chain_contracts": int(chain_info.get("contracts") or 0),
-            "_put_chain_quoted": quoted,
-            "_put_chain_near_put_quoted": near_put_quoted,
-            "_put_chain_volume": opt_volume,
-            "_put_chain_feed": str(chain_info.get("feed") or ""),
-        }
-    )
-    if not next_row.get("Put"):
-        next_row["Put"] = f"цепочка: {near_put_quoted} живых put"
-    return next_row
-
-
-def filter_rows_with_tradable_puts(
+def filter_rows_with_options(
     rows: list[dict[str, Any]],
     cfg: ScanConfig,
     status_box: Any | None = None,
 ) -> list[dict[str, Any]]:
-    if cfg.scanner_mode != SCANNER_SHORT_PUT or not rows:
+    """Оставляет только бумаги, у которых есть и call, и put.
+
+    Проверка идёт ПОСЛЕ скана и пачками: сотня найденных бумаг стоит три
+    запроса. Если источник опционов недоступен целиком — выдачу НЕ обнуляем,
+    а честно говорим об этом на экране и показываем всё найденное. Пустой
+    ответ сломанного источника и «ни у кого нет опционов» — разные вещи."""
+    if cfg.scanner_mode != SCANNER_DOWN_OPT or not rows:
         return rows
     if not (ALPACA_KEY and ALPACA_SECRET):
         if status_box is not None:
-            status_box.caption("Short/Put: нет ALPACA_KEY / ALPACA_SECRET для проверки опционов.")
-        return []
+            status_box.caption(
+                "Опционы не проверены: нет ALPACA_KEY / ALPACA_SECRET. Показаны все найденные бумаги."
+            )
+        return rows
 
-    contract_pool: dict[str, list[dict[str, Any]]] = {}
-    contract_symbols: list[str] = []
-    chain_pool: dict[str, dict[str, Any]] = {}
-    total = len(rows)
-    for idx, row in enumerate(rows, start=1):
-        symbol = normalize_ticker_id(row.get("Тикер"))
-        price = safe_float(row.get("Цена"))
-        if not symbol or price <= 0:
-            continue
+    symbols = tuple(dict.fromkeys(
+        normalize_ticker_id(row.get("Тикер"))
+        for row in rows
+        if normalize_ticker_id(row.get("Тикер"))
+    ))
+    if status_box is not None:
+        status_box.caption(f"Проверяю опционы: {len(symbols)} бумаг пачками по {OPT_BATCH_SYMBOLS}...")
+
+    day = now_et().date().isoformat()
+    counts, failed_batches = optionable_symbols(symbols, day)
+    shortable, easy_to_borrow = shortable_universe(day)
+    if not counts:
+        message = "Источник опционов не ответил. Показаны все найденные бумаги без проверки опционов."
+        remember_error(message)
         if status_box is not None:
-            status_box.caption(f"Проверяю put-опционы {idx}/{total}: {symbol}")
-        contracts = candidate_put_contracts(symbol, price, cfg)
-        contract_pool[symbol] = contracts
-        contract_symbols.extend(option_contract_symbol(contract) for contract in contracts)
-        chain_pool[symbol] = fetch_alpaca_option_snapshot_liquidity(
-            symbol,
-            price,
-            cfg.short_put_min_dte,
-            cfg.short_put_max_dte,
-            cfg.short_put_strike_range_pct,
-            cfg.short_put_feed,
-        )
+            status_box.caption(message)
+        return rows
 
-    unique_contract_symbols = tuple(dict.fromkeys(symbol for symbol in contract_symbols if symbol))
-    quotes = fetch_alpaca_option_latest_quotes(unique_contract_symbols, cfg.short_put_feed)
-    filtered: list[dict[str, Any]] = []
+    kept: list[dict[str, Any]] = []
     for row in rows:
         symbol = normalize_ticker_id(row.get("Тикер"))
-        price = safe_float(row.get("Цена"))
-        match = choose_best_put_contract(symbol, price, contract_pool.get(symbol, []), quotes, cfg)
-        if match is not None:
-            filtered.append(annotate_row_with_put_chain(annotate_row_with_put(row, match), chain_pool.get(symbol, {})))
-        elif bool(chain_pool.get(symbol, {}).get("tradeable")):
-            filtered.append(annotate_row_with_put_chain(row, chain_pool.get(symbol, {})))
+        calls, puts = counts.get(symbol, (0, 0))
+        if calls <= 0 or puts <= 0:
+            continue
+        next_row = row.copy()
+        next_row["Опционы"] = f"{calls} call · {puts} put"
+        short_label = short_availability_label(symbol, shortable, easy_to_borrow)
+        if short_label:
+            next_row["Шорт"] = short_label
+        kept.append(next_row)
+
+    if failed_batches:
+        remember_error(f"Опционы: не проверилось пачек — {failed_batches}. Часть бумаг могла выпасть.")
     if status_box is not None:
-        status_box.caption(f"Short/Put: прошло опционы {len(filtered)}/{len(rows)}")
-    return filtered
+        tail = f" · не проверилось пачек: {failed_batches}" if failed_batches else ""
+        status_box.caption(f"С живыми опционами: {len(kept)} из {len(rows)}{tail}")
+    return kept
 
 
 @st.cache_data(ttl=ALPACA_CACHE_TTL_SEC, show_spinner=False)
@@ -3188,145 +3083,20 @@ def fetch_alpaca_minute_bars_batch(
     return out
 
 
-def fetch_alpaca_minute_bars(
-    ticker: str,
-    count: int = MINUTE_CHART_VISIBLE_CANDLES,
-    realtime: bool = True,
-) -> pd.DataFrame | None:
-    symbol = str(ticker or "").upper().strip()
-    if not symbol:
-        return None
-    return fetch_alpaca_minute_bars_batch((symbol,), count, realtime).get(symbol)
-
-
-@st.cache_data(ttl=ALPACA_CACHE_TTL_SEC, show_spinner=False)
-def fetch_alpaca_intraday_bars_batch(
-    symbols: tuple[str, ...],
-    start_iso: str,
-    end_iso: str,
-    realtime: bool = True,
-) -> dict[str, pd.DataFrame]:
-    clean_symbols = tuple(dict.fromkeys(str(symbol or "").upper().strip() for symbol in symbols if str(symbol or "").strip()))
-    if not clean_symbols or not ALPACA_KEY or not ALPACA_SECRET:
-        return {}
-
-    params = {
-        "symbols": ",".join(clean_symbols),
-        "timeframe": "1Min",
-        "start": start_iso,
-        "end": end_iso,
-        "limit": 10000,
-        "adjustment": "split",
-        "feed": "sip",
-        "sort": "asc",
-    }
-
-    bars_by_symbol: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in clean_symbols}
-    page_token = None
-    try:
-        for _ in range(MAX_BARS_PAGES):
-            request_params = params.copy()
-            if page_token:
-                request_params["page_token"] = page_token
-            resp = requests.get(
-                f"{ALPACA_BASE}/v2/stocks/bars",
-                headers=ALPACA_HEADERS,
-                params=request_params,
-                timeout=DATA_TIMEOUT_SEC,
-            )
-            if resp.status_code in {401, 403}:
-                LOGGER.info("Alpaca intraday auth/permission failed: %s", resp.status_code)
-                return {}
-            resp.raise_for_status()
-            payload = resp.json()
-            raw_bars = payload.get("bars") or {}
-            if isinstance(raw_bars, dict):
-                for symbol, rows in raw_bars.items():
-                    symbol_key = str(symbol).upper()
-                    if isinstance(rows, list):
-                        bars_by_symbol.setdefault(symbol_key, []).extend(rows)
-            page_token = payload.get("next_page_token")
-            if not page_token:
-                break
-        if page_token:
-            LOGGER.info("Alpaca intraday pagination stopped after %s pages.", MAX_BARS_PAGES)
-    except Exception as exc:
-        LOGGER.info("Alpaca intraday batch failed: %s", exc)
-        return {}
-
-    out: dict[str, pd.DataFrame] = {}
-    source_label = f"{alpaca_mode_label(realtime)} 1Min"
-    for symbol, rows in bars_by_symbol.items():
-        if not rows:
-            continue
-        normalized = normalize_ohlcv(pd.DataFrame(rows), source_label)
-        if normalized is not None and len(normalized) >= 2:
-            out[symbol] = normalized
-    return out
-
-
-def intraday_scan_window(cfg: ScanConfig, alpaca_realtime: bool) -> tuple[datetime, datetime]:
-    end_utc = alpaca_sip_end_utc(alpaca_realtime)
-    end_et = end_utc.astimezone(MARKET_TZ)
-    open_hour = 4 if cfg.momentum_include_extended_hours else 9
-    open_minute = 0 if cfg.momentum_include_extended_hours else 30
-    session_start_et = end_et.replace(hour=open_hour, minute=open_minute, second=0, microsecond=0)
-    if end_et < session_start_et:
-        lookback = max(
-            90,
-            int(cfg.momentum_volume_baseline_minutes)
-            + int(cfg.momentum_confirm_minutes)
-            + int(cfg.momentum_fast_minutes)
-            + 30,
-        )
-        session_start_et = end_et - timedelta(minutes=lookback)
-    return session_start_et.astimezone(timezone.utc), end_utc
-
-
-def momentum_feed_reference_time(reference_time: datetime, alpaca_realtime: bool) -> datetime:
-    if alpaca_realtime:
-        return reference_time
-    return reference_time - timedelta(minutes=ALPACA_SIP_DELAY_MINUTES)
-
-
-def load_momentum_bars(
-    ticker_infos: list[dict[str, Any]],
-    cfg: ScanConfig,
-    data_source: str,
-    alpaca_realtime: bool,
-    progress_box: Any,
-    status_box: Any,
-    scan_started_at: datetime | None = None,
-) -> dict[str, pd.DataFrame]:
-    bars: dict[str, pd.DataFrame] = {}
-    if data_source not in {DATA_SOURCE_ALPACA_SIP, DATA_SOURCE_AUTO}:
-        status_box.caption(f"Импульс + объём работает только через Alpaca SIP 1Min.{elapsed_scan_suffix(scan_started_at)}")
-        progress_box.progress(0.7)
-        return bars
-    if not (ALPACA_KEY and ALPACA_SECRET):
-        status_box.caption(f"Alpaca SIP 1Min недоступен: нет ALPACA_KEY / ALPACA_SECRET.{elapsed_scan_suffix(scan_started_at)}")
-        progress_box.progress(0.7)
-        return bars
-
-    symbols = [str(item["ticker"]).upper() for item in ticker_infos]
-    start_utc, end_utc = intraday_scan_window(cfg, alpaca_realtime)
-    start_iso = rfc3339_utc(start_utc)
-    end_iso = rfc3339_utc(end_utc)
-    batches = list(chunks(symbols, 25))
-    alpaca_label = alpaca_mode_label(alpaca_realtime)
-    for idx, batch in enumerate(batches, start=1):
-        status_box.caption(
-            f"Загружаю {alpaca_label} 1Min · пачка {idx}/{len(batches)} · готово: {len(bars)}"
-            f"{elapsed_scan_suffix(scan_started_at)}"
-        )
-        bars.update(fetch_alpaca_intraday_bars_batch(tuple(batch), start_iso, end_iso, alpaca_realtime))
-        progress_box.progress(0.7 * idx / max(len(batches), 1))
-
-    progress_box.progress(0.7)
-    return bars
-
-
 # ── SIGNAL LOGIC ──────────────────────────────────────────────────
+@dataclass(frozen=True)
+class TwoDownSetup:
+    prev_drop_pct: float        # вчерашняя свеча: закрытие против своего открытия
+    today_drop_pct: float       # сегодня против вчерашнего закрытия
+    volume_vs_prev: float       # сегодняшний объём к вчерашнему
+    close_position_pct: float   # где цена внутри сегодняшнего диапазона: 0 = у лоя
+    volume_mult: float          # объём к средней, только для сортировки
+    avg_volume: float
+    low: float
+    high: float
+    body_pct: float
+
+
 @dataclass(frozen=True)
 class BaseImpulse:
     low: float
@@ -3350,94 +3120,6 @@ class RvolSetup:
     move_pct: float
     day_range_pct: float
     range_days: int
-
-
-@dataclass(frozen=True)
-class VcpSetup:
-    low: float
-    high: float
-    base_width_pct: float
-    recent_width_pct: float
-    first_width_pct: float
-    dry_volume_ratio: float
-    current_volume_ratio: float
-    distance_to_high_pct: float
-    move_pct: float
-
-
-@dataclass(frozen=True)
-class SpringSetup:
-    support: float
-    latest_low: float
-    support_range_pct: float
-    break_pct: float
-    reclaim_pct: float
-    close_position_pct: float
-    volume_mult: float
-    from_low_pct: float
-    move_pct: float
-
-
-@dataclass(frozen=True)
-class ShortPutSetup:
-    support: float
-    base_low: float
-    base_high: float
-    base_width_pct: float
-    break_pct: float
-    extension_pct: float
-    close_position_pct: float
-    volume_mult: float
-    vol_max: float
-    vol_avg: float
-    move_pct: float
-    body_pct: float
-
-
-@dataclass(frozen=True)
-class PutOptionMatch:
-    contract_symbol: str
-    expiration_date: str
-    dte: int
-    strike: float
-    open_interest: int
-    bid: float
-    ask: float
-    spread_pct: float
-    quote_time: str
-
-
-@dataclass(frozen=True)
-class MomentumPulse:
-    direction: str
-    price: float
-    move_5m_pct: float
-    move_15m_pct: float
-    rvol_5m: float
-    rvol_15m: float
-    volume_5m: float
-    volume_15m: float
-    baseline_5m: float
-    baseline_15m: float
-    dollar_5m: float
-    dollar_15m: float
-    dollar_day: float
-    vwap: float
-    vwap_distance_pct: float
-    ema9: float
-    ema20: float
-    bar_age_minutes: float
-    breakout_confirmed: bool
-    vwap_aligned: bool
-    ema_aligned: bool
-    directional_bars_confirmed: bool
-    early_volume_wave: bool
-    volume_acceleration: float
-    prior_fast_rvol: float
-    recent_prior_max_rvol: float
-    fast_volume_share_pct: float
-    multi_minute_volume_confirmed: bool
-    quality_checks: int
 
 
 def build_base_impulse(df: pd.DataFrame, cfg: ScanConfig) -> BaseImpulse | None:
@@ -3504,6 +3186,101 @@ def build_base_impulse(df: pd.DataFrame, cfg: ScanConfig) -> BaseImpulse | None:
     )
 
 
+def travel_from_prev_close(df: pd.DataFrame) -> float:
+    """Максимальный ход сегодняшнего дня от ВЧЕРАШНЕГО ЗАКРЫТИЯ, в процентах.
+
+    Берём самое далёкое отклонение сегодняшнего High или Low от вчерашнего
+    закрытия — с хвостами, а не по закрытию. Бумага могла слетать вверх на 40%
+    и вернуться: закрытие покажет спокойные +3%, а поезд уже ушёл.
+
+    Формула живёт в ОДНОМ месте намеренно: её читают и фильтр режима, и строка
+    результата, и раздвоение дало бы расхождение цифры на экране и в отсеве."""
+    if df is None or len(df) < 2:
+        return 0.0
+    latest = df.iloc[-1]
+    prev_close = float(df.iloc[-2]["Close"])
+    high = float(latest["High"])
+    low = float(latest["Low"])
+    if prev_close <= 0 or low <= 0 or high < low:
+        return 0.0
+    return max(abs(high - prev_close), abs(low - prev_close)) / prev_close * 100
+
+
+def build_two_down_setup(df: pd.DataFrame, cfg: ScanConfig) -> TwoDownSetup | None:
+    """Вчера свеча закрылась вниз, сегодня бумага внизу. Плюс объём, если нужен.
+
+    ВЧЕРА считается по САМОЙ вчерашней свече: закрытие ниже своего открытия,
+    то есть красная свеча. Позавчерашний день в условии не участвует — бумага
+    могла открыться гэпом вверх и весь день сливаться, это всё равно «пошла вниз».
+
+    СЕГОДНЯ — текущая цена ниже вчерашнего закрытия. Последняя свеча ещё не
+    закрыта, поэтому это ровно «на момент поиска»; под закрытие рынка это и
+    есть закрытие дня.
+
+    «Вчера» — предыдущий РАБОЧИЙ день: дневные свечи Alpaca идут только по
+    торговым дням, поэтому в понедельник сравнение само уходит на пятницу,
+    а после праздника — на предпраздничный день.
+
+    ОБЪЁМ сравнивается с ВЧЕРАШНИМ. При cfg.down_volume_mult = 0 не проверяется
+    вовсе, при 1 требуется не меньше вчерашнего, при 2 — вдвое больше."""
+    if df is None or len(df) < 2:
+        return None
+
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+    close = float(latest["Close"])
+    latest_open = float(latest["Open"])
+    latest_high = float(latest["High"])
+    latest_low = float(latest["Low"])
+    latest_volume = float(latest["Volume"])
+    prev_open = float(prev["Open"])
+    prev_close = float(prev["Close"])
+    prev_volume = float(prev["Volume"])
+    if min(close, latest_open, latest_low, prev_open, prev_close) <= 0:
+        return None
+    if latest_high < latest_low or latest_volume <= 0:
+        return None
+
+    # Вчера: красная свеча. Сегодня: ниже вчерашнего закрытия. Строго, без
+    # допусков: день «ровно в ноль» падением не считается.
+    prev_drop_pct = (prev_close - prev_open) / prev_open * 100
+    today_drop_pct = (close - prev_close) / prev_close * 100
+    if prev_drop_pct >= 0 or today_drop_pct >= 0:
+        return None
+
+    volume_vs_prev = (latest_volume / prev_volume) if prev_volume > 0 else 0.0
+    if cfg.down_volume_mult > 0:
+        # Нет вчерашнего объёма — сравнивать не с чем, бумагу не берём.
+        if prev_volume <= 0 or volume_vs_prev < float(cfg.down_volume_mult):
+            return None
+
+    day_range = latest_high - latest_low
+    close_position_pct = (close - latest_low) / day_range * 100 if day_range > 0 else 50.0
+
+    avg_window = pd.to_numeric(df["Volume"].iloc[-(DOWN_OPT_VOLUME_DAYS + 1) : -1], errors="coerce")
+    avg_window = avg_window[avg_window > 0]
+    avg_volume = float(avg_window.mean()) if len(avg_window) else 0.0
+    volume_mult = (latest_volume / avg_volume) if avg_volume > 0 else 0.0
+
+    window = df.iloc[-(DOWN_OPT_RANGE_DAYS + 1) : -1]
+    low = float(pd.to_numeric(window["Low"], errors="coerce").min())
+    high = float(pd.to_numeric(window["High"], errors="coerce").max())
+    if not (low > 0 and high > low):
+        low, high = latest_low, latest_high
+
+    return TwoDownSetup(
+        prev_drop_pct=prev_drop_pct,
+        today_drop_pct=today_drop_pct,
+        volume_vs_prev=volume_vs_prev,
+        close_position_pct=close_position_pct,
+        volume_mult=volume_mult,
+        avg_volume=avg_volume,
+        low=low,
+        high=high,
+        body_pct=abs(close - latest_open) / latest_open * 100,
+    )
+
+
 def build_rvol_setup(df: pd.DataFrame, cfg: ScanConfig) -> RvolSetup | None:
     avg_days = int(cfg.rvol_avg_days)
     if avg_days < 5 or len(df) < avg_days + 2:
@@ -3519,16 +3296,9 @@ def build_rvol_setup(df: pd.DataFrame, cfg: ScanConfig) -> RvolSetup | None:
     if price <= 0 or volume <= 0 or prev_close <= 0 or latest_low <= 0 or latest_high < latest_low:
         return None
 
-    day_range_pct = max(
-        abs(latest_high - prev_close),
-        abs(latest_low - prev_close),
-    ) / prev_close * 100
-    if (
-        cfg.rvol_day_range_filter_enabled
-        and cfg.rvol_max_day_range_pct > 0
-        and day_range_pct > cfg.rvol_max_day_range_pct
-    ):
-        return None
+    # Сам ход тут только считается. Отсекает его detect_signal — он один
+    # накрывает обе линейки режима, а не только эту.
+    day_range_pct = travel_from_prev_close(df)
 
     avg_window = pd.to_numeric(df["Volume"].iloc[-(avg_days + 1) : -1], errors="coerce")
     avg_window = avg_window[avg_window > 0]
@@ -3561,534 +3331,6 @@ def build_rvol_setup(df: pd.DataFrame, cfg: ScanConfig) -> RvolSetup | None:
         move_pct=move_pct,
         day_range_pct=day_range_pct,
         range_days=range_days,
-    )
-
-
-def pct_range(frame: pd.DataFrame) -> float:
-    if frame.empty:
-        return 0.0
-    low = float(pd.to_numeric(frame["Low"], errors="coerce").min())
-    high = float(pd.to_numeric(frame["High"], errors="coerce").max())
-    if low <= 0 or high <= low:
-        return 0.0
-    return (high - low) / low * 100
-
-
-def build_vcp_setup(df: pd.DataFrame, cfg: ScanConfig) -> VcpSetup | None:
-    lookback = int(cfg.vcp_days)
-    if lookback < 30 or len(df) < lookback + 2:
-        return None
-
-    window = df.iloc[-(lookback + 1) : -1].copy()
-    if len(window) < lookback:
-        return None
-
-    third_size = len(window) // 3
-    thirds = [
-        window.iloc[:third_size],
-        window.iloc[third_size : third_size * 2],
-        window.iloc[third_size * 2 :],
-    ]
-    thirds = [part for part in thirds if not part.empty]
-    if len(thirds) != 3:
-        return None
-
-    first_width = pct_range(thirds[0])
-    recent_width = pct_range(thirds[-1])
-    base_width = pct_range(window)
-    if first_width <= 0 or recent_width <= 0 or base_width <= 0:
-        return None
-    if base_width > cfg.vcp_max_base_width_pct:
-        return None
-    if recent_width > cfg.vcp_max_recent_width_pct:
-        return None
-
-    required_recent_width = first_width * (1 - cfg.vcp_min_compression_pct / 100)
-    if recent_width > required_recent_width:
-        return None
-
-    latest = df.iloc[-1]
-    close = float(latest["Close"])
-    prev_close = float(df.iloc[-2]["Close"])
-    base_low = float(window["Low"].min())
-    base_high = float(window["High"].max())
-    if close <= 0 or prev_close <= 0 or base_high <= base_low:
-        return None
-
-    distance_to_high = (base_high - close) / base_high * 100
-    if distance_to_high < -2.0 or distance_to_high > cfg.vcp_near_high_pct:
-        return None
-
-    older_volume = pd.to_numeric(pd.concat([thirds[0]["Volume"], thirds[1]["Volume"]]), errors="coerce")
-    recent_volume = pd.to_numeric(thirds[-1]["Volume"], errors="coerce")
-    older_avg = float(older_volume[older_volume > 0].mean()) if not older_volume.empty else 0.0
-    recent_avg = float(recent_volume[recent_volume > 0].mean()) if not recent_volume.empty else 0.0
-    if older_avg <= 0 or recent_avg <= 0:
-        return None
-
-    dry_ratio = recent_avg / older_avg
-    if dry_ratio > cfg.vcp_dry_volume_ratio:
-        return None
-
-    current_volume = float(latest["Volume"])
-    current_volume_ratio = current_volume / recent_avg if recent_avg > 0 else 0.0
-    move_pct = (close - prev_close) / prev_close * 100
-    return VcpSetup(
-        low=base_low,
-        high=base_high,
-        base_width_pct=base_width,
-        recent_width_pct=recent_width,
-        first_width_pct=first_width,
-        dry_volume_ratio=dry_ratio,
-        current_volume_ratio=current_volume_ratio,
-        distance_to_high_pct=distance_to_high,
-        move_pct=move_pct,
-    )
-
-
-def build_spring_setup(df: pd.DataFrame, cfg: ScanConfig) -> SpringSetup | None:
-    support_days = int(cfg.spring_support_days)
-    low_days = int(cfg.spring_low_days)
-    required = max(support_days, low_days)
-    if support_days < 20 or len(df) < required + 2:
-        return None
-
-    support_window = df.iloc[-(support_days + 1) : -1].copy()
-    if len(support_window) < support_days:
-        return None
-
-    latest = df.iloc[-1]
-    prev_close = float(df.iloc[-2]["Close"])
-    latest_open = float(latest["Open"])
-    latest_high = float(latest["High"])
-    latest_low = float(latest["Low"])
-    latest_close = float(latest["Close"])
-    latest_volume = float(latest["Volume"])
-    if min(latest_open, latest_high, latest_low, latest_close, prev_close) <= 0 or latest_volume <= 0:
-        return None
-    if latest_high <= latest_low:
-        return None
-
-    support = float(support_window["Low"].min())
-    support_high = float(support_window["High"].max())
-    if support <= 0 or support_high <= support:
-        return None
-
-    break_pct = (support - latest_low) / support * 100
-    if break_pct < cfg.spring_break_pct:
-        return None
-
-    reclaim_pct = (latest_close - support) / support * 100
-    if reclaim_pct < cfg.spring_reclaim_pct:
-        return None
-
-    close_position = (latest_close - latest_low) / (latest_high - latest_low) * 100
-    if close_position < cfg.spring_close_position_pct:
-        return None
-
-    ref_volume = pd.to_numeric(support_window["Volume"], errors="coerce")
-    ref_volume = ref_volume[ref_volume > 0]
-    if ref_volume.empty:
-        return None
-    volume_ref = float(ref_volume.mean())
-    volume_mult = latest_volume / volume_ref if volume_ref > 0 else 0.0
-    if volume_mult < cfg.spring_volume_mult:
-        return None
-
-    long_window = df.tail(low_days).copy()
-    long_low = float(long_window["Low"].min())
-    from_low_pct = (latest_close - long_low) / long_low * 100 if long_low > 0 else 999.0
-    if from_low_pct > cfg.spring_max_from_low_pct:
-        return None
-
-    move_pct = (latest_close - prev_close) / prev_close * 100
-    support_range_pct = (support_high - support) / support * 100
-    return SpringSetup(
-        support=support,
-        latest_low=latest_low,
-        support_range_pct=support_range_pct,
-        break_pct=break_pct,
-        reclaim_pct=reclaim_pct,
-        close_position_pct=close_position,
-        volume_mult=volume_mult,
-        from_low_pct=from_low_pct,
-        move_pct=move_pct,
-    )
-
-
-def build_short_put_setup(df: pd.DataFrame, cfg: ScanConfig) -> ShortPutSetup | None:
-    lookback = int(cfg.short_base_days)
-    if lookback < 5 or len(df) < lookback + 2:
-        return None
-
-    window = df.iloc[-(lookback + 1) : -1].copy()
-    if len(window) < lookback:
-        return None
-
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
-    prev_close = float(prev["Close"])
-    latest_open = float(latest["Open"])
-    latest_high = float(latest["High"])
-    latest_low = float(latest["Low"])
-    latest_close = float(latest["Close"])
-    latest_volume = float(latest["Volume"])
-    if min(prev_close, latest_open, latest_high, latest_low, latest_close) <= 0 or latest_volume <= 0:
-        return None
-    if latest_high <= latest_low:
-        return None
-
-    base_low = float(pd.to_numeric(window["Low"], errors="coerce").min())
-    base_high = float(pd.to_numeric(window["High"], errors="coerce").max())
-    if base_low <= 0 or base_high <= base_low:
-        return None
-
-    base_width_pct = (base_high - base_low) / base_low * 100
-    if cfg.short_channel_enabled and cfg.short_max_base_width_pct > 0 and base_width_pct > cfg.short_max_base_width_pct:
-        return None
-
-    volumes = pd.to_numeric(window["Volume"], errors="coerce")
-    volumes = volumes[volumes > 0]
-    if len(volumes) < lookback:
-        return None
-    vol_max = float(volumes.max())
-    vol_avg = float(volumes.mean())
-    if vol_max <= 0:
-        return None
-    volume_mult = latest_volume / vol_max
-    if volume_mult < cfg.short_volume_mult:
-        return None
-
-    move_pct = (latest_close - prev_close) / prev_close * 100
-    if move_pct > -abs(cfg.short_min_drop_pct):
-        return None
-
-    if latest_close >= latest_open:
-        return None
-
-    close_position = (latest_close - latest_low) / (latest_high - latest_low) * 100
-    if close_position > cfg.short_close_position_pct:
-        return None
-
-    support = base_low
-    break_pct = (support - latest_close) / support * 100 if support > 0 else 0.0
-    if cfg.short_channel_enabled:
-        if break_pct < cfg.short_break_buffer_pct:
-            return None
-    else:
-        break_pct = max(0.0, break_pct)
-
-    body_pct = abs(latest_close - latest_open) / latest_open * 100
-    extension_pct = (support - latest_close) / support * 100 if support > 0 else 0.0
-    return ShortPutSetup(
-        support=support,
-        base_low=base_low,
-        base_high=base_high,
-        base_width_pct=base_width_pct,
-        break_pct=break_pct,
-        extension_pct=max(0.0, extension_pct),
-        close_position_pct=close_position,
-        volume_mult=volume_mult,
-        vol_max=vol_max,
-        vol_avg=vol_avg,
-        move_pct=move_pct,
-        body_pct=body_pct,
-    )
-
-
-def momentum_intraday_frame(df: pd.DataFrame, cfg: ScanConfig, reference_time: datetime) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    data = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"]).copy()
-    if data.empty or not isinstance(data.index, pd.DatetimeIndex):
-        return pd.DataFrame()
-
-    index = pd.DatetimeIndex(data.index)
-    if index.tz is None:
-        index = index.tz_localize(timezone.utc)
-    index = index.tz_convert(MARKET_TZ)
-    data.index = index
-
-    ref_ts = pd.Timestamp(reference_time)
-    if ref_ts.tzinfo is None:
-        ref_ts = ref_ts.tz_localize(MARKET_TZ)
-    else:
-        ref_ts = ref_ts.tz_convert(MARKET_TZ)
-    data = data[data.index <= ref_ts + pd.Timedelta(minutes=1)]
-
-    if not cfg.momentum_include_extended_hours:
-        minute_of_day = data.index.hour * 60 + data.index.minute
-        data = data[(minute_of_day >= 9 * 60 + 30) & (minute_of_day < 16 * 60)]
-
-    return data.sort_index()
-
-
-def recent_intraday_window(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
-    if df.empty:
-        return df
-    latest_ts = df.index[-1]
-    cutoff = latest_ts - pd.Timedelta(minutes=max(1, int(minutes)))
-    return df[df.index > cutoff]
-
-
-def rolling_volume_baseline(prior: pd.DataFrame, window_minutes: int) -> float:
-    if prior.empty:
-        return 0.0
-    volume = pd.to_numeric(prior["Volume"], errors="coerce").fillna(0)
-    volume = volume[volume >= 0]
-    if volume.empty:
-        return 0.0
-
-    window = max(1, int(window_minutes))
-    min_periods = max(2, min(window, max(2, window // 2)))
-    rolling = volume.rolling(window, min_periods=min_periods).sum().dropna()
-    if not rolling.empty:
-        return max(float(rolling.tail(30).median()), 1.0)
-
-    positive = volume[volume > 0]
-    if positive.empty:
-        return 0.0
-    return max(float(positive.tail(max(5, window)).median()) * window, 1.0)
-
-
-def dollar_volume(frame: pd.DataFrame) -> float:
-    if frame.empty:
-        return 0.0
-    close = pd.to_numeric(frame["Close"], errors="coerce").fillna(0)
-    volume = pd.to_numeric(frame["Volume"], errors="coerce").fillna(0)
-    return float((close * volume).sum())
-
-
-def intraday_vwap(df: pd.DataFrame) -> float:
-    if df.empty:
-        return 0.0
-    volume = pd.to_numeric(df["Volume"], errors="coerce").fillna(0)
-    total_volume = float(volume.sum())
-    if total_volume <= 0:
-        return 0.0
-    typical = (
-        pd.to_numeric(df["High"], errors="coerce").fillna(0)
-        + pd.to_numeric(df["Low"], errors="coerce").fillna(0)
-        + pd.to_numeric(df["Close"], errors="coerce").fillna(0)
-    ) / 3
-    return float((typical * volume).sum() / total_volume)
-
-
-def intraday_move_pct(frame: pd.DataFrame, latest_close: float) -> float:
-    if frame.empty:
-        return 0.0
-    start_open = float(frame.iloc[0]["Open"])
-    if start_open <= 0:
-        return 0.0
-    return (latest_close - start_open) / start_open * 100
-
-
-def build_momentum_pulse(
-    df: pd.DataFrame,
-    cfg: ScanConfig,
-    reference_time: datetime,
-) -> MomentumPulse | None:
-    data = momentum_intraday_frame(df, cfg, reference_time)
-    min_bars = max(12, int(cfg.momentum_confirm_minutes))
-    if len(data) < min_bars:
-        return None
-
-    latest_ts = data.index[-1]
-    ref_ts = pd.Timestamp(reference_time)
-    if ref_ts.tzinfo is None:
-        ref_ts = ref_ts.tz_localize(MARKET_TZ)
-    else:
-        ref_ts = ref_ts.tz_convert(MARKET_TZ)
-    bar_age_minutes = max(0.0, (ref_ts - latest_ts).total_seconds() / 60)
-    if bar_age_minutes > cfg.momentum_max_bar_age_minutes:
-        return None
-
-    latest = data.iloc[-1]
-    price = float(latest["Close"])
-    if price <= 0:
-        return None
-
-    fast_window = recent_intraday_window(data, cfg.momentum_fast_minutes)
-    confirm_window = recent_intraday_window(data, cfg.momentum_confirm_minutes)
-    if len(fast_window) < max(3, min(int(cfg.momentum_fast_minutes), 4)):
-        return None
-    if len(confirm_window) < max(8, int(cfg.momentum_confirm_minutes * 0.55)):
-        return None
-
-    last_five = data.tail(5)
-    if (pd.to_numeric(last_five["Volume"], errors="coerce").fillna(0) > 0).sum() < 3:
-        return None
-
-    baseline_start = fast_window.index[0]
-    baseline_minutes = max(int(cfg.momentum_volume_baseline_minutes), int(cfg.momentum_confirm_minutes) * 2)
-    prior = data[data.index < baseline_start].tail(baseline_minutes)
-    if len(prior) < max(8, int(cfg.momentum_fast_minutes) * 2):
-        return None
-
-    volume_5m = float(pd.to_numeric(fast_window["Volume"], errors="coerce").fillna(0).sum())
-    volume_15m = float(pd.to_numeric(confirm_window["Volume"], errors="coerce").fillna(0).sum())
-    if volume_5m <= 0 or volume_15m <= 0:
-        return None
-
-    baseline_5m = rolling_volume_baseline(prior, cfg.momentum_fast_minutes)
-    baseline_15m = rolling_volume_baseline(prior, cfg.momentum_confirm_minutes)
-    if baseline_5m <= 0 or baseline_15m <= 0:
-        return None
-
-    rvol_5m = volume_5m / baseline_5m
-    rvol_15m = volume_15m / baseline_15m
-    if rvol_5m < cfg.momentum_volume_mult or rvol_15m < cfg.momentum_confirm_volume_mult:
-        return None
-
-    previous_fast_start = fast_window.index[0] - pd.Timedelta(minutes=max(1, int(cfg.momentum_fast_minutes)))
-    previous_fast = data[(data.index < fast_window.index[0]) & (data.index >= previous_fast_start)]
-    previous_fast_volume = float(pd.to_numeric(previous_fast["Volume"], errors="coerce").fillna(0).sum()) if not previous_fast.empty else 0.0
-    prior_fast_rvol = previous_fast_volume / baseline_5m if baseline_5m > 0 else 0.0
-    volume_acceleration_base = max(previous_fast_volume, baseline_5m / max(cfg.momentum_volume_mult, 1.0), 1.0)
-    volume_acceleration = volume_5m / volume_acceleration_base
-    recent_prior_start = fast_window.index[0] - pd.Timedelta(minutes=20)
-    recent_prior = data[(data.index < fast_window.index[0]) & (data.index >= recent_prior_start)]
-    recent_prior_max_rvol = 0.0
-    if not recent_prior.empty:
-        prior_volume_series = pd.to_numeric(recent_prior["Volume"], errors="coerce").fillna(0)
-        prior_rolling = prior_volume_series.rolling(
-            max(1, int(cfg.momentum_fast_minutes)),
-            min_periods=max(1, min(2, int(cfg.momentum_fast_minutes))),
-        ).sum().dropna()
-        if not prior_rolling.empty and baseline_5m > 0:
-            recent_prior_max_rvol = float(prior_rolling.max()) / baseline_5m
-    fast_volume_share_pct = volume_5m / volume_15m * 100 if volume_15m > 0 else 0.0
-    baseline_1m = baseline_5m / max(1, int(cfg.momentum_fast_minutes))
-    last_three_volume = pd.to_numeric(data.tail(3)["Volume"], errors="coerce").fillna(0)
-    multi_minute_volume_confirmed = bool((last_three_volume >= baseline_1m * 1.5).sum() >= 2)
-    early_volume_wave = (
-        volume_acceleration >= cfg.momentum_min_volume_acceleration
-        and prior_fast_rvol <= cfg.momentum_max_prior_fast_rvol
-        and recent_prior_max_rvol <= cfg.momentum_max_recent_prior_rvol
-        and fast_volume_share_pct >= cfg.momentum_min_fast_volume_share_pct
-        and multi_minute_volume_confirmed
-    )
-    if cfg.momentum_require_new_volume_wave and not early_volume_wave:
-        return None
-
-    move_5m = intraday_move_pct(fast_window, price)
-    move_15m = intraday_move_pct(confirm_window, price)
-    if cfg.momentum_max_confirm_move_pct > 0 and abs(move_15m) > cfg.momentum_max_confirm_move_pct:
-        return None
-    long_hit = move_5m >= cfg.momentum_min_fast_move_pct and move_15m >= cfg.momentum_min_confirm_move_pct
-    short_hit = move_5m <= -cfg.momentum_min_fast_move_pct and move_15m <= -cfg.momentum_min_confirm_move_pct
-    if cfg.momentum_direction == MOMENTUM_DIR_UP:
-        short_hit = False
-    elif cfg.momentum_direction == MOMENTUM_DIR_DOWN:
-        long_hit = False
-    if not (long_hit or short_hit):
-        return None
-
-    direction = MOMENTUM_DIR_UP if long_hit and abs(move_5m) >= abs(move_15m) * 0.35 else MOMENTUM_DIR_DOWN
-    if long_hit and not short_hit:
-        direction = MOMENTUM_DIR_UP
-    elif short_hit and not long_hit:
-        direction = MOMENTUM_DIR_DOWN
-
-    dollar_5m = dollar_volume(fast_window)
-    dollar_15m = dollar_volume(confirm_window)
-    dollar_day = dollar_volume(data)
-    if dollar_5m < cfg.momentum_min_5m_dollar_volume:
-        return None
-    if dollar_15m < cfg.momentum_min_15m_dollar_volume:
-        return None
-    if dollar_day < cfg.momentum_min_day_dollar_volume:
-        return None
-
-    vwap = intraday_vwap(data)
-    if vwap <= 0:
-        return None
-    vwap_distance_pct = (price - vwap) / vwap * 100
-    if cfg.momentum_max_vwap_distance_pct > 0 and abs(vwap_distance_pct) > cfg.momentum_max_vwap_distance_pct:
-        return None
-
-    close_series = pd.to_numeric(data["Close"], errors="coerce").dropna()
-    if close_series.empty:
-        return None
-    ema9 = float(close_series.ewm(span=9, adjust=False).mean().iloc[-1])
-    ema20 = float(close_series.ewm(span=20, adjust=False).mean().iloc[-1])
-    vwap_aligned = price >= vwap if direction == MOMENTUM_DIR_UP else price <= vwap
-    ema_aligned = ema9 >= ema20 if direction == MOMENTUM_DIR_UP else ema9 <= ema20
-    if cfg.momentum_require_vwap_side and not vwap_aligned:
-        return None
-    if cfg.momentum_require_ema_trend and not ema_aligned:
-        return None
-
-    recent_directional = data.tail(5)
-    green_count = int((pd.to_numeric(recent_directional["Close"], errors="coerce") > pd.to_numeric(recent_directional["Open"], errors="coerce")).sum())
-    red_count = int((pd.to_numeric(recent_directional["Close"], errors="coerce") < pd.to_numeric(recent_directional["Open"], errors="coerce")).sum())
-    fast_low = float(pd.to_numeric(fast_window["Low"], errors="coerce").min())
-    fast_high = float(pd.to_numeric(fast_window["High"], errors="coerce").max())
-    fast_span = fast_high - fast_low
-    if fast_span <= 0:
-        return None
-    close_position = (price - fast_low) / fast_span * 100
-    if direction == MOMENTUM_DIR_UP:
-        directional_bars_confirmed = green_count >= 3 and close_position >= 60
-    else:
-        directional_bars_confirmed = red_count >= 3 and close_position <= 40
-
-    prior_20 = data.iloc[:-1].tail(20)
-    breakout_confirmed = False
-    if not prior_20.empty:
-        prior_high = float(pd.to_numeric(prior_20["High"], errors="coerce").max())
-        prior_low = float(pd.to_numeric(prior_20["Low"], errors="coerce").min())
-        if direction == MOMENTUM_DIR_UP and prior_high > 0:
-            breakout_confirmed = price >= prior_high * 1.002
-        elif direction == MOMENTUM_DIR_DOWN and prior_low > 0:
-            breakout_confirmed = price <= prior_low * 0.998
-
-    quality_checks = sum(
-        1
-        for passed in (
-            vwap_aligned,
-            ema_aligned,
-            breakout_confirmed,
-            directional_bars_confirmed,
-            early_volume_wave,
-            abs(vwap_distance_pct) <= 4.0,
-        )
-        if passed
-    )
-    if quality_checks < cfg.momentum_min_quality_checks:
-        return None
-
-    return MomentumPulse(
-        direction=direction,
-        price=price,
-        move_5m_pct=move_5m,
-        move_15m_pct=move_15m,
-        rvol_5m=rvol_5m,
-        rvol_15m=rvol_15m,
-        volume_5m=volume_5m,
-        volume_15m=volume_15m,
-        baseline_5m=baseline_5m,
-        baseline_15m=baseline_15m,
-        dollar_5m=dollar_5m,
-        dollar_15m=dollar_15m,
-        dollar_day=dollar_day,
-        vwap=vwap,
-        vwap_distance_pct=vwap_distance_pct,
-        ema9=ema9,
-        ema20=ema20,
-        bar_age_minutes=bar_age_minutes,
-        breakout_confirmed=breakout_confirmed,
-        vwap_aligned=vwap_aligned,
-        ema_aligned=ema_aligned,
-        directional_bars_confirmed=directional_bars_confirmed,
-        early_volume_wave=early_volume_wave,
-        volume_acceleration=volume_acceleration,
-        prior_fast_rvol=prior_fast_rvol,
-        recent_prior_max_rvol=recent_prior_max_rvol,
-        fast_volume_share_pct=fast_volume_share_pct,
-        multi_minute_volume_confirmed=multi_minute_volume_confirmed,
-        quality_checks=quality_checks,
     )
 
 
@@ -4411,140 +3653,22 @@ def score_rvol(setup: RvolSetup, cfg: ScanConfig) -> int:
     return int(round(volume_score + liquidity_score + move_score))
 
 
-def score_vcp(setup: VcpSetup, cfg: ScanConfig) -> int:
-    compression_pct = max(0.0, (setup.first_width_pct - setup.recent_width_pct) / max(setup.first_width_pct, 0.1) * 100)
-    compression_score = min(35.0, compression_pct / max(cfg.vcp_min_compression_pct, 0.1) * 22.0)
-    dry_score = max(0.0, min(25.0, (cfg.vcp_dry_volume_ratio - setup.dry_volume_ratio) / max(cfg.vcp_dry_volume_ratio, 0.1) * 35.0))
-    near_high_score = max(0.0, min(25.0, (cfg.vcp_near_high_pct - setup.distance_to_high_pct) / max(cfg.vcp_near_high_pct, 0.1) * 25.0))
-    tight_score = max(0.0, min(15.0, (cfg.vcp_max_recent_width_pct - setup.recent_width_pct) / max(cfg.vcp_max_recent_width_pct, 0.1) * 15.0))
-    return int(round(compression_score + dry_score + near_high_score + tight_score))
+def score_two_down(setup: TwoDownSetup, cfg: ScanConfig) -> int:
+    """Балл = насколько убедительно бумага идёт вниз.
 
+    Ничего не фильтрует, только сортирует: решение всё равно по графику.
+    Три слагаемых — глубина вчерашней красной свечи, глубина сегодняшнего
+    падения и объём относительно вчерашнего.
 
-def score_spring(setup: SpringSetup, cfg: ScanConfig) -> int:
-    break_score = min(20.0, setup.break_pct / max(cfg.spring_break_pct, 0.1) * 10.0)
-    reclaim_score = max(0.0, min(25.0, setup.reclaim_pct * 4.0 + 10.0))
-    close_score = max(0.0, min(20.0, (setup.close_position_pct - cfg.spring_close_position_pct) / max(100.0 - cfg.spring_close_position_pct, 1.0) * 20.0))
-    volume_score = min(25.0, setup.volume_mult / max(cfg.spring_volume_mult, 0.1) * 16.0)
-    low_score = max(0.0, min(10.0, (cfg.spring_max_from_low_pct - setup.from_low_pct) / max(cfg.spring_max_from_low_pct, 0.1) * 10.0))
-    return int(round(break_score + reclaim_score + close_score + volume_score + low_score))
-
-
-def score_short_put(setup: ShortPutSetup, cfg: ScanConfig) -> int:
-    volume_score = min(55.0, setup.volume_mult / max(cfg.short_volume_mult, 0.1) * 34.0)
-    drop_score = min(12.0, abs(setup.move_pct) / max(abs(cfg.short_min_drop_pct), 0.1) * 5.0)
-    close_score = max(0.0, min(18.0, (cfg.short_close_position_pct - setup.close_position_pct) / max(cfg.short_close_position_pct, 1.0) * 18.0))
-    break_score = min(10.0, setup.break_pct / max(cfg.short_break_buffer_pct, 0.1) * 4.0) if cfg.short_channel_enabled else 5.0
-    tight_score = 0.0
-    if cfg.short_channel_enabled and cfg.short_max_base_width_pct > 0:
-        tight_score = max(0.0, min(8.0, (cfg.short_max_base_width_pct - setup.base_width_pct) / cfg.short_max_base_width_pct * 8.0))
-    return max(0, int(round(volume_score + drop_score + close_score + break_score + tight_score)))
-
-
-def score_momentum_pulse(setup: MomentumPulse, cfg: ScanConfig) -> int:
-    volume_score = min(
-        50.0,
-        setup.rvol_5m / max(cfg.momentum_volume_mult, 0.1) * 30.0
-        + setup.rvol_15m / max(cfg.momentum_confirm_volume_mult, 0.1) * 14.0
-        + setup.volume_acceleration / max(cfg.momentum_min_volume_acceleration, 0.1) * 6.0,
-    )
-    move_score = min(
-        12.0,
-        abs(setup.move_5m_pct) / max(cfg.momentum_min_fast_move_pct, 0.1) * 5.0
-        + abs(setup.move_15m_pct) / max(cfg.momentum_min_confirm_move_pct, 0.1) * 7.0,
-    )
-    liquidity_score = min(
-        20.0,
-        setup.dollar_5m / max(cfg.momentum_min_5m_dollar_volume, 1) * 7.0
-        + setup.dollar_15m / max(cfg.momentum_min_15m_dollar_volume, 1) * 8.0
-        + setup.dollar_day / max(cfg.momentum_min_day_dollar_volume, 1) * 5.0,
-    )
-    freshness_score = max(0.0, min(8.0, 8.0 - setup.bar_age_minutes / max(cfg.momentum_max_bar_age_minutes, 1) * 3.0))
-    quality_score = 0.0
-    if setup.vwap_aligned:
-        quality_score += 4.0
-    if setup.ema_aligned:
-        quality_score += 4.0
-    if setup.breakout_confirmed:
-        quality_score += 4.0
-    if setup.directional_bars_confirmed:
-        quality_score += 3.0
-    if setup.early_volume_wave:
-        quality_score += 3.0
-    if abs(setup.vwap_distance_pct) <= 6.0:
-        quality_score += 1.0
-    quality_score = min(15.0, quality_score)
-    return int(round(max(0.0, min(100.0, volume_score + liquidity_score + move_score + freshness_score + quality_score))))
-
-
-def detect_momentum_signal(
-    ticker_info: dict[str, Any],
-    df: pd.DataFrame,
-    cfg: ScanConfig,
-    reference_time: datetime,
-) -> dict[str, Any] | None:
-    setup = build_momentum_pulse(df, cfg, reference_time)
-    if setup is None:
-        return None
-
-    price = setup.price
-    if price < cfg.min_price or price > cfg.max_price:
-        return None
-
-    score = score_momentum_pulse(setup, cfg)
-    if score < cfg.momentum_min_score:
-        return None
-
-    chart_df = momentum_intraday_frame(df, cfg, reference_time)
-    direction_word = "ВВЕРХ" if setup.direction == MOMENTUM_DIR_UP else "ВНИЗ"
-    direction_arrow = "↑" if setup.direction == MOMENTUM_DIR_UP else "↓"
-    source = df.attrs.get("source", "")
-
-    return {
-        "_sig": SIG_MOMENTUM,
-        "_rvol": setup.rvol_5m,
-        "_score": score,
-        "_width": abs(setup.move_15m_pct),
-        "_gap": setup.vwap_distance_pct,
-        "_move_pct": setup.move_5m_pct,
-        "_momentum_direction": setup.direction,
-        "_momentum_rvol_15m": setup.rvol_15m,
-        "_momentum_move_15m": setup.move_15m_pct,
-        "_momentum_bar_age": setup.bar_age_minutes,
-        "_momentum_volume_acceleration": setup.volume_acceleration,
-        "_momentum_prior_fast_rvol": setup.prior_fast_rvol,
-        "_momentum_recent_prior_max_rvol": setup.recent_prior_max_rvol,
-        "_momentum_fast_volume_share_pct": setup.fast_volume_share_pct,
-        "_momentum_multi_minute_volume": setup.multi_minute_volume_confirmed,
-        "_momentum_quality_checks": setup.quality_checks,
-        "_chart_payload": pattern_chart_payload(
-            chart_df,
-            cfg.momentum_confirm_minutes,
-            visible_candles=MINUTE_CHART_VISIBLE_CANDLES,
-            band_days=0,
-            timeframe="M",
-            show_default_band=False,
-        ),
-        "_scanner": cfg.scanner_mode,
-        "Тикер": ticker_info["ticker"],
-        "Название": (ticker_info.get("name") or "")[:34],
-        "Биржа": ticker_info.get("exchange", ""),
-        "Сигнал": f"{SIGNAL_LABELS[SIG_MOMENTUM]} {direction_word}",
-        "Цена": round(price, 4),
-        "Выход %": f"{setup.move_5m_pct:+.1f}%",
-        "Гэп сегодня": f"VWAP {setup.vwap_distance_pct:+.1f}%",
-        "Объём ×": round(setup.rvol_5m, 2),
-        "RVOL 15м": round(setup.rvol_15m, 2),
-        "Объём": int(setup.volume_5m),
-        "Объём 15м": int(setup.volume_15m),
-        "Движение 15м": f"{setup.move_15m_pct:+.1f}%",
-        "$ 5м": int(setup.dollar_5m),
-        "$ 15м": int(setup.dollar_15m),
-        "Долларовый объём": int(setup.dollar_5m),
-        "Капитализация": ticker_info.get("market_cap") or 0,
-        "Балл": score,
-        "Источник": source,
-        "Время": f"{now_et_str()} {direction_arrow}",
-    }
+    Положения закрытия внутри дня здесь СОЗНАТЕЛЬНО нет, хотя оно и выглядит
+    убедительно. Замер 27.10.2026 на 19 680 наблюдениях: «закрылся у лоя дня»
+    даёт падение на 3% в 19.3% случаев против фона 18.9% — то есть не даёт
+    ничего. В колонке «Закрытие дня» цифра осталась, для глаз она полезна,
+    но тянуть на себе сортировку ей нечем."""
+    prev_score = min(25.0, abs(setup.prev_drop_pct) * 3.5)
+    today_score = min(45.0, abs(setup.today_drop_pct) * 5.0)
+    volume_score = min(30.0, max(0.0, setup.volume_vs_prev - 1.0) * 30.0)
+    return int(round(min(100.0, prev_score + today_score + volume_score)))
 
 
 def detect_signal(
@@ -4578,23 +3702,30 @@ def detect_signal(
         return None
     if price < cfg.min_price or price > cfg.max_price:
         return None
-    if cfg.scanner_mode != SCANNER_BASE and price * latest_volume < cfg.min_dollar_volume:
+    if price * latest_volume < cfg.min_dollar_volume:
         return None
 
-    # Считаем здесь, а не внутри ветки: объединённому режиму эти величины нужны до
-    # выбора ведущей линейки. Одиночные режимы считают их у себя заново — не мешает.
-    body_pct = abs(price - latest_open) / latest_open * 100 if latest_open > 0 else 0.0
+    prev_close = float(df.iloc[-2]["Close"])
+    if prev_close <= 0:
+        return None
+    gap_pct = (latest_open - prev_close) / prev_close * 100
+    body_pct = abs(price - latest_open) / latest_open * 100
+    travel_pct = travel_from_prev_close(df)
 
     if cfg.scanner_mode == SCANNER_COMBO:
-        # ДВА ПОИСКА, склейка по ИЛИ — достаточно одного сработавшего. Сетапы считают
-        # те же самые функции, что и одиночные режимы, поэтому совпадение с ними
-        # обеспечено по построению, а не подгонкой.
+        # ДВА ПОИСКА, склейка по ИЛИ — достаточно одного сработавшего.
+        #
+        # Ограничение хода стоит ЗДЕСЬ, до обеих линеек, а не внутри RVOL.
+        # Причина простая: build_base_impulse вообще не смотрит на High и Low
+        # сегодняшней свечи, поэтому бумага с ходом 80% спокойно проходила бы
+        # через линейку «Взрыв из базы», даже когда ограничение включено.
+        if cfg.travel_filter_enabled and cfg.max_travel_pct > 0 and travel_pct > cfg.max_travel_pct:
+            return None
+
         base = build_base_impulse(df, cfg)
         rvol_setup = build_rvol_setup(df, cfg)
         if base is None and rvol_setup is None:
             return None
-        prev_close = float(df.iloc[-2]["Close"])
-        gap_pct = (latest_open - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
         # Кто сработал СИЛЬНЕЕ относительно СВОЕГО порога — тот и задаёт цифры строки.
         # Сравнивать «×максимума» и «×средней» напрямую нельзя: средняя всегда ниже
         # максимума, и она перетянула бы и сортировку, и балл на себя.
@@ -4613,30 +3744,21 @@ def detect_signal(
             low, high, band = base.low, base.high, int(cfg.base_impulse_days)
             band_label = "база"
             move_pct = base.move_pct
-            width_pct = base.width_pct
             avg_volume = 0
             dollar_volume = int(price * latest_volume)
-            day_range_pct = 0.0
         else:
             score = score_rvol(rvol_setup, cfg)
             lead_ratio = rvol_setup.rvol
             low, high, band = rvol_setup.low, rvol_setup.high, int(rvol_setup.range_days)
             band_label = "диапазон RVOL"
             move_pct = rvol_setup.move_pct
-            width_pct = rvol_setup.width_pct
             avg_volume = int(rvol_setup.avg_volume)
             dollar_volume = int(rvol_setup.dollar_volume)
-            day_range_pct = rvol_setup.day_range_pct
         return {
             "_sig": SIG_COMBO,
             "_rvol": lead_ratio,
             "_score": score,
-            "_width": width_pct,
-            "_gap": gap_pct,
             "_move_pct": move_pct,
-            "_day_range_pct": day_range_pct,
-            "_combo_base": bool(base is not None),
-            "_combo_rvol": bool(rvol_setup is not None),
             "_chart_payload": pattern_chart_payload(
                 df,
                 band,
@@ -4655,6 +3777,7 @@ def detect_signal(
             "Цена": round(price, 4),
             "Выход %": f"{move_pct:+.1f}%" if move_pct else "—",
             "Гэп сегодня": f"{gap_pct:+.1f}%",
+            "Ход от вчера": f"{travel_pct:.1f}%",
             "Объём ×": round(lead_ratio, 2),
             "Объём": int(latest_volume),
             "Средний объём": avg_volume,
@@ -4666,220 +3789,43 @@ def detect_signal(
             "Время": now_et_str(),
         }
 
-    if cfg.scanner_mode == SCANNER_BASE:
-        base = build_base_impulse(df, cfg)
-        if base is None:
-            return None
-        prev_close = float(df.iloc[-2]["Close"])
-        latest_gap_pct = (latest_open - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
-        volume_over_max_pct = (base.volume_mult - 1) * 100
-        score = score_base_signal(base, cfg)
-        signal = SIGNAL_LABELS[SIG_BASE]
-        return {
-            "_sig": SIG_BASE,
-            "_rvol": base.volume_mult,
-            "_score": score,
-            "_width": base.width_pct,
-            "_gap": latest_gap_pct,
-            "_move_pct": base.move_pct,
-            "_volume_over_max_pct": volume_over_max_pct,
-            "_chart_payload": pattern_chart_payload(
-                df,
-                cfg.base_impulse_days,
-                base.low,
-                base.high,
-                "база",
-                visible_candles=CHART_VISIBLE_CANDLES,
-                band_days=cfg.base_impulse_days,
-                timeframe="D",
-            ),
-            "_scanner": cfg.scanner_mode,
-            "Тикер": ticker_info["ticker"],
-            "Название": (ticker_info.get("name") or "")[:34],
-            "Биржа": ticker_info.get("exchange", ""),
-            "Сигнал": signal,
-            "Цена": round(price, 4),
-            "Выход %": f"{base.move_pct:+.1f}%" if base.move_pct else "—",
-            "Гэп сегодня": f"{latest_gap_pct:+.1f}%",
-            "Объём ×": round(base.volume_mult, 2),
-            "Объём": int(latest_volume),
-            "Макс. объём периода": int(base.vol_max),
-            "Тело свечи %": round(base.body_pct, 1),
-            "Долларовый объём": int(price * latest_volume),
-            "Капитализация": ticker_info.get("market_cap") or 0,
-            "Балл": score,
-            "Источник": df.attrs.get("source", ""),
-            "Время": now_et_str(),
-        }
-
-    prev_close = float(df.iloc[-2]["Close"])
-    latest_gap_pct = (latest_open - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
-    body_pct = abs(price - latest_open) / latest_open * 100
-
-    if cfg.scanner_mode == SCANNER_RVOL:
-        setup = build_rvol_setup(df, cfg)
+    if cfg.scanner_mode == SCANNER_DOWN_OPT:
+        setup = build_two_down_setup(df, cfg)
         if setup is None:
             return None
-        score = score_rvol(setup, cfg)
+        score = score_two_down(setup, cfg)
         return {
-            "_sig": SIG_RVOL,
-            "_rvol": setup.rvol,
+            "_sig": SIG_DOWN_OPT,
+            "_rvol": setup.volume_mult,
             "_score": score,
-            "_width": setup.width_pct,
-            "_gap": latest_gap_pct,
-            "_move_pct": setup.move_pct,
-            "_day_range_pct": setup.day_range_pct,
+            "_move_pct": setup.today_drop_pct,
             "_chart_payload": pattern_chart_payload(
                 df,
-                setup.range_days,
+                DOWN_OPT_RANGE_DAYS,
                 setup.low,
                 setup.high,
-                "диапазон RVOL",
+                "диапазон",
                 visible_candles=CHART_VISIBLE_CANDLES,
-                band_days=setup.range_days,
+                band_days=DOWN_OPT_RANGE_DAYS,
                 timeframe="D",
             ),
             "_scanner": cfg.scanner_mode,
             "Тикер": ticker_info["ticker"],
             "Название": (ticker_info.get("name") or "")[:34],
             "Биржа": ticker_info.get("exchange", ""),
-            "Сигнал": SIGNAL_LABELS[SIG_RVOL],
+            "Сигнал": (
+                f"{SIGNAL_LABELS[SIG_DOWN_OPT]} · вчерашняя свеча {setup.prev_drop_pct:+.1f}%"
+                f" · сегодня {setup.today_drop_pct:+.1f}%"
+            ),
             "Цена": round(price, 4),
-            "Выход %": f"{setup.move_pct:+.1f}%",
-            "Гэп сегодня": f"{latest_gap_pct:+.1f}%",
-            "Объём ×": round(setup.rvol, 2),
+            "Выход %": f"{setup.today_drop_pct:+.1f}%",
+            "Вчера %": f"{setup.prev_drop_pct:+.1f}%",
+            "Объём к вчера": f"×{setup.volume_vs_prev:.2f}" if setup.volume_vs_prev else "—",
+            "Гэп сегодня": f"{gap_pct:+.1f}%",
+            "Объём ×": round(setup.volume_mult, 2),
             "Объём": int(latest_volume),
             "Средний объём": int(setup.avg_volume),
             "Тело свечи %": round(body_pct, 1),
-            "Долларовый объём": int(setup.dollar_volume),
-            "Капитализация": ticker_info.get("market_cap") or 0,
-            "Балл": score,
-            "Источник": df.attrs.get("source", ""),
-            "Время": now_et_str(),
-        }
-
-    if cfg.scanner_mode == SCANNER_VCP:
-        setup = build_vcp_setup(df, cfg)
-        if setup is None:
-            return None
-        score = score_vcp(setup, cfg)
-        return {
-            "_sig": SIG_VCP,
-            "_rvol": setup.current_volume_ratio,
-            "_score": score,
-            "_width": setup.base_width_pct,
-            "_gap": latest_gap_pct,
-            "_move_pct": setup.move_pct,
-            "_chart_payload": pattern_chart_payload(
-                df,
-                cfg.vcp_days,
-                setup.low,
-                setup.high,
-                "VCP-база",
-                visible_candles=CHART_VISIBLE_CANDLES,
-                band_days=min(cfg.vcp_days, CHART_VISIBLE_CANDLES),
-                timeframe="D",
-            ),
-            "_scanner": cfg.scanner_mode,
-            "Тикер": ticker_info["ticker"],
-            "Название": (ticker_info.get("name") or "")[:34],
-            "Биржа": ticker_info.get("exchange", ""),
-            "Сигнал": SIGNAL_LABELS[SIG_VCP],
-            "Цена": round(price, 4),
-            "Выход %": f"{setup.move_pct:+.1f}%",
-            "Гэп сегодня": f"{latest_gap_pct:+.1f}%",
-            "Объём ×": round(setup.current_volume_ratio, 2),
-            "Объём": int(latest_volume),
-            "Тело свечи %": round(body_pct, 1),
-            "Сжатие": f"{setup.first_width_pct:.1f}% → {setup.recent_width_pct:.1f}%",
-            "Сухой объём": f"{setup.dry_volume_ratio:.2f}×",
-            "До верха": f"{setup.distance_to_high_pct:.1f}%",
-            "Долларовый объём": int(price * latest_volume),
-            "Капитализация": ticker_info.get("market_cap") or 0,
-            "Балл": score,
-            "Источник": df.attrs.get("source", ""),
-            "Время": now_et_str(),
-        }
-
-    if cfg.scanner_mode == SCANNER_SHORT_PUT:
-        setup = build_short_put_setup(df, cfg)
-        if setup is None:
-            return None
-        score = score_short_put(setup, cfg)
-        return {
-            "_sig": SIG_SHORT_PUT,
-            "_rvol": setup.volume_mult,
-            "_score": score,
-            "_width": setup.base_width_pct,
-            "_gap": latest_gap_pct,
-            "_move_pct": setup.move_pct,
-            "_chart_payload": pattern_chart_payload(
-                df,
-                cfg.short_base_days,
-                setup.base_low,
-                setup.base_high,
-                "short-база",
-                visible_candles=CHART_VISIBLE_CANDLES,
-                band_days=cfg.short_base_days,
-                timeframe="D",
-            ),
-            "_scanner": cfg.scanner_mode,
-            "_requires_put_filter": True,
-            "Тикер": ticker_info["ticker"],
-            "Название": (ticker_info.get("name") or "")[:34],
-            "Биржа": ticker_info.get("exchange", ""),
-            "Сигнал": SIGNAL_LABELS[SIG_SHORT_PUT],
-            "Цена": round(price, 4),
-            "Выход %": f"{setup.move_pct:+.1f}%",
-            "Гэп сегодня": f"{latest_gap_pct:+.1f}%",
-            "Объём ×": round(setup.volume_mult, 2),
-            "Объём": int(latest_volume),
-            "Макс. объём периода": int(setup.vol_max),
-            "Тело свечи %": round(setup.body_pct, 1),
-            "Пробой": f"{setup.break_pct:.1f}%",
-            "Закрытие дня": f"{setup.close_position_pct:.0f}%",
-            "Долларовый объём": int(price * latest_volume),
-            "Капитализация": ticker_info.get("market_cap") or 0,
-            "Балл": score,
-            "Источник": df.attrs.get("source", ""),
-            "Время": now_et_str(),
-        }
-
-    if cfg.scanner_mode == SCANNER_SPRING:
-        setup = build_spring_setup(df, cfg)
-        if setup is None:
-            return None
-        score = score_spring(setup, cfg)
-        return {
-            "_sig": SIG_SPRING,
-            "_rvol": setup.volume_mult,
-            "_score": score,
-            "_width": setup.support_range_pct,
-            "_gap": latest_gap_pct,
-            "_move_pct": setup.move_pct,
-            "_chart_payload": pattern_chart_payload(
-                df,
-                max(cfg.spring_support_days, 30),
-                setup.support * 0.99,
-                setup.support * 1.01,
-                "поддержка Spring",
-                visible_candles=CHART_VISIBLE_CANDLES,
-                band_days=min(max(cfg.spring_support_days, 30), CHART_VISIBLE_CANDLES),
-                timeframe="D",
-            ),
-            "_scanner": cfg.scanner_mode,
-            "Тикер": ticker_info["ticker"],
-            "Название": (ticker_info.get("name") or "")[:34],
-            "Биржа": ticker_info.get("exchange", ""),
-            "Сигнал": SIGNAL_LABELS[SIG_SPRING],
-            "Цена": round(price, 4),
-            "Выход %": f"{setup.move_pct:+.1f}%",
-            "Гэп сегодня": f"{latest_gap_pct:+.1f}%",
-            "Объём ×": round(setup.volume_mult, 2),
-            "Объём": int(latest_volume),
-            "Тело свечи %": round(body_pct, 1),
-            "Прокол": f"{setup.break_pct:.1f}%",
-            "Возврат": f"{setup.reclaim_pct:+.1f}%",
             "Закрытие дня": f"{setup.close_position_pct:.0f}%",
             "Долларовый объём": int(price * latest_volume),
             "Капитализация": ticker_info.get("market_cap") or 0,
@@ -4921,10 +3867,7 @@ def scan_market(
         status_box.caption(f"В этой пачке все тикеры скрыты на 7 часов.{elapsed_scan_suffix(scan_started_at)}")
         return []
 
-    if cfg.scanner_mode == SCANNER_MOMENTUM:
-        bars = load_momentum_bars(ticker_infos, cfg, data_source, alpaca_realtime, progress_box, status_box, scan_started_at)
-    else:
-        bars = load_bars(ticker_infos, cfg, data_source, alpaca_realtime, progress_box, status_box, scan_started_at)
+    bars = load_bars(ticker_infos, cfg, data_source, alpaca_realtime, progress_box, status_box, scan_started_at)
     today = now_et().date()
 
     for idx, ticker_info in enumerate(ticker_infos, start=1):
@@ -4941,11 +3884,7 @@ def scan_market(
             if history is None:
                 st.session_state.stats["checked"] = idx
                 continue
-            if cfg.scanner_mode == SCANNER_MOMENTUM:
-                reference_time = momentum_feed_reference_time(scan_started_at, alpaca_realtime)
-                row = detect_momentum_signal(ticker_info, history, cfg, reference_time)
-            else:
-                row = detect_signal(ticker_info, history, cfg, today)
+            row = detect_signal(ticker_info, history, cfg, today)
         except Exception as exc:
             LOGGER.exception("Scan failed for %s", ticker)
             remember_error(f"{ticker}: {exc}")
@@ -4955,13 +3894,13 @@ def scan_market(
             hits.append(row)
             st.session_state.stats["signals"] = len(hits)
             if len(hits) <= 3 or len(hits) % 10 == 0 or idx == total:
-                visible_hits = sort_results(hits, cfg.base_impulse_only)
-                visible_frame = display_frame(visible_hits, cfg.base_impulse_only)
+                visible_hits = sort_results(hits)
+                visible_frame = display_frame(visible_hits)
                 table_box.dataframe(
                     styled_display_frame(visible_frame),
                     width="stretch",
                     hide_index=True,
-                    column_config=display_column_config(cfg.base_impulse_only),
+                    column_config=display_column_config(),
                 )
             if send_alerts:
                 notify_signal(row)
@@ -4970,7 +3909,7 @@ def scan_market(
 
     st.session_state.last_scan_elapsed = format_elapsed_since(scan_started_at)
     st.session_state.last_scan_seconds = elapsed_seconds_since(scan_started_at)
-    return sort_results(hits, cfg.base_impulse_only)
+    return sort_results(hits)
 
 
 # ── TELEGRAM ──────────────────────────────────────────────────────
@@ -4995,8 +3934,7 @@ def send_telegram(message: str) -> bool:
 
 
 def notification_key(row: dict[str, Any]) -> str:
-    direction = row.get("_momentum_direction", "")
-    return f"{now_et().date().isoformat()}:{row.get('_scanner', '')}:{row['Тикер']}:{row.get('_sig') or row.get('Сигнал', '')}:{direction}"
+    return f"{now_et().date().isoformat()}:{row.get('_scanner', '')}:{row['Тикер']}:{row.get('_sig') or row.get('Сигнал', '')}"
 
 
 def notify_signal(row: dict[str, Any]) -> None:
@@ -5014,10 +3952,10 @@ def telegram_signal_message(row: dict[str, Any]) -> str:
     ticker = html.escape(ticker)
     rvol = safe_float(row.get("_rvol") or row.get("Объём ×"))
     move_pct = safe_float(row.get("_move_pct"))
-    if str(row.get("_sig", "")) == SIG_SHORT_PUT:
-        spread = safe_float(row.get("_put_spread_pct"))
-        spread_part = f" spread {spread:.0f}%" if spread > 0 else ""
-        return f"{ticker} {rvol:.2f}x {move_pct:+.1f}% PUT ok{spread_part}"
+    if str(row.get("_sig", "")) == SIG_DOWN_OPT:
+        yesterday = str(row.get("Вчера %") or "")
+        options_note = " опционы ok" if row.get("Опционы") else ""
+        return f"{ticker} вчера {yesterday} сегодня {move_pct:+.1f}%{options_note}"
     if rvol <= 0:
         return f"{ticker} 0.00x +0%"
     return f"{ticker} {rvol:.2f}x {move_pct:+.1f}%"
@@ -5191,7 +4129,7 @@ def auto_scan_next_state(scan_end: int, total: int) -> tuple[int, bool]:
     return 0, True
 
 
-def sort_results(rows: list[dict[str, Any]], base_pattern: bool = False) -> list[dict[str, Any]]:
+def sort_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         rows,
         key=lambda row: (
@@ -5218,13 +4156,13 @@ def compact_result_chart_payloads(
     return compacted
 
 
-def merge_results(new_rows: list[dict[str, Any]], old_rows: list[dict[str, Any]], base_pattern: bool = False) -> list[dict[str, Any]]:
+def merge_results(new_rows: list[dict[str, Any]], old_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     merged: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in old_rows:
         merged[result_key(row)] = row
     for row in new_rows:
         merged[result_key(row)] = row
-    ranked = sort_results(list(merged.values()), base_pattern)
+    ranked = sort_results(list(merged.values()))
     return compact_result_chart_payloads(ranked)
 
 
@@ -5233,20 +4171,12 @@ def result_matches_active_patterns(row: dict[str, Any], cfg: ScanConfig) -> bool
     scanner = str(row.get("_scanner", ""))
     if scanner:
         return scanner == cfg.scanner_mode
+    # Старые строки из session_state могли прийти без ключа _scanner —
+    # для них узнаём режим по коду сигнала.
     if cfg.scanner_mode == SCANNER_COMBO:
         return signal_code in {SIG_COMBO, SIG_BASE, SIG_RVOL}
-    if cfg.scanner_mode == SCANNER_BASE:
-        return signal_code == SIG_BASE
-    if cfg.scanner_mode == SCANNER_RVOL:
-        return signal_code == SIG_RVOL
-    if cfg.scanner_mode == SCANNER_VCP:
-        return signal_code == SIG_VCP
-    if cfg.scanner_mode == SCANNER_SPRING:
-        return signal_code == SIG_SPRING
-    if cfg.scanner_mode == SCANNER_SHORT_PUT:
-        return signal_code == SIG_SHORT_PUT
-    if cfg.scanner_mode == SCANNER_MOMENTUM:
-        return signal_code == SIG_MOMENTUM
+    if cfg.scanner_mode == SCANNER_DOWN_OPT:
+        return signal_code == SIG_DOWN_OPT
     return False
 
 
@@ -5340,13 +4270,6 @@ def format_market_cap_cell(value: Any) -> str:
 
 def format_signal_cell(row: pd.Series) -> str:
     sig = str(row.get("_sig", ""))
-    if sig == SIG_MOMENTUM:
-        direction = str(row.get("_momentum_direction", ""))
-        if direction == MOMENTUM_DIR_UP:
-            return "Импульс ↑"
-        if direction == MOMENTUM_DIR_DOWN:
-            return "Импульс ↓"
-        return "Импульс"
     if sig in SIGNAL_SHORT_LABELS:
         return SIGNAL_SHORT_LABELS[sig]
     raw = str(row.get("Сигнал", ""))
@@ -5356,7 +4279,7 @@ def format_signal_cell(row: pd.Series) -> str:
     return replacements.get(raw, raw)
 
 
-def display_column_config(base_pattern: bool = False) -> dict[str, Any]:
+def display_column_config() -> dict[str, Any]:
     return {
         "Тикер": st.column_config.TextColumn("Тикер", width="small"),
         "Название": st.column_config.TextColumn("Название", width="large"),
@@ -5367,19 +4290,27 @@ def display_column_config(base_pattern: bool = False) -> dict[str, Any]:
             "RVOL",
             width="small",
             format="%.2fx",
-            help="Объём / выбранная база сравнения. В RVOL это средний дневной объём; во Взрыве базы это максимум прошлых свечей; в Pulse это объём последних минут против внутридневной нормы.",
+            help="Объём / база сравнения. По линейке RVOL это средний дневной объём, по линейке «Взрыв из базы» — максимум прошлых свечей.",
         ),
         "Движение %": st.column_config.NumberColumn("Движение %", width="small", format="%.1f%%"),
         "Объём": st.column_config.NumberColumn("Объём", width="medium"),
         "Долларовый объём": st.column_config.NumberColumn("Долларовый объём", width="medium"),
         "Капитализация": st.column_config.NumberColumn("Капитализация", width="medium"),
-        "Put": st.column_config.TextColumn(
-            "Put",
-            width="large",
-            help="Лучший найденный put-контракт или подтверждение, что рядом с ценой есть живая цепочка put с bid/ask.",
+        "Объём к вчера": st.column_config.TextColumn(
+            "Объём к вчера",
+            width="small",
+            help="Сегодняшний объём, делённый на вчерашний.",
         ),
-        "Put OI": st.column_config.NumberColumn("Put OI", width="small", help="Open interest выбранного put-контракта."),
-        "Put spread": st.column_config.NumberColumn("Put spread %", width="small", format="%.1f%%"),
+        "Шорт": st.column_config.TextColumn(
+            "Шорт",
+            width="medium",
+            help="Можно ли шортить бумагу у брокера. «Только путы» значит, что занять её нельзя.",
+        ),
+        "Опционы": st.column_config.TextColumn(
+            "Опционы",
+            width="medium",
+            help=f"Сколько активных call и put найдено с экспирацией в ближайшие {OPT_EXPIRY_WINDOW_DAYS} дней.",
+        ),
         "Время": st.column_config.TextColumn("Время", width="small"),
     }
 
@@ -5396,7 +4327,7 @@ def spaced_number(value: Any, prefix: str = "") -> str:
     return f"{prefix}{int(round(number)):,}".replace(",", " ")
 
 
-def display_frame(rows: list[dict[str, Any]], base_pattern: bool = False, include_chart: bool = True) -> pd.DataFrame:
+def display_frame(rows: list[dict[str, Any]], include_chart: bool = True) -> pd.DataFrame:
     display_cols = DISPLAY_COLS
     if not rows:
         columns = display_cols if include_chart else [col for col in display_cols if col != "График"]
@@ -5423,7 +4354,7 @@ def display_frame(rows: list[dict[str, Any]], base_pattern: bool = False, includ
         frame["Капитализация"] = pd.to_numeric(frame["Капитализация"], errors="coerce").astype("Int64")
     if not include_chart and "График" in display_cols:
         display_cols = [col for col in display_cols if col != "График"]
-    option_cols = [col for col in ("Put", "Put OI", "Put spread") if col in frame.columns]
+    option_cols = [col for col in ("Объём к вчера", "Шорт", "Опционы") if col in frame.columns]
     if option_cols:
         display_cols = [col for col in display_cols if col not in option_cols]
         insert_at = display_cols.index("Время") if "Время" in display_cols else len(display_cols)
@@ -5863,18 +4794,14 @@ def ai_volume_lookback_for_row(row: dict[str, Any], cfg: ScanConfig | None) -> i
     if cfg is None:
         return 10
     signal = str(row.get("_sig") or "")
+    if signal == SIG_COMBO:
+        return max(int(cfg.base_impulse_days), int(cfg.rvol_avg_days))
+    if signal == SIG_DOWN_OPT:
+        return DOWN_OPT_VOLUME_DAYS
     if signal == SIG_BASE:
         return cfg.base_impulse_days
     if signal == SIG_RVOL:
         return cfg.rvol_avg_days
-    if signal == SIG_VCP:
-        return cfg.vcp_days
-    if signal == SIG_SPRING:
-        return cfg.spring_support_days
-    if signal == SIG_SHORT_PUT:
-        return cfg.short_base_days
-    if signal == SIG_MOMENTUM:
-        return cfg.momentum_volume_baseline_minutes
     return 10
 
 
@@ -5913,31 +4840,16 @@ def ai_context_lines_from_rows(
         parts.extend(ai_technical_facts(row, ai_volume_lookback_for_row(row, cfg)))
         parts.extend(ai_intraday_facts(row))
         for label in (
-            "Сжатие",
-            "Сухой объём",
-            "До верха",
-            "Пробой",
+            "Вчера %",
+            "Объём к вчера",
+            "Ход от вчера",
             "Закрытие дня",
-            "Прокол",
-            "Возврат",
-            "RVOL 15м",
-            "Движение 15м",
+            "Шорт",
+            "Опционы",
         ):
             value = row.get(label)
             if value not in (None, ""):
                 parts.append(f"{label.lower()}={value}")
-        put_text = str(row.get("Put") or "").strip()
-        if put_text:
-            parts.append(f"put={put_text}")
-        put_oi = row.get("Put OI")
-        if put_oi not in (None, ""):
-            parts.append(f"put OI={format_int_cell(safe_float(put_oi))}")
-        put_spread = ai_short_value(row.get("Put spread") or row.get("_put_spread_pct"), "%")
-        if put_spread:
-            parts.append(f"put spread={put_spread}")
-        near_puts = row.get("_put_chain_near_put_quoted")
-        if near_puts not in (None, ""):
-            parts.append(f"живых put рядом={format_int_cell(safe_float(near_puts))}")
         lines.append(f"{ticker}: " + "; ".join(part for part in parts if part and not part.endswith("=")))
     return lines
 
@@ -5951,7 +4863,11 @@ def ai_limit_options(total: int) -> list[int]:
 
 
 def ai_analysis_mode_for_config(cfg: ScanConfig) -> str:
-    return "short_put" if cfg.scanner_mode == SCANNER_SHORT_PUT else "general"
+    """Какой контур AI включать. «short_put» — медвежий разбор: отдельный промпт
+    Grok про плохие новости, Short-блокер вместо фундаментального стопа и
+    разрешённая сторона SHORT в выдаче. Он нужен режиму «Два дня вниз»,
+    потому что торговать по нему собираются вниз, путами."""
+    return "short_put" if cfg.scanner_mode == SCANNER_DOWN_OPT else "general"
 
 
 @st.cache_resource(show_spinner=False)
@@ -9139,17 +8055,17 @@ def render_ai_analysis_panel(
     selected_rows = [
         row for row in rows if normalize_ticker_id(row.get("Тикер")) in selected_set
     ]
-    if cfg.scanner_mode != SCANNER_MOMENTUM:
-        panel_minute_bars: dict[str, pd.DataFrame] = {}
-        for ticker_batch in chunks(selected_tickers, 25):
-            panel_minute_bars.update(
-                fetch_alpaca_minute_bars_batch(
-                    tuple(ticker_batch),
-                    MINUTE_CHART_VISIBLE_CANDLES,
-                    alpaca_realtime,
-                )
+    # Минутный контекст для AI: оба режима дневные, минутка идёт к ним приложением.
+    panel_minute_bars: dict[str, pd.DataFrame] = {}
+    for ticker_batch in chunks(selected_tickers, 25):
+        panel_minute_bars.update(
+            fetch_alpaca_minute_bars_batch(
+                tuple(ticker_batch),
+                MINUTE_CHART_VISIBLE_CANDLES,
+                alpaca_realtime,
             )
-        selected_rows = ai_rows_with_intraday_context(selected_rows, panel_minute_bars)
+        )
+    selected_rows = ai_rows_with_intraday_context(selected_rows, panel_minute_bars)
     context_lines = ai_context_lines_from_rows(selected_rows, selected_tickers, cfg)
     st.caption(f"В AI-разбор уйдут: {', '.join(selected_tickers)}")
 
@@ -9262,7 +8178,7 @@ def render_results_summary(rows: list[dict[str, Any]]) -> None:
     total_dollar_volume = sum(safe_float(row.get("Долларовый объём")) for row in rows)
     latest_time = str(rows[0].get("Время", now_et_str())) if rows else now_et_str()
     count_parts = []
-    for code in (SIG_BASE, SIG_RVOL, SIG_VCP, SIG_SPRING, SIG_SHORT_PUT, SIG_MOMENTUM):
+    for code in (SIG_COMBO, SIG_DOWN_OPT, SIG_BASE, SIG_RVOL):
         signal_count = sum(1 for row in rows if str(row.get("_sig", "")) == code)
         if signal_count:
             count_parts.append(f"{SIGNAL_SHORT_LABELS.get(code, code)} {signal_count}")
@@ -9288,7 +8204,7 @@ def render_results_summary(rows: list[dict[str, Any]]) -> None:
 
 
 def render_results_table(rows: list[dict[str, Any]], cfg: ScanConfig) -> None:
-    results_frame = display_frame(rows, cfg.base_impulse_only)
+    results_frame = display_frame(rows)
     if results_frame.empty:
         return
 
@@ -9297,7 +8213,7 @@ def render_results_table(rows: list[dict[str, Any]], cfg: ScanConfig) -> None:
         styled_display_frame(results_frame),
         width="stretch",
         hide_index=True,
-        column_config=display_column_config(cfg.base_impulse_only),
+        column_config=display_column_config(),
         height=table_height,
     )
 
@@ -9387,32 +8303,20 @@ def refresh_visible_result_charts(
     fetch_yahoo_daily.clear()
     fetch_yahoo_batch.clear()
     fetch_alpaca_minute_bars_batch.clear()
-    fetch_alpaca_intraday_bars_batch.clear()
     fetch_index_bars.clear()
 
     progress_box = st.progress(0.0)
     status_box = st.empty()
     started_at = now_et()
-    if cfg.scanner_mode == SCANNER_MOMENTUM:
-        bars_by_ticker = load_momentum_bars(
-            ticker_infos,
-            cfg,
-            data_source,
-            alpaca_realtime,
-            progress_box,
-            status_box,
-            started_at,
-        )
-    else:
-        bars_by_ticker = load_bars(
-            ticker_infos,
-            cfg,
-            data_source,
-            alpaca_realtime,
-            progress_box,
-            status_box,
-            started_at,
-        )
+    bars_by_ticker = load_bars(
+        ticker_infos,
+        cfg,
+        data_source,
+        alpaca_realtime,
+        progress_box,
+        status_box,
+        started_at,
+    )
 
     refreshed_count = 0
     refreshed_rows: list[dict[str, Any]] = []
@@ -9422,12 +8326,6 @@ def refresh_visible_result_charts(
         if bars is None or bars.empty:
             refreshed_rows.append(row)
             continue
-        if cfg.scanner_mode == SCANNER_MOMENTUM:
-            reference_time = momentum_feed_reference_time(started_at, alpaca_realtime)
-            bars = momentum_intraday_frame(bars, cfg, reference_time)
-            if bars.empty:
-                refreshed_rows.append(row)
-                continue
         payload = refreshed_chart_payload(row, bars)
         if not payload:
             refreshed_rows.append(row)
@@ -9560,8 +8458,7 @@ def ticker_ai_key_base(row: dict[str, Any]) -> str:
     scanner = str(row.get("_scanner") or "")
     ticker = normalize_ticker_id(row.get("Тикер"))
     signal = str(row.get("_sig") or "")
-    direction = str(row.get("_momentum_direction") or "")
-    raw_key = f"{scanner}_{ticker}_{signal}_{direction}"
+    raw_key = f"{scanner}_{ticker}_{signal}"
     return re.sub(r"[^A-Za-z0-9_]+", "_", raw_key).strip("_") or "signal_card"
 
 
@@ -9754,7 +8651,7 @@ def render_signal_gallery(
         dict.fromkeys(
             str(row.get("Тикер", "")).upper().strip()
             for row in stable_minute_rows
-            if row.get("Тикер") and row.get("_scanner") != SCANNER_MOMENTUM
+            if row.get("Тикер")
         )
     )
     for batch in chunks(minute_symbols, 25):
@@ -9865,10 +8762,6 @@ def render_signal_gallery(
             gallery_columns = list(st.columns(2, gap="medium"))
         ticker_raw = str(row.get("Тикер", ""))
         ticker_key = ticker_raw.upper().strip()
-        signal_raw = str(row.get("_sig", ""))
-        scanner_raw = str(row.get("_scanner", ""))
-        is_momentum = scanner_raw == SCANNER_MOMENTUM
-        direction_raw = str(row.get("_momentum_direction", ""))
         key_base_root = ticker_ai_key_base(row)
         key_base = key_base_root
         duplicate_idx = 2
@@ -9883,10 +8776,7 @@ def render_signal_gallery(
         ticker = html.escape(str(row.get("Тикер", "")))
         company_name = html.escape(str(row.get("Название") or "").strip())
         exchange_name = html.escape(str(row.get("Биржа") or "").strip())
-        if is_momentum:
-            signal_text = "Импульс ↑" if row.get("_momentum_direction") == MOMENTUM_DIR_UP else "Импульс ↓"
-        else:
-            signal_text = SIGNAL_SHORT_LABELS.get(str(row.get("_sig", "")), str(row.get("Сигнал", "")))
+        signal_text = SIGNAL_SHORT_LABELS.get(str(row.get("_sig", "")), str(row.get("Сигнал", "")))
         signal = html.escape(signal_text)
         identity = " · ".join(value for value in (company_name, exchange_name) if value)
         identity_line = f'<div class="desk-muted">{identity}</div>' if identity else ""
@@ -9932,35 +8822,28 @@ def render_signal_gallery(
                     width="stretch",
                 )
 
-            minute_block = ""
-            if not is_momentum:
-                minute_svg = ""
-                minute_df = minute_bars.get(ticker_key)
-                if minute_df is not None:
-                    minute_svg = pattern_chart_svg(
-                        pattern_chart_payload(
-                            minute_df,
-                            minute_visible,
-                            visible_candles=minute_visible,
-                            timeframe="M",
-                            band_days=0,
-                            show_default_band=False,
-                        )
+            minute_svg = ""
+            minute_df = minute_bars.get(ticker_key)
+            if minute_df is not None:
+                minute_svg = pattern_chart_svg(
+                    pattern_chart_payload(
+                        minute_df,
+                        minute_visible,
+                        visible_candles=minute_visible,
+                        timeframe="M",
+                        band_days=0,
+                        show_default_band=False,
                     )
-
-                minute_block = (
-                    f'<div class="pattern-chart-panel"><div class="pattern-chart-panel-title">Минутка · {minute_visible} баров</div>'
-                    f'<div class="pattern-chart-svg">{minute_svg}</div></div>'
-                    if minute_svg
-                    else '<div class="pattern-chart-panel"><div class="desk-muted">Минутные свечи Alpaca сейчас недоступны.</div></div>'
                 )
-            chart_title = (
-                f"Pulse 1Min · до {MINUTE_CHART_VISIBLE_CANDLES} баров"
-                if is_momentum
-                else f"Дневка · {CHART_VISIBLE_CANDLES} баров"
+            minute_block = (
+                f'<div class="pattern-chart-panel"><div class="pattern-chart-panel-title">Минутка · {minute_visible} баров</div>'
+                f'<div class="pattern-chart-svg">{minute_svg}</div></div>'
+                if minute_svg
+                else '<div class="pattern-chart-panel"><div class="desk-muted">Минутные свечи Alpaca сейчас недоступны.</div></div>'
             )
+            chart_title = f"Дневка · {CHART_VISIBLE_CANDLES} баров"
             if daily_svg:
-                extra_panel = minute_block if minute_block else ""
+                extra_panel = minute_block
                 st.markdown(
                     f"""
                     <div class="pattern-chart-stack">
@@ -9973,13 +8856,11 @@ def render_signal_gallery(
                     """,
                     unsafe_allow_html=True,
                 )
-            ai_row = row
-            if not is_momentum:
-                ai_row = ai_rows_with_intraday_context(
-                    [row],
-                    {ticker_key: minute_bars.get(ticker_key)},
-                    minute_visible,
-                )[0]
+            ai_row = ai_rows_with_intraday_context(
+                [row],
+                {ticker_key: minute_bars.get(ticker_key)},
+                minute_visible,
+            )[0]
             render_ticker_ai_control(
                 ai_row,
                 cfg,
@@ -10099,7 +8980,7 @@ with st.sidebar:
         """
         <div class="sidebar-brand">
             <div class="sidebar-brand-title">PR Screener</div>
-            <div class="sidebar-brand-subtitle">Взрыв базы · RVOL · VCP · Spring · Short/Put · Pulse</div>
+            <div class="sidebar-brand-subtitle">Взрыв базы + RVOL · Два дня вниз с опционами</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -10117,16 +8998,8 @@ with st.sidebar:
         ),
     )
     scanner_mode = {label: code for code, label in SCANNER_LABELS.items()}[scanner_label]
-    base_impulse_only = scanner_mode == SCANNER_BASE
-    # Объединённому режиму нужны ОБА блока ползунков. base_impulse_only не трогаем —
-    # он управляет ещё и сортировкой с набором колонок (sort_results/display_frame),
-    # поэтому для показа настроек вводим отдельный флаг.
-    base_sliders = scanner_mode in (SCANNER_BASE, SCANNER_COMBO)
-    rvol_active = scanner_mode in (SCANNER_RVOL, SCANNER_COMBO)
-    vcp_active = scanner_mode == SCANNER_VCP
-    spring_active = scanner_mode == SCANNER_SPRING
-    short_put_active = scanner_mode == SCANNER_SHORT_PUT
-    momentum_active = scanner_mode == SCANNER_MOMENTUM
+    combo_active = scanner_mode == SCANNER_COMBO
+    down_opt_active = scanner_mode == SCANNER_DOWN_OPT
     st.caption(SCANNER_HELP[scanner_mode])
 
     st.markdown('<div class="desk-section-title">Данные</div>', unsafe_allow_html=True)
@@ -10166,13 +9039,26 @@ with st.sidebar:
         )
         if not (ALPACA_KEY and ALPACA_SECRET):
             st.warning("Для Alpaca SIP нужны ALPACA_KEY и ALPACA_SECRET в secrets.")
-    if momentum_active:
-        st.caption("Pulse использует только Alpaca SIP 1Min. Yahoo в этом режиме не нужен.")
     if data_source == DATA_SOURCE_AUTO and yf is None:
         st.warning("yfinance не установлен: Yahoo Finance недоступен как резерв.")
 
     st.markdown('<div class="desk-section-title">Рынок</div>', unsafe_allow_html=True)
     exchange = st.selectbox("Биржа", ["ALL", "NASDAQ", "NYSE", "AMEX"], index=0)
+    country_label = st.radio(
+        "Рынок",
+        [COUNTRY_LABELS[COUNTRY_US_ONLY], COUNTRY_LABELS[COUNTRY_ALL]],
+        index=0,
+        help=(
+            "Только американский рынок — отсекаются иностранные эмитенты: ADR, "
+            "китайские и израильские компании. Все рынки — показываем всё подряд. "
+            "Страна берётся у скринера Nasdaq отдельным запросом и кэшируется на 6 часов."
+        ),
+    )
+    country_mode = (
+        COUNTRY_US_ONLY
+        if country_label == COUNTRY_LABELS[COUNTRY_US_ONLY]
+        else COUNTRY_ALL
+    )
     max_tickers = st.slider(
         "Акций за прогон",
         50,
@@ -10194,85 +9080,40 @@ with st.sidebar:
         5,
         help="Отбрасывает тикеры, у которых последний дневной бар слишком старый.",
     )
-    if base_sliders or momentum_active:
+    defaults = ScanConfig()
+    if combo_active:
+        # В объединённом режиме фильтр ликвидности отключён сознательно: там его
+        # роль играет сам объёмный всплеск.
         min_dollar_volume = 0
     else:
         min_dollar_volume_input = st.number_input(
             "Мин. долларовый объём сегодня",
             0,
             100_000_000,
-            5_000_000 if short_put_active else 1_000_000,
-            250_000 if short_put_active else 50_000,
-            help="Для RVOL, VCP, Spring и Short/Put фильтрует слишком тонкие акции.",
+            0,
+            250_000,
+            help=(
+                "0 значит фильтр выключен. Проверка опционов сама отсекает тонкие "
+                "бумаги: контракты есть только у ликвидных. Поднимай, если выдача "
+                "слишком большая."
+            ),
         )
         min_dollar_volume = int(min_dollar_volume_input)
 
-    defaults = ScanConfig()
-    # В объединённом режиме линейка базы обязана быть включена, иначе
+    # Линейка базы в объединённом режиме обязана быть включена, иначе
     # build_base_impulse сразу вернёт None и останется только RVOL.
-    base_impulse_enabled = base_sliders
+    base_impulse_enabled = combo_active
     base_impulse_days = defaults.base_impulse_days
     base_width_filter_enabled = defaults.base_width_filter_enabled
     base_max_width_pct = defaults.base_max_width_pct
     base_volume_mult = defaults.base_volume_mult
     rvol_avg_days = defaults.rvol_avg_days
     rvol_mult = defaults.rvol_mult
-    rvol_day_range_filter_enabled = defaults.rvol_day_range_filter_enabled
-    rvol_max_day_range_pct = defaults.rvol_max_day_range_pct
-    vcp_days = defaults.vcp_days
-    vcp_max_base_width_pct = defaults.vcp_max_base_width_pct
-    vcp_max_recent_width_pct = defaults.vcp_max_recent_width_pct
-    vcp_min_compression_pct = defaults.vcp_min_compression_pct
-    vcp_near_high_pct = defaults.vcp_near_high_pct
-    vcp_dry_volume_ratio = defaults.vcp_dry_volume_ratio
-    spring_support_days = defaults.spring_support_days
-    spring_low_days = defaults.spring_low_days
-    spring_break_pct = defaults.spring_break_pct
-    spring_reclaim_pct = defaults.spring_reclaim_pct
-    spring_close_position_pct = defaults.spring_close_position_pct
-    spring_volume_mult = defaults.spring_volume_mult
-    spring_max_from_low_pct = defaults.spring_max_from_low_pct
-    short_base_days = defaults.short_base_days
-    short_channel_enabled = defaults.short_channel_enabled
-    short_max_base_width_pct = defaults.short_max_base_width_pct
-    short_volume_mult = defaults.short_volume_mult
-    short_min_drop_pct = defaults.short_min_drop_pct
-    short_break_buffer_pct = defaults.short_break_buffer_pct
-    short_close_position_pct = defaults.short_close_position_pct
-    short_put_min_dte = defaults.short_put_min_dte
-    short_put_max_dte = defaults.short_put_max_dte
-    short_put_strike_range_pct = defaults.short_put_strike_range_pct
-    short_put_min_open_interest = defaults.short_put_min_open_interest
-    short_put_max_spread_pct = defaults.short_put_max_spread_pct
-    short_put_min_bid = defaults.short_put_min_bid
-    short_put_max_contracts = defaults.short_put_max_contracts
-    short_put_feed = defaults.short_put_feed
-    momentum_direction = defaults.momentum_direction
-    momentum_fast_minutes = defaults.momentum_fast_minutes
-    momentum_confirm_minutes = defaults.momentum_confirm_minutes
-    momentum_volume_baseline_minutes = defaults.momentum_volume_baseline_minutes
-    momentum_min_fast_move_pct = defaults.momentum_min_fast_move_pct
-    momentum_min_confirm_move_pct = defaults.momentum_min_confirm_move_pct
-    momentum_volume_mult = defaults.momentum_volume_mult
-    momentum_confirm_volume_mult = defaults.momentum_confirm_volume_mult
-    momentum_min_5m_dollar_volume = defaults.momentum_min_5m_dollar_volume
-    momentum_min_15m_dollar_volume = defaults.momentum_min_15m_dollar_volume
-    momentum_min_day_dollar_volume = defaults.momentum_min_day_dollar_volume
-    momentum_max_bar_age_minutes = defaults.momentum_max_bar_age_minutes
-    momentum_max_vwap_distance_pct = defaults.momentum_max_vwap_distance_pct
-    momentum_require_vwap_side = defaults.momentum_require_vwap_side
-    momentum_require_ema_trend = defaults.momentum_require_ema_trend
-    momentum_include_extended_hours = defaults.momentum_include_extended_hours
-    momentum_min_score = defaults.momentum_min_score
-    momentum_min_quality_checks = defaults.momentum_min_quality_checks
-    momentum_require_new_volume_wave = defaults.momentum_require_new_volume_wave
-    momentum_min_volume_acceleration = defaults.momentum_min_volume_acceleration
-    momentum_max_prior_fast_rvol = defaults.momentum_max_prior_fast_rvol
-    momentum_max_recent_prior_rvol = defaults.momentum_max_recent_prior_rvol
-    momentum_min_fast_volume_share_pct = defaults.momentum_min_fast_volume_share_pct
-    momentum_max_confirm_move_pct = defaults.momentum_max_confirm_move_pct
+    travel_filter_enabled = defaults.travel_filter_enabled
+    max_travel_pct = defaults.max_travel_pct
+    down_volume_mult = defaults.down_volume_mult
 
-    if base_sliders:
+    if combo_active:
         st.markdown('<div class="desk-section-title">Взрыв из базы</div>', unsafe_allow_html=True)
         base_impulse_days = st.slider(
             "Предыдущих свечей для сравнения объёма",
@@ -10280,15 +9121,17 @@ with st.sidebar:
             20,
             defaults.base_impulse_days,
             1,
-            help=SCANNER_HELP[SCANNER_BASE],
+            help=(
+                "Сегодняшнее открытие внутри вчерашней свечи, а сегодняшний объём "
+                "выше максимального объёма среди этих предыдущих свечей."
+            ),
         )
         base_width_filter_enabled = st.toggle(
             "Учитывать ширину базы",
             value=defaults.base_width_filter_enabled,
             help=(
-                "По умолчанию выключено: ширина базы не блокирует ваш паттерн. "
-                "Если включить, скринер дополнительно отсеет широкие базы; основные условия остаются прежними: "
-                "открытие внутри вчерашней свечи и объём выше максимума прошлых свечей."
+                "По умолчанию выключено: ширина базы не блокирует твой паттерн. "
+                "Если включить, скринер дополнительно отсеет широкие базы."
             ),
         )
         if base_width_filter_enabled:
@@ -10298,7 +9141,7 @@ with st.sidebar:
                 80.0,
                 defaults.base_max_width_pct,
                 1.0,
-                help="Ширина канала считается по выбранным предыдущим свечам: high базы против low базы. 40% значит, что база за выбранные дни должна быть не шире 40%.",
+                help="Ширина считается по выбранным свечам: high базы против low базы.",
             )
         base_volume_mult = st.slider(
             "Сегодняшний объём выше каждой прошлой свечи ×",
@@ -10306,10 +9149,9 @@ with st.sidebar:
             50,
             int(defaults.base_volume_mult),
             1,
-            help="1 означает: сегодняшний объём строго больше максимального объёма среди предыдущих свечей. 50 означает: больше максимума предыдущих свечей в 50 раз.",
+            help="1 означает: объём строго больше максимума предыдущих свечей. 50 — больше в пятьдесят раз.",
         )
 
-    if rvol_active:
         st.markdown('<div class="desk-section-title">Относительный объём RVOL</div>', unsafe_allow_html=True)
         rvol_avg_days = st.slider(
             "RVOL · средний объём за дней",
@@ -10317,7 +9159,7 @@ with st.sidebar:
             60,
             defaults.rvol_avg_days,
             1,
-            help="Сколько предыдущих дневных свечей берём для средней. Базовый рыночный пресет: 30 дней, чтобы сравнивать с месячной нормой.",
+            help="Сколько предыдущих дневных свечей берём для средней. Пресет 30 дней — месячная норма.",
         )
         rvol_mult = st.slider(
             "RVOL · объём сегодня выше средней ×",
@@ -10325,289 +9167,64 @@ with st.sidebar:
             20.0,
             defaults.rvol_mult,
             0.5,
-            help="Сигнал появляется, когда сегодняшний объём минимум во столько раз выше средней за выбранные дни. Базовый пресет: 2x как заметное отклонение от обычного объёма.",
+            help="Сигнал появляется, когда сегодняшний объём минимум во столько раз выше средней.",
         )
-        rvol_day_range_filter_enabled = st.toggle(
-            "Ограничить максимальный ход акции сегодня",
-            value=defaults.rvol_day_range_filter_enabled,
+
+        st.markdown('<div class="desk-section-title">Ограничитель хода</div>', unsafe_allow_html=True)
+        travel_filter_enabled = st.toggle(
+            "Отсекать убежавшие бумаги",
+            value=defaults.travel_filter_enabled,
             help=(
-                "Считает самое далёкое отклонение сегодняшнего High или Low от вчерашнего закрытия, включая хвосты. "
-                "Выключено по умолчанию, поэтому широкий поиск RVOL не меняется."
+                "Включено по умолчанию. Считает самое далёкое отклонение сегодняшнего "
+                "High или Low от вчерашнего закрытия, вместе с хвостами, и отсекает "
+                "бумагу, которая уже прошла больше заданного. Работает для ОБЕИХ "
+                "линеек режима, а не только для RVOL."
             ),
         )
-        rvol_max_day_range_pct = st.slider(
-            "RVOL · максимальный ход от вчерашнего закрытия (%)",
+        max_travel_pct = st.slider(
+            "Максимальный ход от вчерашнего закрытия (%)",
             5,
-            500,
-            int(defaults.rvol_max_day_range_pct),
+            200,
+            int(defaults.max_travel_pct),
             5,
-            disabled=not rvol_day_range_filter_enabled,
+            disabled=not travel_filter_enabled,
             help=(
-                "По умолчанию 30%: акция отсеется, если сегодняшний High или Low уже уходил дальше 30% "
-                "от вчерашнего закрытия. Учитываются хвосты, сегодняшнее закрытие на фильтр не влияет."
+                "30% значит: бумага отсеется, если сегодняшний High или Low уже уходил "
+                "дальше 30% от вчерашнего закрытия. Сегодняшнее закрытие на фильтр не влияет — "
+                "важно, куда бумага реально ходила."
             ),
         )
 
-    if vcp_active:
-        st.markdown('<div class="desk-section-title">VCP-сжатие</div>', unsafe_allow_html=True)
-        vcp_days = st.slider("Период VCP, дней", 30, 90, defaults.vcp_days, 5, help=SCANNER_HELP[SCANNER_VCP])
-        vcp_max_base_width_pct = st.slider("Макс. ширина всей базы (%)", 15.0, 70.0, defaults.vcp_max_base_width_pct, 1.0)
-        vcp_max_recent_width_pct = st.slider("Макс. ширина последней трети (%)", 3.0, 25.0, defaults.vcp_max_recent_width_pct, 0.5)
-        vcp_min_compression_pct = st.slider("Минимальное сжатие диапазона (%)", 10.0, 70.0, defaults.vcp_min_compression_pct, 1.0)
-        vcp_near_high_pct = st.slider("Цена не дальше от верха базы (%)", 2.0, 20.0, defaults.vcp_near_high_pct, 0.5)
-        vcp_dry_volume_ratio = st.slider(
-            "Сухой объём: последняя треть / первые две",
-            0.30,
-            1.20,
-            defaults.vcp_dry_volume_ratio,
-            0.05,
-            help="0.80 значит: средний объём последней трети базы должен быть не выше 80% от среднего объёма первых двух третей.",
+    if down_opt_active:
+        st.markdown('<div class="desk-section-title">Два дня вниз</div>', unsafe_allow_html=True)
+        st.caption(
+            "Условие жёсткое и без порогов: вчерашняя свеча красная — закрылась ниже "
+            "своего открытия, — а сейчас цена ниже вчерашнего закрытия. Падение уже "
+            "началось. Глубину смотри глазами по графику."
         )
-
-    if spring_active:
-        st.markdown('<div class="desk-section-title">Spring-отскок</div>', unsafe_allow_html=True)
-        spring_support_days = st.slider("Поддержка за дней", 30, 120, defaults.spring_support_days, 5, help=SCANNER_HELP[SCANNER_SPRING])
-        spring_low_days = st.slider("Дно смотреть за дней", 60, 250, defaults.spring_low_days, 10)
-        spring_break_pct = st.slider("Минимальный прокол поддержки (%)", 0.1, 10.0, defaults.spring_break_pct, 0.1)
-        spring_reclaim_pct = st.slider("Возврат выше поддержки (%)", 0.0, 5.0, defaults.spring_reclaim_pct, 0.1)
-        spring_close_position_pct = st.slider(
-            "Закрытие в верхней части свечи (%)",
-            40.0,
-            90.0,
-            defaults.spring_close_position_pct,
-            1.0,
-            help="60% значит: закрытие должно быть выше середины дневного диапазона и ближе к high.",
-        )
-        spring_volume_mult = st.slider("Объём выше среднего ×", 1.0, 5.0, defaults.spring_volume_mult, 0.1)
-        spring_max_from_low_pct = st.slider("Цена не дальше от дна периода (%)", 5.0, 80.0, defaults.spring_max_from_low_pct, 1.0)
-
-    if short_put_active:
-        st.markdown('<div class="desk-section-title">Short / Put пробой вниз</div>', unsafe_allow_html=True)
-        short_base_days = st.slider(
-            "База / сравнение объёма, свечей",
-            5,
-            30,
-            defaults.short_base_days,
-            1,
-            help="Сколько предыдущих дневных свечей берём для канала и максимального объёма.",
-        )
-        short_channel_enabled = st.toggle(
-            "Требовать пробой канала вниз",
-            value=defaults.short_channel_enabled,
-            help="Если включено, цена должна закрыться ниже нижней границы базы. Если выключить, ищем любое падение на объёме.",
-        )
-        if short_channel_enabled:
-            short_max_base_width_pct = st.slider(
-                "Макс. ширина канала (%)",
-                5.0,
-                100.0,
-                defaults.short_max_base_width_pct,
-                1.0,
-            )
-            short_break_buffer_pct = st.slider(
-                "Буфер пробоя вниз (%)",
-                0.0,
-                10.0,
-                defaults.short_break_buffer_pct,
-                0.1,
-                help="Насколько закрытие должно быть ниже низа базы.",
-            )
-        short_volume_mult = st.slider(
-            "Объём сегодня выше максимума базы ×",
-            2.0,
-            30.0,
-            defaults.short_volume_mult,
-            0.5,
-            help="Главный фильтр режима. По умолчанию минимум 2x: сначала объём, потом движение.",
-        )
-        short_min_drop_pct = st.slider(
-            "Мин. падение сегодня (%)",
-            0.1,
-            20.0,
-            defaults.short_min_drop_pct,
-            0.1,
-            help="Минимальное красное движение. Сильные падения не отбрасываются: ты сам решаешь по графику.",
-        )
-        short_close_position_pct = st.slider(
-            "Закрытие не выше части свечи (%)",
+        down_volume_mult = st.slider(
+            "Сегодняшний объём к вчерашнему ×",
+            0.0,
             5.0,
-            70.0,
-            defaults.short_close_position_pct,
-            1.0,
-            help="40% значит: закрытие ближе к low дневной свечи, а не откуплено вверх.",
+            defaults.down_volume_mult,
+            0.25,
+            help=(
+                "0 — объём не учитывается вообще, это значение по умолчанию. "
+                "1 — сегодняшний объём не меньше вчерашнего. 2 — вдвое больше "
+                "вчерашнего. Сравнение идёт именно со ВЧЕРАШНИМ днём, а не со средней."
+            ),
         )
         st.caption(
-            "Put-опционы проверяются автоматически: скринер оставляет только тикеры, "
-            "где есть торгуемый живой put с bid/ask. Дневные и завтрашние опционы не отбрасываются."
+            "Опционы проверяются автоматически после скана: в выдаче останутся только "
+            "бумаги, у которых есть и call, и put с экспирацией в ближайшие "
+            f"{OPT_EXPIRY_WINDOW_DAYS} дней. Проверка идёт пачками по {OPT_BATCH_SYMBOLS} тикеров."
         )
-
-    if momentum_active:
-        st.markdown('<div class="desk-section-title">Pulse · что-то произошло</div>', unsafe_allow_html=True)
-        momentum_direction_label = st.selectbox(
-            "Направление импульса",
-            list(MOMENTUM_DIRECTION_LABELS.keys()),
-            index=0,
-            help="По умолчанию ищем и резкий рост, и резкое падение. Это режим события: сначала поймать интерес, дальше ты сам решаешь направление.",
-        )
-        momentum_direction = MOMENTUM_DIRECTION_LABELS[momentum_direction_label]
-        momentum_col_1, momentum_col_2 = st.columns(2)
-        with momentum_col_1:
-            momentum_fast_minutes = st.slider(
-                "Быстрый импульс, минут",
-                3,
-                10,
-                defaults.momentum_fast_minutes,
-                1,
-                help="Короткое окно старта: здесь Pulse ищет самый первый всплеск объёма.",
-            )
-            momentum_min_fast_move_pct = st.slider(
-                "Мин. движение за быстрое окно (%)",
-                0.3,
-                10.0,
-                defaults.momentum_min_fast_move_pct,
-                0.1,
-                help="Движение не главное, но оно должно подтверждать, что повышенный объём реально двигает цену.",
-            )
-            momentum_volume_mult = st.slider(
-                "Объём быстрого окна выше нормы ×",
-                1.5,
-                20.0,
-                defaults.momentum_volume_mult,
-                0.5,
-                help="Главный фильтр Pulse. 6x значит: текущий объём должен быть минимум в шесть раз выше внутридневной нормы.",
-            )
-            momentum_min_5m_dollar_volume = st.number_input(
-                "Мин. $ объём быстрого окна",
-                0,
-                50_000_000,
-                defaults.momentum_min_5m_dollar_volume,
-                50_000,
-            )
-        with momentum_col_2:
-            momentum_confirm_minutes = st.slider(
-                "Подтверждение, минут",
-                10,
-                30,
-                defaults.momentum_confirm_minutes,
-                1,
-                help="Короткое подтверждение старта, чтобы не ловить одиночный случайный принт.",
-            )
-            momentum_min_confirm_move_pct = st.slider("Мин. движение за подтверждение (%)", 0.5, 15.0, defaults.momentum_min_confirm_move_pct, 0.1)
-            momentum_confirm_volume_mult = st.slider("Объём подтверждения выше нормы ×", 1.2, 15.0, defaults.momentum_confirm_volume_mult, 0.2)
-            momentum_min_15m_dollar_volume = st.number_input(
-                "Мин. $ объём подтверждения",
-                0,
-                100_000_000,
-                defaults.momentum_min_15m_dollar_volume,
-                50_000,
-            )
-        momentum_volume_baseline_minutes = st.slider(
-            "Норму объёма считать по предыдущим минутам",
-            20,
-            120,
-            defaults.momentum_volume_baseline_minutes,
-            5,
-            help="Берём предыдущий внутридневной участок и сравниваем с ним текущий всплеск. Чем больше окно, тем спокойнее фильтр.",
-        )
-        momentum_min_day_dollar_volume = st.number_input(
-            "Мин. $ объём с начала сессии",
-            0,
-            200_000_000,
-            defaults.momentum_min_day_dollar_volume,
-            100_000,
-        )
-        momentum_quality_col_1, momentum_quality_col_2 = st.columns(2)
-        with momentum_quality_col_1:
-            momentum_max_bar_age_minutes = st.slider(
-                "Свежесть последней минутки, мин",
-                1,
-                15,
-                defaults.momentum_max_bar_age_minutes,
-                1,
-                help="Если последняя минутная свеча старше этого значения, тикер не считается свежим.",
-            )
-            momentum_max_vwap_distance_pct = st.slider(
-                "Не дальше от VWAP (%)",
-                0.0,
-                30.0,
-                defaults.momentum_max_vwap_distance_pct,
-                0.5,
-                help="Защита от слишком позднего входа: если цена уже очень далеко от VWAP, сигнал отбрасывается. 0 выключает фильтр.",
-            )
-            momentum_min_score = st.slider("Мин. балл Pulse", 50, 95, defaults.momentum_min_score, 5)
-            momentum_min_quality_checks = st.slider(
-                "Мин. подтверждений качества",
-                2,
-                6,
-                defaults.momentum_min_quality_checks,
-                1,
-                help="Дополнительный отсев мусора: VWAP, EMA 9/20, пробой 20 минут, направленные свечи, новая волна объёма, близость к VWAP.",
-            )
-        with momentum_quality_col_2:
-            momentum_require_new_volume_wave = st.toggle(
-                "Требовать новую волну объёма",
-                value=defaults.momentum_require_new_volume_wave,
-                help="Главная защита от поздних сигналов: текущие минуты должны быть заметно сильнее предыдущего такого же окна.",
-            )
-            if momentum_require_new_volume_wave:
-                momentum_min_volume_acceleration = st.slider(
-                    "Ускорение объёма к прошлому окну ×",
-                    1.0,
-                    10.0,
-                    defaults.momentum_min_volume_acceleration,
-                    0.25,
-                )
-                momentum_max_prior_fast_rvol = st.slider(
-                    "Макс. RVOL прошлого окна ×",
-                    0.5,
-                    10.0,
-                    defaults.momentum_max_prior_fast_rvol,
-                    0.25,
-                    help="Если прошлое окно уже было горячим, это уже не начало движения, а продолжение.",
-                )
-                momentum_max_recent_prior_rvol = st.slider(
-                    "Макс. RVOL прошлых 20 минут ×",
-                    0.5,
-                    12.0,
-                    defaults.momentum_max_recent_prior_rvol,
-                    0.25,
-                    help="Если за последние 20 минут уже был горячий объём, новый сигнал считается не первой волной.",
-                )
-                momentum_min_fast_volume_share_pct = st.slider(
-                    "Доля быстрого объёма в подтверждении (%)",
-                    10.0,
-                    90.0,
-                    defaults.momentum_min_fast_volume_share_pct,
-                    5.0,
-                    help="Показывает, что основной поток объёма происходит прямо сейчас, а не уже размазан по прошлым минутам.",
-                )
-            momentum_max_confirm_move_pct = st.slider(
-                "Макс. движение подтверждения (%)",
-                0.0,
-                30.0,
-                defaults.momentum_max_confirm_move_pct,
-                0.5,
-                help="0 выключает фильтр. По умолчанию не даём Pulse ловить слишком поздний улёт.",
-            )
-            momentum_require_vwap_side = st.toggle(
-                "Требовать сторону VWAP",
-                value=defaults.momentum_require_vwap_side,
-                help="Рост должен быть выше VWAP, падение ниже VWAP. Это отсеивает слабые импульсы против внутридневного потока.",
-            )
-            momentum_require_ema_trend = st.toggle(
-                "Требовать EMA 9/20",
-                value=defaults.momentum_require_ema_trend,
-                help="Рост должен иметь EMA9 выше EMA20, падение EMA9 ниже EMA20. Это снижает шум.",
-            )
-            momentum_include_extended_hours = st.toggle(
-                "Pre/Post-market",
-                value=defaults.momentum_include_extended_hours,
-                help="Включает премаркет и постмаркет в Pulse. На графике эти зоны подсвечиваются серым.",
-            )
 
     st.markdown('<div class="desk-section-title">Цена</div>', unsafe_allow_html=True)
-    default_min_price = 0.0 if base_sliders else defaults.min_price
-    default_max_price = 200.0 if short_put_active else (50.0 if momentum_active else defaults.max_price)
+    # У режимов разные привычные коридоры: взрыв базы живёт в дешёвых бумагах,
+    # а опционы бывают в основном у бумаг дороже.
+    default_min_price = 5.0 if down_opt_active else defaults.min_price
+    default_max_price = 200.0 if down_opt_active else defaults.max_price
     min_price, max_price = st.slider(
         "Диапазон цены акции, $",
         min_value=0.0,
@@ -10641,7 +9258,7 @@ with st.sidebar:
     auto_scan_requested = st.toggle("Авто-скан", value=False)
     auto_scan_available = st_autorefresh is not None
     auto_interval_options = [1, 2, 3, 4, 5, 60]
-    auto_interval = 1 if momentum_active else 5
+    auto_interval = 5
     auto_continuous = False
     if auto_scan_requested:
         auto_scan = auto_scan_available
@@ -10686,71 +9303,19 @@ status_tone = {"success": "green", "warning": "amber", "info": "blue"}.get(statu
 cfg = ScanConfig(
     scanner_mode=scanner_mode,
     min_dollar_volume=int(min_dollar_volume),
+    max_stale_days=max_stale_days,
+    min_price=min_price,
+    max_price=max_price,
     base_impulse_enabled=base_impulse_enabled,
     base_impulse_days=base_impulse_days,
     base_width_filter_enabled=base_width_filter_enabled,
     base_max_width_pct=base_max_width_pct,
     base_volume_mult=base_volume_mult,
-    base_impulse_only=base_impulse_only,
-    max_stale_days=max_stale_days,
-    min_price=min_price,
-    max_price=max_price,
     rvol_avg_days=rvol_avg_days,
     rvol_mult=rvol_mult,
-    rvol_day_range_filter_enabled=rvol_day_range_filter_enabled,
-    rvol_max_day_range_pct=float(rvol_max_day_range_pct),
-    vcp_days=vcp_days,
-    vcp_max_base_width_pct=vcp_max_base_width_pct,
-    vcp_max_recent_width_pct=vcp_max_recent_width_pct,
-    vcp_min_compression_pct=vcp_min_compression_pct,
-    vcp_near_high_pct=vcp_near_high_pct,
-    vcp_dry_volume_ratio=vcp_dry_volume_ratio,
-    spring_support_days=spring_support_days,
-    spring_low_days=spring_low_days,
-    spring_break_pct=spring_break_pct,
-    spring_reclaim_pct=spring_reclaim_pct,
-    spring_close_position_pct=spring_close_position_pct,
-    spring_volume_mult=spring_volume_mult,
-    spring_max_from_low_pct=spring_max_from_low_pct,
-    short_base_days=short_base_days,
-    short_channel_enabled=short_channel_enabled,
-    short_max_base_width_pct=short_max_base_width_pct,
-    short_volume_mult=short_volume_mult,
-    short_min_drop_pct=short_min_drop_pct,
-    short_break_buffer_pct=short_break_buffer_pct,
-    short_close_position_pct=short_close_position_pct,
-    short_put_min_dte=short_put_min_dte,
-    short_put_max_dte=short_put_max_dte,
-    short_put_strike_range_pct=short_put_strike_range_pct,
-    short_put_min_open_interest=short_put_min_open_interest,
-    short_put_max_spread_pct=short_put_max_spread_pct,
-    short_put_min_bid=short_put_min_bid,
-    short_put_max_contracts=short_put_max_contracts,
-    short_put_feed=short_put_feed,
-    momentum_direction=momentum_direction,
-    momentum_fast_minutes=momentum_fast_minutes,
-    momentum_confirm_minutes=momentum_confirm_minutes,
-    momentum_volume_baseline_minutes=momentum_volume_baseline_minutes,
-    momentum_min_fast_move_pct=momentum_min_fast_move_pct,
-    momentum_min_confirm_move_pct=momentum_min_confirm_move_pct,
-    momentum_volume_mult=momentum_volume_mult,
-    momentum_confirm_volume_mult=momentum_confirm_volume_mult,
-    momentum_min_5m_dollar_volume=int(momentum_min_5m_dollar_volume),
-    momentum_min_15m_dollar_volume=int(momentum_min_15m_dollar_volume),
-    momentum_min_day_dollar_volume=int(momentum_min_day_dollar_volume),
-    momentum_max_bar_age_minutes=momentum_max_bar_age_minutes,
-    momentum_max_vwap_distance_pct=momentum_max_vwap_distance_pct,
-    momentum_require_vwap_side=momentum_require_vwap_side,
-    momentum_require_ema_trend=momentum_require_ema_trend,
-    momentum_include_extended_hours=momentum_include_extended_hours,
-    momentum_min_score=momentum_min_score,
-    momentum_min_quality_checks=momentum_min_quality_checks,
-    momentum_require_new_volume_wave=momentum_require_new_volume_wave,
-    momentum_min_volume_acceleration=momentum_min_volume_acceleration,
-    momentum_max_prior_fast_rvol=momentum_max_prior_fast_rvol,
-    momentum_max_recent_prior_rvol=momentum_max_recent_prior_rvol,
-    momentum_min_fast_volume_share_pct=momentum_min_fast_volume_share_pct,
-    momentum_max_confirm_move_pct=momentum_max_confirm_move_pct,
+    travel_filter_enabled=travel_filter_enabled,
+    max_travel_pct=float(max_travel_pct),
+    down_volume_mult=float(down_volume_mult),
 )
 
 active_result_signature = (
@@ -10796,7 +9361,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if cfg.scanner_mode == SCANNER_BASE:
+# ПАРАМЕТРЫ СКАНА. Раньше объединённый режим своей ветки здесь не имел и падал
+# в общий else — на панели висел ровно один чип «Режим», а настройки скана
+# пользователь не видел вообще. Теперь у каждого из двух режимов свой набор.
+if cfg.scanner_mode == SCANNER_COMBO:
     setup_chips = "".join(
         [
             chip("Режим", mode_label, "amber"),
@@ -10804,119 +9372,47 @@ if cfg.scanner_mode == SCANNER_BASE:
             chip("За прогон", format_int_cell(max_tickers)),
             chip("Цена", f"${min_price:g}-${max_price:g}"),
             chip("Открытие", "внутри вчерашней свечи", "blue"),
-            chip("База", f"{cfg.base_impulse_days} св. до {cfg.base_max_width_pct:g}%" if cfg.base_width_filter_enabled else f"{cfg.base_impulse_days} св. · ширина выкл."),
-            chip("RVOL", f">{cfg.base_volume_mult:g}x к макс. из {cfg.base_impulse_days}"),
-            chip("Свежесть", f"{cfg.max_stale_days}д"),
-            chip("Источник", DATA_SOURCE_LABELS.get(data_source, data_source), "green"),
-            chip("Alpaca", alpaca_freshness_label, alpaca_freshness_tone),
-        ]
-    )
-elif cfg.scanner_mode == SCANNER_RVOL:
-    setup_chips = "".join(
-        [
-            chip("Режим", mode_label, "amber"),
-            chip("Биржа", exchange),
-            chip("За прогон", format_int_cell(max_tickers)),
-            chip("Цена", f"${min_price:g}-${max_price:g}"),
-            chip("Средняя", f"{cfg.rvol_avg_days} дней"),
-            chip("RVOL", f"≥ {cfg.rvol_mult:g}x"),
             chip(
-                "Ход сегодня",
-                f"≤ {cfg.rvol_max_day_range_pct:g}% от prev close" if cfg.rvol_day_range_filter_enabled else "без ограничения",
-                "blue" if cfg.rvol_day_range_filter_enabled else "",
+                "База",
+                f"{cfg.base_impulse_days} св. до {cfg.base_max_width_pct:g}%"
+                if cfg.base_width_filter_enabled
+                else f"{cfg.base_impulse_days} св. · ширина выкл.",
+            ),
+            chip("Объём базы", f"≥ {cfg.base_volume_mult:g}x к макс. из {cfg.base_impulse_days}"),
+            chip("RVOL", f"≥ {cfg.rvol_mult:g}x к средней {cfg.rvol_avg_days} дн."),
+            chip(
+                "Ход от вчера",
+                f"≤ {cfg.max_travel_pct:g}%" if cfg.travel_filter_enabled else "без ограничения",
+                "blue" if cfg.travel_filter_enabled else "red",
             ),
             chip("Свежесть", f"{cfg.max_stale_days}д"),
             chip("Свечи/объём", DATA_SOURCE_LABELS.get(data_source, data_source), "green"),
             chip("Alpaca", alpaca_freshness_label, alpaca_freshness_tone),
-            chip("Долларовый объём", format_dollar_cell(cfg.min_dollar_volume)),
         ]
     )
-elif cfg.scanner_mode == SCANNER_VCP:
-    setup_chips = "".join(
-        [
-            chip("Режим", mode_label, "blue"),
-            chip("Биржа", exchange),
-            chip("За прогон", format_int_cell(max_tickers)),
-            chip("Цена", f"${min_price:g}-${max_price:g}"),
-            chip("VCP", f"{cfg.vcp_days} дней"),
-            chip("База", f"до {cfg.vcp_max_base_width_pct:g}%"),
-            chip("Последняя треть", f"до {cfg.vcp_max_recent_width_pct:g}%"),
-            chip("Сжатие", f"от {cfg.vcp_min_compression_pct:g}%"),
-            chip("До верха", f"до {cfg.vcp_near_high_pct:g}%"),
-            chip("Сухой объём", f"≤ {cfg.vcp_dry_volume_ratio:g}x"),
-            chip("Свежесть", f"{cfg.max_stale_days}д"),
-            chip("Свечи/объём", DATA_SOURCE_LABELS.get(data_source, data_source), "green"),
-            chip("Alpaca", alpaca_freshness_label, alpaca_freshness_tone),
-            chip("Долларовый объём", format_dollar_cell(cfg.min_dollar_volume)),
-        ]
-    )
-elif cfg.scanner_mode == SCANNER_SHORT_PUT:
-    channel_chip = (
-        f"{cfg.short_base_days} св. · до {cfg.short_max_base_width_pct:g}% · пробой {cfg.short_break_buffer_pct:g}%"
-        if cfg.short_channel_enabled
-        else f"{cfg.short_base_days} св. · канал выкл."
-    )
+elif cfg.scanner_mode == SCANNER_DOWN_OPT:
     setup_chips = "".join(
         [
             chip("Режим", mode_label, "red"),
             chip("Биржа", exchange),
             chip("За прогон", format_int_cell(max_tickers)),
             chip("Цена", f"${min_price:g}-${max_price:g}"),
-            chip("Канал", channel_chip),
-            chip("Объём", f"≥ {cfg.short_volume_mult:g}x к макс."),
-            chip("Падение", f"от {cfg.short_min_drop_pct:g}%"),
-            chip("Закрытие", f"нижние {cfg.short_close_position_pct:g}%"),
-            chip("Put", "только живые", "red"),
+            chip("Вчера", "красная свеча", "red"),
+            chip("Сегодня", "цена ниже вчерашнего закрытия", "red"),
+            chip(
+                "Объём к вчера",
+                "не учитывается" if cfg.down_volume_mult <= 0 else f"≥ ×{cfg.down_volume_mult:g}",
+                "" if cfg.down_volume_mult <= 0 else "blue",
+            ),
+            chip("Опционы", f"call и put до {OPT_EXPIRY_WINDOW_DAYS} дн.", "amber"),
+            chip("Шорт", "видно, где можно занять", "amber"),
             chip("Свежесть", f"{cfg.max_stale_days}д"),
-            chip("Alpaca", alpaca_freshness_label, alpaca_freshness_tone),
-            chip("Долларовый объём", format_dollar_cell(cfg.min_dollar_volume)),
-        ]
-    )
-elif cfg.scanner_mode == SCANNER_MOMENTUM:
-    direction_chip = {
-        MOMENTUM_DIR_BOTH: "вверх/вниз",
-        MOMENTUM_DIR_UP: "только вверх",
-        MOMENTUM_DIR_DOWN: "только вниз",
-    }.get(cfg.momentum_direction, "вверх/вниз")
-    setup_chips = "".join(
-        [
-            chip("Режим", mode_label, "red"),
-            chip("Биржа", exchange),
-            chip("За прогон", format_int_cell(max_tickers)),
-            chip("Цена", f"${min_price:g}-${max_price:g}"),
-            chip("Направление", direction_chip),
-            chip("Импульс", f"{cfg.momentum_fast_minutes}м · {cfg.momentum_min_fast_move_pct:g}%"),
-            chip("Подтверждение", f"{cfg.momentum_confirm_minutes}м · {cfg.momentum_min_confirm_move_pct:g}%"),
-            chip("RVOL", f"{cfg.momentum_volume_mult:g}x/{cfg.momentum_confirm_volume_mult:g}x"),
-            chip("Старт объёма", f"{cfg.momentum_min_volume_acceleration:g}x" if cfg.momentum_require_new_volume_wave else "выкл"),
-            chip("Доля", f"{cfg.momentum_min_fast_volume_share_pct:g}%"),
-            chip("$ быстро", format_dollar_cell(cfg.momentum_min_5m_dollar_volume)),
-            chip("$ подтв.", format_dollar_cell(cfg.momentum_min_15m_dollar_volume)),
-            chip("Балл", f"от {cfg.momentum_min_score}"),
-            chip("Качество", f"{cfg.momentum_min_quality_checks}/6"),
-            chip("Свежесть", f"до {cfg.momentum_max_bar_age_minutes}м"),
-            chip("Не поздно", f"до {cfg.momentum_max_confirm_move_pct:g}%" if cfg.momentum_max_confirm_move_pct else "выкл"),
-            chip("Сессия", "pre/post" if cfg.momentum_include_extended_hours else "regular"),
-            chip("Alpaca", alpaca_freshness_label, alpaca_freshness_tone),
-        ]
-    )
-elif cfg.scanner_mode == SCANNER_SPRING:
-    setup_chips = "".join(
-        [
-            chip("Режим", mode_label, "green"),
-            chip("Биржа", exchange),
-            chip("За прогон", format_int_cell(max_tickers)),
-            chip("Цена", f"${min_price:g}-${max_price:g}"),
-            chip("Поддержка", f"{cfg.spring_support_days} дней"),
-            chip("Дно", f"{cfg.spring_low_days} дней"),
-            chip("Прокол", f"от {cfg.spring_break_pct:g}%"),
-            chip("Возврат", f"{cfg.spring_reclaim_pct:g}%"),
-            chip("Закрытие", f"верх {cfg.spring_close_position_pct:g}%"),
-            chip("Объём", f"×{cfg.spring_volume_mult:g}"),
-            chip("От дна", f"до {cfg.spring_max_from_low_pct:g}%"),
             chip("Свечи/объём", DATA_SOURCE_LABELS.get(data_source, data_source), "green"),
             chip("Alpaca", alpaca_freshness_label, alpaca_freshness_tone),
-            chip("Долларовый объём", format_dollar_cell(cfg.min_dollar_volume)),
+            chip(
+                "Долларовый объём",
+                "выкл." if cfg.min_dollar_volume <= 0 else format_dollar_cell(cfg.min_dollar_volume),
+            ),
         ]
     )
 else:
@@ -11048,6 +9544,13 @@ if (start_scan and not auto_running) or (auto_scan and should_auto_run and not a
     st.session_state.ai_analysis_result = {}
     st.session_state.ai_analysis_error = ""
     all_tickers_full = get_market_tickers(exchange, min_price, max_price)
+    # Страна — сразу после загрузки рынка, до всех остальных фильтров: так счётчики
+    # ниже показывают уже отобранное, а не вводят в заблуждение.
+    all_tickers_full, country_note = filter_universe_by_country(
+        all_tickers_full, country_mode, exchange
+    )
+    if country_note:
+        st.caption(country_note)
     batch_size = max(1, int(max_tickers))
 
     if is_auto_batch:
@@ -11109,10 +9612,13 @@ if (start_scan and not auto_running) or (auto_scan and should_auto_run and not a
                 progress_box=progress_box,
                 status_box=status_box,
                 table_box=table_box,
-                send_alerts=False if cfg.scanner_mode == SCANNER_SHORT_PUT else send_alerts,
+                # В режиме с опционами алерты во время скана МОЛЧАТ: опционы
+                # проверяются уже после прохода, и иначе в телефон улетели бы
+                # тикеры, которые эту проверку не прошли.
+                send_alerts=False if cfg.scanner_mode == SCANNER_DOWN_OPT else send_alerts,
             )
-            if cfg.scanner_mode == SCANNER_SHORT_PUT:
-                hits = filter_rows_with_tradable_puts(hits, cfg, status_box)
+            if cfg.scanner_mode == SCANNER_DOWN_OPT:
+                hits = filter_rows_with_options(hits, cfg, status_box)
                 if send_alerts:
                     for row in hits:
                         notify_signal(row)
@@ -11127,7 +9633,7 @@ if (start_scan and not auto_running) or (auto_scan and should_auto_run and not a
                 st.session_state.auto_scan_started_at = None
         hits = mark_new_scan_results(hits)
 
-        st.session_state.results = merge_results(hits, active_old_results, cfg.base_impulse_only)
+        st.session_state.results = merge_results(hits, active_old_results)
 
         progress_box.progress(1.0)
         progress_box.empty()
@@ -11168,8 +9674,7 @@ if (start_scan and not auto_running) or (auto_scan and should_auto_run and not a
                 st.write("\n".join(st.session_state.scan_errors))
 
 visible_results = sort_results(
-    filter_results_for_config(st.session_state.results, cfg, data_source, alpaca_realtime),
-    cfg.base_impulse_only,
+    filter_results_for_config(st.session_state.results, cfg, data_source, alpaca_realtime)
 )
 
 if visible_results:
@@ -11178,13 +9683,35 @@ if visible_results:
     render_ai_analysis_panel(visible_results, cfg, alpaca_realtime)
     render_signal_gallery(visible_results, cfg, data_source, alpaca_realtime)
 
-    csv = display_frame(visible_results, cfg.base_impulse_only, include_chart=False).to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Скачать CSV",
-        data=csv,
-        file_name=f"accumulation_breakout_{now_et().strftime('%Y%m%d_%H%M')}.csv",
-        mime="text/csv",
-    )
+    csv = display_frame(visible_results, include_chart=False).to_csv(index=False).encode("utf-8")
+    _dl_col, _cp_col = st.columns(2)
+    with _dl_col:
+        st.download_button(
+            "Скачать CSV",
+            data=csv,
+            file_name=f"accumulation_breakout_{now_et().strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+    with _cp_col:
+        # Тикеры в буфер одним нажатием — чтобы с телефона сразу вставить в заметку,
+        # в сообщение или в список наблюдения у брокера, не открывая CSV.
+        _cp_syms = [
+            str(row.get("Тикер") or "").strip().upper()
+            for row in visible_results
+            if str(row.get("Тикер") or "").strip()
+        ]
+        # ОБЯЗАТЕЛЬНО через iframe, а НЕ через st.markdown: markdown вырезает тег
+        # <script>, и кнопка нарисовалась бы, но ничего не копировала.
+        # st.iframe есть в новых сборках Streamlit, в старых — только
+        # st.components.v1.html; в requirements стоит streamlit>=1.49, поэтому
+        # поддерживаем оба пути.
+        _cp_html = copy_tickers_block(_cp_syms)
+        if hasattr(st, "iframe"):
+            st.iframe(_cp_html, height=56)
+        else:
+            import streamlit.components.v1 as _components
+            _components.html(_cp_html, height=56)
 else:
     empty_title = "Найденных акций пока нет"
     empty_text = "Ожидание совпадений по текущим рыночным фильтрам."
@@ -11196,7 +9723,7 @@ else:
                 <div class="desk-muted">{empty_text}</div>
             </div>
             <div class="base-results-stats">
-                {chip("Режим", mode_label, "blue" if not cfg.base_impulse_only else "amber")}
+                {chip("Режим", mode_label, "amber" if cfg.scanner_mode == SCANNER_COMBO else "red")}
                 {chip("Источник", DATA_SOURCE_LABELS.get(data_source, data_source), "green")}
                 {chip("Время ET", now_et_str("%H:%M"))}
             </div>
