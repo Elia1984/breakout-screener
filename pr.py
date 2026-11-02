@@ -1060,6 +1060,7 @@ DOWN_OPT_RANGE_DAYS = 24           # полоса диапазона на гра
 OPT_BATCH_SYMBOLS = 40             # бумаг в одном запросе контрактов
 OPT_EXPIRY_WINDOW_DAYS = 60        # окно экспираций, которое считаем «живым»
 OPT_CONTRACTS_CACHE_TTL_SEC = 3600 # цепочки за день не появляются и не исчезают
+OPT_BATCH_ATTEMPTS = 3             # повторов на пачку контрактов при 429/5xx
 
 DATA_SOURCE_AUTO = "AUTO_ALPACA_SIP_YAHOO"
 DATA_SOURCE_ALPACA_SIP = "ALPACA_SIP"
@@ -1101,17 +1102,18 @@ SCANNER_HELP = {
         "вчерашнего закрытия, не показывается — её поезд ушёл."
     ),
     SCANNER_DOWN_OPT: (
-        "Ищет бумаги, которые падают: вчерашняя свеча закрылась ниже своего открытия, "
-        "а сейчас цена ниже вчерашнего закрытия. Открытие могло быть и чуть выше — "
-        "главное, что бумага снова идёт вниз; отсекается только настоящий прыжок "
-        "вверх с утра. В выдачу попадают "
+        "Ищет бумаги, которые падают прямо сейчас, без гэпов. Вчерашняя свеча закрылась "
+        "ниже своего открытия. Сегодня бумага открылась ВНУТРИ вчерашней свечи — не выше "
+        "вчерашнего закрытия и не ниже вчерашнего минимума — и к моменту поиска стоит ниже "
+        "и вчерашнего закрытия, и своего сегодняшнего открытия. Падение идёт и между днями, "
+        "и внутри дня, и гнаться ни за чем не надо. В выдачу попадают "
         "только тикеры с живыми опционами — есть и call, и put с экспирацией в "
         "ближайшие два месяца, то есть торговать опционом реально сегодня."
     ),
 }
 SCANNER_SUBTITLES = {
     SCANNER_COMBO: "Полный рынок · «Взрыв из базы» ИЛИ RVOL · ограничитель хода от вчерашнего закрытия",
-    SCANNER_DOWN_OPT: "Полный рынок · вчера красная свеча · сейчас ниже вчерашнего закрытия · только с живыми опционами",
+    SCANNER_DOWN_OPT: "Полный рынок · вчера вниз · открытие внутри вчерашней свечи · сейчас ниже открытия · только с живыми опционами",
 }
 
 SIGNAL_LABELS = {
@@ -1857,16 +1859,15 @@ class ScanConfig:
     # Сегодняшний объём к ВЧЕРАШНЕМУ. 0 = объём не учитывается вовсе,
     # 1 = не меньше вчерашнего, 2 = вдвое больше вчерашнего.
     down_volume_mult: float = 0.0
-    # Допуск на гэп ВВЕРХ при открытии. Бумага могла открыться чуть выше
-    # вчерашнего закрытия и всё равно поехать вниз — это нормально, главное
-    # падение. Отсекаем только настоящий прыжок вверх.
+    # Насколько НИЖЕ ВЧЕРАШНЕГО ЛОЯ бумаге разрешено открыться.
+    # 0 (по умолчанию) = ни на сколько: открытие обязано быть ВНУТРИ вчерашней
+    # свечи, гэпа вниз нет совсем. 5 = разрешён гэп до 5% ниже вчерашнего лоя.
     #
-    # Замер 29.10.2026 на 109 бумагах с базовым падением: медиана гэпа −0.44%,
-    # и при допуске 0 терялись ЛУЧШИЕ бумаги дня — BOTJ (гэп +0.31%, к моменту
-    # поиска −18.5%) и CD (+0.44%, −17.6%). А те, кто открывался выше +2%,
-    # почти не падали: AERT +4.0% → −0.2%, AIOS +3.2% → −1.0%, ACFN +2.2% → −0.2%.
-    # Отсюда +2%: 105 бумаг из 109, без прыгунов.
-    down_open_max_gap_pct: float = 2.0
+    # Вместе с запретом гэпа вверх это зажимает открытие в коридор
+    # [вчерашний лой · вчерашнее закрытие]: бумага открылась внутри вчерашней
+    # свечи и поехала вниз. Смысл: если она открылась сразу глубоко вниз, своё
+    # движение она уже прошла, и подбирать её под шорт поздно.
+    down_max_gap_down_pct: float = 0.0
 
 
 def now_et() -> datetime:
@@ -2786,12 +2787,14 @@ def options_contracts_batch(
     symbols: tuple[str, ...],
     exp_gte: str,
     exp_lte: str,
+    attempt: int = 0,
 ) -> tuple[dict[str, tuple[int, int]], set[str], str]:
     """Одна пачка контрактов. → ({ТИКЕР: (call, put)}, негодные тикеры, статус).
 
     Статус: "ok" — ответ получен, "invalid" — 422 по негодным тикерам,
-    "error" — сеть, лимит или отказ доступа. Пустой результат при "error"
-    НЕЛЬЗЯ понимать как «ни у кого нет опционов»."""
+    "retry" — временный сбой, пачку стоит повторить, "error" — окончательный
+    отказ. Пустой результат при "error" НЕЛЬЗЯ понимать как «ни у кого нет
+    опционов»."""
     counts: dict[str, tuple[int, int]] = {}
     page_token = None
     for _ in range(MAX_BARS_PAGES):
@@ -2821,6 +2824,18 @@ def options_contracts_batch(
             except Exception:
                 payload = None
             return {}, invalid_underlying_symbols(payload, response.text), "invalid"
+        if response.status_code in {429} or response.status_code >= 500:
+            # Перегрузка или сбой на стороне Alpaca — это ровно тот случай,
+            # когда повтор помогает. Без него одна пачка уносила 40 бумаг.
+            if attempt + 1 < OPT_BATCH_ATTEMPTS:
+                try:
+                    delay = max(0.4, min(float(response.headers.get("Retry-After", "")), 4.0))
+                except (TypeError, ValueError):
+                    delay = min(0.4 * (2 ** attempt), 2.0)
+                time.sleep(delay)
+                return {}, set(), "retry"
+            LOGGER.info("Alpaca options contracts HTTP %s после повторов", response.status_code)
+            return {}, set(), "error"
         if response.status_code != 200:
             LOGGER.info("Alpaca options contracts HTTP %s", response.status_code)
             return {}, set(), "error"
@@ -2828,6 +2843,12 @@ def options_contracts_batch(
             payload = response.json()
         except Exception as exc:
             LOGGER.info("Alpaca options contracts bad JSON: %s", exc)
+            return {}, set(), "error"
+        # Ответ обязан быть объектом. Если придёт массив или null, payload.get
+        # ниже бросил бы AttributeError, который не поймал бы никто до самого
+        # цикла скана, — и вся пачка скана легла бы с ошибкой.
+        if not isinstance(payload, dict):
+            LOGGER.info("Alpaca options contracts: ответ не объект (%s)", type(payload).__name__)
             return {}, set(), "error"
 
         for contract in payload.get("option_contracts") or []:
@@ -2881,32 +2902,49 @@ def optionable_symbols(symbols: tuple[str, ...], day: str) -> tuple[dict[str, tu
 
     found: dict[str, tuple[int, int]] = {}
     failed_batches = 0
+    checked_ok = 0
     for batch in chunks(list(clean), OPT_BATCH_SYMBOLS):
-        pending: list[list[str]] = [list(batch)]
+        # Очередь работ: (группа тикеров, номер попытки). Делим пачку, когда
+        # иначе её не разобрать, и ВСЕГДА считаем то, что потеряли.
+        pending: list[tuple[list[str], int]] = [(list(batch), 0)]
         guard = 0
-        while pending and guard < 64:
+        while pending:
+            if guard >= 64:
+                # Защита от зацикливания. Всё, что осталось в очереди, —
+                # непроверенное, и молчать об этом нельзя.
+                failed_batches += sum(1 for group, _ in pending if group)
+                break
             guard += 1
-            group = pending.pop()
+            group, attempt = pending.pop()
             if not group:
                 continue
-            counts, bad, status = options_contracts_batch(tuple(group), exp_gte, exp_lte)
+            counts, bad, status = options_contracts_batch(tuple(group), exp_gte, exp_lte, attempt)
             if status == "ok":
+                checked_ok += 1
                 for symbol, pair in counts.items():
                     calls, puts = found.get(symbol, (0, 0))
                     found[symbol] = (calls + pair[0], puts + pair[1])
                 continue
+            if status == "retry":
+                pending.append((group, attempt + 1))
+                continue
             if status == "invalid":
-                if bad:
-                    pending.append([item for item in group if item not in bad])
+                rest = [item for item in group if item not in bad]
+                if bad and len(rest) < len(group):
+                    pending.append((rest, 0))
                 elif len(group) > 1:
-                    # 422 без разбора списка: ищем негодный тикер делением пополам,
-                    # чтобы из-за одного не потерять остальные тридцать девять.
+                    # 422 без разбора списка — или названы тикеры, которых в
+                    # группе нет. Ищем негодный делением пополам, чтобы из-за
+                    # одного не потерять остальные тридцать девять.
                     middle = len(group) // 2
-                    pending.append(group[:middle])
-                    pending.append(group[middle:])
+                    pending.append((group[:middle], 0))
+                    pending.append((group[middle:], 0))
+                else:
+                    # Группа из одного негодного тикера — это не потеря данных.
+                    LOGGER.info("Опционы: тикер отвергнут Alpaca: %s", group[0])
                 continue
             failed_batches += 1
-    return found, failed_batches
+    return found, failed_batches, checked_ok
 
 
 @st.cache_data(ttl=OPT_CONTRACTS_CACHE_TTL_SEC, show_spinner=False)
@@ -2947,6 +2985,9 @@ def shortable_universe(day: str) -> tuple[frozenset[str], frozenset[str]]:
             LOGGER.info("Alpaca assets failed on %s: %s", base_url, exc)
             payload = None
     if not isinstance(payload, list) or not payload:
+        # Молчать нельзя: пустой справочник кэшируется на час, и колонка «Шорт»
+        # просто исчезла бы из выдачи без единого слова на экране.
+        remember_error("Шортабельность: справочник Alpaca не ответил, колонка «Шорт» будет пустой.")
         return frozenset(), frozenset()
     shortable: set[str] = set()
     easy: set[str] = set()
@@ -2989,7 +3030,7 @@ def filter_rows_with_options(
             status_box.caption(
                 "Опционы не проверены: нет ALPACA_KEY / ALPACA_SECRET. Показаны все найденные бумаги."
             )
-        return rows
+        return [dict(row, **{"_opt_unchecked": True, "Опционы": "не проверено"}) for row in rows]
 
     symbols = tuple(dict.fromkeys(
         normalize_ticker_id(row.get("Тикер"))
@@ -3000,14 +3041,26 @@ def filter_rows_with_options(
         status_box.caption(f"Проверяю опционы: {len(symbols)} бумаг пачками по {OPT_BATCH_SYMBOLS}...")
 
     day = now_et().date().isoformat()
-    counts, failed_batches = optionable_symbols(symbols, day)
+    counts, failed_batches, checked_ok = optionable_symbols(symbols, day)
+    if failed_batches:
+        # Кэш на час запомнил бы НЕПОЛНЫЙ ответ, и следующий скан повторил бы
+        # ту же потерю молча, без единого запроса. Сбрасываем запись, чтобы
+        # следующая попытка пошла в сеть заново.
+        try:
+            optionable_symbols.clear()
+        except Exception:
+            pass
     shortable, easy_to_borrow = shortable_universe(day)
-    if not counts:
+    # Пустой ответ и сломанный источник — РАЗНЫЕ вещи. Если хотя бы одна пачка
+    # прошла успешно, пустота означает «ни у кого из них нет опционов», и
+    # выдачу надо честно обнулить. Выключать фильтр можно только когда не
+    # ответило вообще ничего.
+    if not counts and checked_ok == 0:
         message = "Источник опционов не ответил. Показаны все найденные бумаги без проверки опционов."
         remember_error(message)
         if status_box is not None:
             status_box.caption(message)
-        return rows
+        return [dict(row, **{"_opt_unchecked": True, "Опционы": "не проверено"}) for row in rows]
 
     kept: list[dict[str, Any]] = []
     for row in rows:
@@ -3100,6 +3153,8 @@ def fetch_alpaca_minute_bars_batch(
 class TwoDownSetup:
     prev_drop_pct: float        # вчерашняя свеча: закрытие против своего открытия
     today_drop_pct: float       # сегодня против вчерашнего закрытия
+    open_gap_pct: float         # открытие против вчерашнего закрытия (≤ 0)
+    intraday_pct: float         # текущая цена против сегодняшнего открытия (< 0)
     volume_vs_prev: float       # сегодняшний объём к вчерашнему
     close_position_pct: float   # где цена внутри сегодняшнего диапазона: 0 = у лоя
     volume_mult: float          # объём к средней, только для сортировки
@@ -3218,6 +3273,25 @@ def travel_from_prev_close(df: pd.DataFrame) -> float:
     return max(abs(high - prev_close), abs(low - prev_close)) / prev_close * 100
 
 
+def _bar_date_label(df: pd.DataFrame) -> str:
+    """Дата последней свечи словами. «сегодня», «вчера» или число.
+
+    Нужна потому, что весь режим говорит «на момент поиска», а фильтр свежести
+    (ползунок «Свежесть последней свечи») по умолчанию пропускает бар до пяти
+    дней давности. Без даты в строке пятничные цифры в выходные выглядели бы
+    как сегодняшние."""
+    try:
+        bar = df.index[-1].date()
+    except Exception:
+        return "—"
+    age = (now_et().date() - bar).days
+    if age <= 0:
+        return "сегодня"
+    if age == 1:
+        return "вчера"
+    return bar.strftime("%d.%m")
+
+
 def build_two_down_setup(df: pd.DataFrame, cfg: ScanConfig) -> TwoDownSetup | None:
     """Вчера свеча закрылась вниз, сегодня бумага внизу. Плюс объём, если нужен.
 
@@ -3225,10 +3299,13 @@ def build_two_down_setup(df: pd.DataFrame, cfg: ScanConfig) -> TwoDownSetup | No
     то есть красная свеча. Позавчерашний день в условии не участвует — бумага
     могла открыться гэпом вверх и весь день сливаться, это всё равно «пошла вниз».
 
-    СЕГОДНЯ главное — текущая цена ниже вчерашнего закрытия. Открытие при этом
-    может быть и чуть выше вчерашнего закрытия: бумага поднялась на копейку и
-    снова поехала вниз — это то же самое падение. Отсекается только настоящий
-    прыжок вверх, по допуску cfg.down_open_max_gap_pct. Последняя свеча ещё не
+    СЕГОДНЯ три требования:
+      · открытие НЕ ВЫШЕ вчерашнего закрытия — гэп вверх не допускается вовсе;
+      · открытие не ниже ВЧЕРАШНЕГО ЛОЯ: при ползунке 0 гэпа вниз нет совсем,
+        открытие обязано попасть внутрь вчерашней свечи. Ползунок опускает
+        нижнюю границу на cfg.down_max_gap_down_pct процентов от вчерашнего лоя;
+      · текущая цена ниже и вчерашнего закрытия, И сегодняшнего открытия —
+        падение продолжается прямо сейчас, а не отрастает обратно. Последняя свеча ещё не
     закрыта, поэтому это ровно «на момент поиска»; под закрытие рынка это и
     есть закрытие дня.
 
@@ -3241,6 +3318,18 @@ def build_two_down_setup(df: pd.DataFrame, cfg: ScanConfig) -> TwoDownSetup | No
     if df is None or len(df) < 2:
         return None
 
+    # «Вчера» — предыдущая СЕССИЯ, а не просто предыдущая доступная свеча.
+    # Позиционного iloc[-2] для этого мало: если в серии дырка (бумага не
+    # торговалась, фид потерял день), в «вчера» молча попадёт свеча недельной
+    # давности, и весь режим будет сравнивать не то, что обещает. Четыре
+    # календарных дня покрывают выходные и праздничный понедельник.
+    try:
+        session_gap = (df.index[-1].date() - df.index[-2].date()).days
+    except Exception:
+        session_gap = 1
+    if session_gap > 4:
+        return None
+
     latest = df.iloc[-1]
     prev = df.iloc[-2]
     close = float(latest["Close"])
@@ -3250,8 +3339,9 @@ def build_two_down_setup(df: pd.DataFrame, cfg: ScanConfig) -> TwoDownSetup | No
     latest_volume = float(latest["Volume"])
     prev_open = float(prev["Open"])
     prev_close = float(prev["Close"])
+    prev_low = float(prev["Low"])
     prev_volume = float(prev["Volume"])
-    if min(close, latest_open, latest_low, prev_open, prev_close) <= 0:
+    if min(close, latest_open, latest_low, prev_open, prev_close, prev_low) <= 0:
         return None
     if latest_high < latest_low or latest_volume <= 0:
         return None
@@ -3262,12 +3352,24 @@ def build_two_down_setup(df: pd.DataFrame, cfg: ScanConfig) -> TwoDownSetup | No
     today_drop_pct = (close - prev_close) / prev_close * 100
     if prev_drop_pct >= 0 or today_drop_pct >= 0:
         return None
-    # ОТКРЫТИЕ. Главное — падение, а не открытие, поэтому небольшой гэп вверх
-    # разрешён: бумага могла чуть подняться над вчерашним закрытием и снова
-    # поехать вниз. Отсекается только настоящий прыжок вверх — у такой бумаги
-    # другой характер, это разворот гэпа, а не продолжение слива.
+    # ОТКРЫТИЕ. Гэп ВВЕРХ запрещён совсем: бумага должна открыться не выше
+    # вчерашнего закрытия, то есть внутри вчерашней свечи или с гэпом вниз.
     open_gap_pct = (latest_open - prev_close) / prev_close * 100
-    if open_gap_pct > abs(float(cfg.down_open_max_gap_pct)):
+    if open_gap_pct > 0:
+        return None
+    # Гэп ВНИЗ: открытие не ниже ВЧЕРАШНЕГО ЛОЯ. При ползунке 0 это строго так —
+    # открытие внутри вчерашней свечи. Ползунок опускает нижнюю границу на
+    # заданный процент от вчерашнего лоя.
+    # Границу делаем ВКЛЮЧАЮЩЕЙ: вычитание в плавающей точке даёт
+    # −5.000000000000003 вместо −5.0 и отсекало бы то, что обязано проходить.
+    gap_floor = prev_low * (1.0 - abs(float(cfg.down_max_gap_down_pct)) / 100.0)
+    if latest_open < gap_floor - 1e-9:
+        return None
+    # И ВНУТРИ ДНЯ падение продолжается: текущая цена ниже сегодняшнего открытия.
+    # Без этого проходила бы бумага, которая открылась гэпом вниз и весь день
+    # отрастала обратно, — а это уже отскок, а не слив.
+    intraday_pct = (close - latest_open) / latest_open * 100
+    if intraday_pct >= 0:
         return None
 
     volume_vs_prev = (latest_volume / prev_volume) if prev_volume > 0 else 0.0
@@ -3293,6 +3395,8 @@ def build_two_down_setup(df: pd.DataFrame, cfg: ScanConfig) -> TwoDownSetup | No
     return TwoDownSetup(
         prev_drop_pct=prev_drop_pct,
         today_drop_pct=today_drop_pct,
+        open_gap_pct=open_gap_pct,
+        intraday_pct=intraday_pct,
         volume_vs_prev=volume_vs_prev,
         close_position_pct=close_position_pct,
         volume_mult=volume_mult,
@@ -3679,18 +3783,20 @@ def score_two_down(setup: TwoDownSetup, cfg: ScanConfig) -> int:
     """Балл = насколько убедительно бумага идёт вниз.
 
     Ничего не фильтрует, только сортирует: решение всё равно по графику.
-    Три слагаемых — глубина вчерашней красной свечи, глубина сегодняшнего
-    падения и объём относительно вчерашнего.
+    Четыре слагаемых — глубина вчерашней красной свечи, глубина сегодняшнего
+    падения от вчерашнего закрытия, падение от сегодняшнего открытия и объём
+    относительно вчерашнего.
 
     Положения закрытия внутри дня здесь СОЗНАТЕЛЬНО нет, хотя оно и выглядит
     убедительно. Замер 27.10.2026 на 19 680 наблюдениях: «закрылся у лоя дня»
     даёт падение на 3% в 19.3% случаев против фона 18.9% — то есть не даёт
     ничего. В колонке «Закрытие дня» цифра осталась, для глаз она полезна,
     но тянуть на себе сортировку ей нечем."""
-    prev_score = min(25.0, abs(setup.prev_drop_pct) * 3.5)
-    today_score = min(45.0, abs(setup.today_drop_pct) * 5.0)
-    volume_score = min(30.0, max(0.0, setup.volume_vs_prev - 1.0) * 30.0)
-    return int(round(min(100.0, prev_score + today_score + volume_score)))
+    prev_score = min(20.0, abs(setup.prev_drop_pct) * 3.0)
+    today_score = min(35.0, abs(setup.today_drop_pct) * 4.0)
+    intraday_score = min(25.0, abs(setup.intraday_pct) * 4.0)
+    volume_score = min(20.0, max(0.0, setup.volume_vs_prev - 1.0) * 20.0)
+    return int(round(min(100.0, prev_score + today_score + intraday_score + volume_score)))
 
 
 def detect_signal(
@@ -3837,11 +3943,14 @@ def detect_signal(
             "Биржа": ticker_info.get("exchange", ""),
             "Сигнал": (
                 f"{SIGNAL_LABELS[SIG_DOWN_OPT]} · вчерашняя свеча {setup.prev_drop_pct:+.1f}%"
-                f" · открытие {gap_pct:+.1f}% · сегодня {setup.today_drop_pct:+.1f}%"
+                f" · открытие {setup.open_gap_pct:+.1f}% · сегодня {setup.today_drop_pct:+.1f}%"
+                f" · от открытия {setup.intraday_pct:+.1f}%"
             ),
             "Цена": round(price, 4),
+            "Дата свечи": _bar_date_label(df),
             "Выход %": f"{setup.today_drop_pct:+.1f}%",
             "Вчера %": f"{setup.prev_drop_pct:+.1f}%",
+            "От открытия %": f"{setup.intraday_pct:+.1f}%",
             "Объём к вчера": f"×{setup.volume_vs_prev:.2f}" if setup.volume_vs_prev else "—",
             "Гэп сегодня": f"{gap_pct:+.1f}%",
             "Объём ×": round(setup.volume_mult, 2),
@@ -3984,7 +4093,15 @@ def telegram_signal_message(row: dict[str, Any]) -> str:
 
 
 def result_key(row: dict[str, Any]) -> tuple[str, str, str]:
-    return str(row.get("_scanner", "")), str(row.get("Тикер", "")), str(row.get("Сигнал", ""))
+    """Ключ склейки результатов между сканами.
+
+    Третий элемент — КОД сигнала, а не человеческая подпись. В подписи живут
+    проценты («вчера −2.3% · сегодня −3.1%»), они меняются от скана к скану, и
+    на подписи один и тот же тикер добавлялся в выдачу повторно при каждом
+    прогоне. На старых строках из session_state кода может не быть — тогда
+    откатываемся на подпись, чтобы ключ остался определённым."""
+    code = str(row.get("_sig") or row.get("Сигнал", ""))
+    return str(row.get("_scanner", "")), str(row.get("Тикер", "")), code
 
 
 def market_session_key(current: datetime | None = None) -> str:
@@ -4318,6 +4435,32 @@ def display_column_config() -> dict[str, Any]:
         "Объём": st.column_config.NumberColumn("Объём", width="medium"),
         "Долларовый объём": st.column_config.NumberColumn("Долларовый объём", width="medium"),
         "Капитализация": st.column_config.NumberColumn("Капитализация", width="medium"),
+        "Дата свечи": st.column_config.TextColumn(
+            "Свеча",
+            width="small",
+            help="Какой день показан. «сегодня» — данные живые; дата значит, что бар старый "
+                 "и цифры не «на момент поиска». Зависит от ползунка свежести.",
+        ),
+        "Вчера %": st.column_config.TextColumn(
+            "Вчера %",
+            width="small",
+            help="Вчерашняя свеча: закрытие против своего открытия. Всегда отрицательна: условие режима.",
+        ),
+        "Гэп сегодня": st.column_config.TextColumn(
+            "Гэп открытия",
+            width="small",
+            help="Сегодняшнее открытие против вчерашнего закрытия. Положительным быть не может.",
+        ),
+        "Закрытие дня": st.column_config.TextColumn(
+            "Где в дне",
+            width="small",
+            help="Где текущая цена внутри сегодняшнего диапазона: 0% — у минимума дня, 100% — у максимума.",
+        ),
+        "От открытия %": st.column_config.TextColumn(
+            "От открытия %",
+            width="small",
+            help="Текущая цена против сегодняшнего открытия. Всегда отрицательна: условие режима.",
+        ),
         "Объём к вчера": st.column_config.TextColumn(
             "Объём к вчера",
             width="small",
@@ -4376,7 +4519,9 @@ def display_frame(rows: list[dict[str, Any]], include_chart: bool = True) -> pd.
         frame["Капитализация"] = pd.to_numeric(frame["Капитализация"], errors="coerce").astype("Int64")
     if not include_chart and "График" in display_cols:
         display_cols = [col for col in display_cols if col != "График"]
-    option_cols = [col for col in ("Объём к вчера", "Шорт", "Опционы") if col in frame.columns]
+    option_cols = [col for col in ("Дата свечи", "Вчера %", "Гэп сегодня", "От открытия %",
+                                   "Закрытие дня", "Объём к вчера", "Шорт", "Опционы")
+                   if col in frame.columns]
     if option_cols:
         display_cols = [col for col in display_cols if col not in option_cols]
         insert_at = display_cols.index("Время") if "Время" in display_cols else len(display_cols)
@@ -4863,6 +5008,7 @@ def ai_context_lines_from_rows(
         parts.extend(ai_intraday_facts(row))
         for label in (
             "Вчера %",
+            "От открытия %",
             "Объём к вчера",
             "Ход от вчера",
             "Закрытие дня",
@@ -9134,7 +9280,7 @@ with st.sidebar:
     travel_filter_enabled = defaults.travel_filter_enabled
     max_travel_pct = defaults.max_travel_pct
     down_volume_mult = defaults.down_volume_mult
-    down_open_max_gap_pct = defaults.down_open_max_gap_pct
+    down_max_gap_down_pct = defaults.down_max_gap_down_pct
 
     if combo_active:
         st.markdown('<div class="desk-section-title">Взрыв из базы</div>', unsafe_allow_html=True)
@@ -9221,22 +9367,24 @@ with st.sidebar:
     if down_opt_active:
         st.markdown('<div class="desk-section-title">Два дня вниз</div>', unsafe_allow_html=True)
         st.caption(
-            "Главное условие — падение: вчерашняя свеча красная, а сейчас цена ниже "
-            "вчерашнего закрытия. Глубину смотри глазами по графику."
+            "Что ищем: вчера красная свеча, сегодня открытие внутри вчерашней свечи — не "
+            "выше её закрытия и не ниже её минимума, — а текущая цена ниже и вчерашнего "
+            "закрытия, и сегодняшнего открытия. Порога на глубину падения нет, глубину "
+            "смотри глазами по графику. Два ползунка ниже лишь расширяют или сужают сам отбор."
         )
-        down_open_max_gap_pct = st.slider(
-            "Допустимый гэп вверх на открытии, %",
+        down_max_gap_down_pct = st.slider(
+            "Разрешённый гэп ВНИЗ ниже вчерашнего лоя, %",
             0.0,
-            10.0,
-            defaults.down_open_max_gap_pct,
+            5.0,
+            defaults.down_max_gap_down_pct,
             0.25,
             help=(
-                "Насколько выше вчерашнего закрытия бумаге разрешено открыться. Главное "
-                "условие — падение, поэтому небольшой подъём над вчерашним закрытием не "
-                "мешает. Замер 29.10: при допуске 0 терялись лучшие бумаги дня — BOTJ "
-                "открылась +0.31% и к моменту поиска стояла −18.5%, CD открылась +0.44% "
-                "и стояла −17.6%. А кто открывался выше +2%, почти не падал. 0 — "
-                "запретить гэп вверх совсем."
+                "0 — гэпа вниз нет совсем, это значение по умолчанию: бумага обязана "
+                "открыться ВНУТРИ вчерашней свечи, не ниже её минимума. Вместе с запретом "
+                "гэпа вверх открытие зажато между вчерашним лоем и вчерашним закрытием. "
+                "Поставишь 2% — разрешишь открытие до двух процентов ниже вчерашнего лоя. "
+                "Чем больше значение, тем глубже уже упавшие бумаги попадают в выдачу, "
+                "а подбирать их под шорт поздно."
             ),
         )
         down_volume_mult = st.slider(
@@ -9353,7 +9501,7 @@ cfg = ScanConfig(
     travel_filter_enabled=travel_filter_enabled,
     max_travel_pct=float(max_travel_pct),
     down_volume_mult=float(down_volume_mult),
-    down_open_max_gap_pct=float(down_open_max_gap_pct),
+    down_max_gap_down_pct=float(down_max_gap_down_pct),
 )
 
 active_result_signature = (
@@ -9436,10 +9584,12 @@ elif cfg.scanner_mode == SCANNER_DOWN_OPT:
             chip("За прогон", format_int_cell(max_tickers)),
             chip("Цена", f"${min_price:g}-${max_price:g}"),
             chip("Вчера", "красная свеча", "red"),
-            chip("Сейчас", "ниже вчерашнего закрытия", "red"),
+            chip("Открытие", "не выше вчерашнего закрытия", "red"),
+            chip("Сейчас", "ниже вчерашнего закрытия и ниже открытия", "red"),
             chip(
-                "Гэп вверх с утра",
-                "запрещён" if cfg.down_open_max_gap_pct <= 0 else f"до +{cfg.down_open_max_gap_pct:g}%",
+                "Гэп вниз",
+                "запрещён · внутри вчерашней свечи" if cfg.down_max_gap_down_pct <= 0
+                else f"до −{cfg.down_max_gap_down_pct:g}% ниже вчерашнего лоя",
             ),
             chip(
                 "Объём к вчера",
@@ -9662,8 +9812,19 @@ if (start_scan and not auto_running) or (auto_scan and should_auto_run and not a
             if cfg.scanner_mode == SCANNER_DOWN_OPT:
                 hits = filter_rows_with_options(hits, cfg, status_box)
                 if send_alerts:
+                    # Строки с _opt_unchecked прошли НЕ проверку, а её отсутствие:
+                    # ключей нет или источник опционов молчал. В телефон такие
+                    # отправлять нельзя — по ним может не быть чем торговать.
+                    unchecked = sum(1 for row in hits if row.get("_opt_unchecked"))
                     for row in hits:
+                        if row.get("_opt_unchecked"):
+                            continue
                         notify_signal(row)
+                    if unchecked:
+                        st.warning(
+                            f"Telegram: {unchecked} бумаг не отправлено — по ним не удалось "
+                            "проверить опционы. В таблице они есть с пометкой «не проверено»."
+                        )
         except Exception as exc:
             LOGGER.exception("Market scan batch failed")
             hits = []
